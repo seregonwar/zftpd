@@ -53,3 +53,11 @@ dkms.conf
 
 # debug information files
 *.dwo
+.DS_Store
+/external/ps4-payload-sdk
+/external/ps5-payload-sdk
+/external/ftpsrv-master
+/build
+/external/ps3libraries-master
+/external/ps3toolchain-master
+/external/PSL1GHT-master
