@@ -1,5 +1,5 @@
 # Multi-Platform FTP Server - Makefile
-# Supports: Linux, PS3, PS4, PS5
+# Supports: Linux, macOS, PS3, PS4, PS5
 # Standards: MISRA C:2012, CERT C, ISO C11
 
 # Project information
@@ -10,7 +10,7 @@ VERSION := 1.0.0
 HOST_OS := $(shell uname -s)
 
 # Target platform (default: linux)
-# Valid values: linux, ps3, ps4, ps5
+# Valid values: linux, macos, ps3, ps4, ps5
 TARGET ?= linux
 
 # Build configuration
@@ -81,6 +81,13 @@ ifeq ($(TARGET),linux)
     else
         PLATFORM_LDFLAGS :=
     endif
+endif
+
+ifeq ($(TARGET),macos)
+    CC := clang
+    PLATFORM_DEFS := -DPLATFORM_MACOS -D_DARWIN_C_SOURCE
+    PLATFORM_LIBS := -lpthread
+    PLATFORM_LDFLAGS :=
 endif
 
 # Default to GCC if no target matched
@@ -169,6 +176,10 @@ BIN_DIR := $(BUILD_DIR)
 
 OUTPUT_ELF := $(BIN_DIR)/$(PROJECT).elf
 OUTPUT_BIN := $(BIN_DIR)/$(PROJECT).bin
+
+ifeq ($(TARGET),macos)
+    OUTPUT_ELF := $(BIN_DIR)/$(PROJECT)
+endif
 
 OBJCOPY ?= objcopy
 
@@ -322,13 +333,14 @@ help:
 	@echo "  help        - Display this help message"
 	@echo ""
 	@echo "Variables:"
-	@echo "  TARGET      - Target platform (linux, ps3, ps4, ps5)"
+	@echo "  TARGET      - Target platform (linux, macos, ps3, ps4, ps5)"
 	@echo "                Default: linux"
 	@echo "  BUILD_TYPE  - Build configuration (debug, release)"
 	@echo "                Default: release"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make                          # Build for Linux (release)"
+	@echo "  make TARGET=macos             # Build for macOS"
 	@echo "  make TARGET=ps5               # Build for PS5"
 	@echo "  make BUILD_TYPE=debug         # Build debug version"
 	@echo "  make TARGET=ps4 BUILD_TYPE=debug  # PS4 debug build"
