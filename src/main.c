@@ -1,15 +1,37 @@
+/*
+MIT License
+
+Copyright (c) 2026 Seregon
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+
 /**
  * @file main.c
  * @brief FTP server entry point (multi-platform)
  * 
  * @author SeregonWar
  * @version 1.0.0
- * @date 2025-02-13
+ * @date 2026-02-13
  * 
  * PLATFORMS: Linux, PS3, PS4, PS5
  * 
- * SAFETY CLASSIFICATION: Embedded systems, production-grade
- * STANDARDS: MISRA C:2012, CERT C, ISO C11
  */
 
 #include "ftp_server.h"
@@ -25,12 +47,62 @@
 #include <getopt.h>
 #include <errno.h>
 
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+#include <stdint.h>
+#include <sys/sysctl.h>
+#include <sys/syscall.h>
+#endif
+
 /*===========================================================================*
  * GLOBAL SERVER CONTEXT
  *===========================================================================*/
 
 static ftp_server_context_t g_server_ctx;
 static volatile sig_atomic_t g_shutdown_requested = 0;
+
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+static pid_t find_pid_by_name(const char *name)
+{
+    int mib[4] = {1, 14, 8, 0};
+    pid_t mypid = getpid();
+    pid_t pid = -1;
+    size_t buf_size = 0;
+    uint8_t *buf = NULL;
+
+    if (sysctl(mib, 4, NULL, &buf_size, NULL, 0) != 0) {
+        return -1;
+    }
+
+    buf = (uint8_t *)malloc(buf_size);
+    if (buf == NULL) {
+        return -1;
+    }
+
+    if (sysctl(mib, 4, buf, &buf_size, NULL, 0) != 0) {
+        free(buf);
+        return -1;
+    }
+
+    for (uint8_t *ptr = buf; ptr < (buf + buf_size);) {
+        int ki_structsize = 0;
+        pid_t ki_pid = -1;
+        memcpy(&ki_structsize, ptr, sizeof(ki_structsize));
+        memcpy(&ki_pid, &ptr[72], sizeof(ki_pid));
+        char *ki_tdname = (char *)&ptr[447];
+
+        if (ki_structsize <= 0) {
+            break;
+        }
+        ptr += ki_structsize;
+        if ((ki_pid != mypid) && (strcmp(name, ki_tdname) == 0)) {
+            pid = ki_pid;
+        }
+    }
+
+    free(buf);
+    return pid;
+}
+#endif
 
 /*===========================================================================*
  * SIGNAL HANDLERS
@@ -70,6 +142,15 @@ int main(void)
     printf("[PS4 FTP] Initializing...\n");
 
     (void)pal_notification_init();
+
+    (void)syscall(SYS_thr_set_name, -1, "zftpd.elf");
+    signal(SIGPIPE, SIG_IGN);
+
+    if (find_pid_by_name("zftpd.elf") > 0) {
+        pal_notification_send("zftpd: payload alredy loaded");
+        pal_notification_shutdown();
+        return 0;
+    }
     
     const char *bind_ip = "0.0.0.0";
     char display_ip[INET_ADDRSTRLEN];
@@ -78,9 +159,6 @@ int main(void)
     }
 
     const char *root_path = "/";
-    if (pal_path_is_directory("/mnt/sandbox/pfsmnt") == 1) {
-        root_path = "/mnt/sandbox/pfsmnt";
-    }
     
     /* Initialize server */
     ftp_error_t err = ftp_server_init(&g_server_ctx, bind_ip,
@@ -135,6 +213,51 @@ int main(void)
 
 #elif defined(PLATFORM_PS5)
 
+#include <ps5/kernel.h>
+
+/**
+ * @brief Escalate privileges and spoof AuthID to bypass PPR
+ */
+static void ps5_jailbreak(void)
+{
+    pid_t pid = getpid();
+    
+    printf("[PS5] Escalating privileges...\n");
+    
+    /* 1. Root User/Group */
+    if (kernel_set_ucred_uid(pid, 0) != 0) printf("[PS5] Warning: Failed to set UID=0\n");
+    if (kernel_set_ucred_ruid(pid, 0) != 0) printf("[PS5] Warning: Failed to set RUID=0\n");
+    if (kernel_set_ucred_svuid(pid, 0) != 0) printf("[PS5] Warning: Failed to set SVUID=0\n");
+    if (kernel_set_ucred_rgid(pid, 0) != 0) printf("[PS5] Warning: Failed to set RGID=0\n");
+    if (kernel_set_ucred_svgid(pid, 0) != 0) printf("[PS5] Warning: Failed to set SVGID=0\n");
+
+    /* 2. AuthID Spoofing (System App) to bypass PPR checks (0x80410131) */
+    /* 0x4801000000000013 = Needed for character devices (sflash0) and widespread access */
+    uint64_t auth_id = 0x4801000000000013ULL;
+    if (kernel_set_ucred_authid(pid, auth_id) != 0) {
+        printf("[PS5] Error: Failed to set AuthID to 0x%llx\n", (unsigned long long)auth_id);
+    } else {
+        printf("[PS5] AuthID set to 0x%llx (sflash0/char-dev access)\n", (unsigned long long)auth_id);
+    }
+
+    /* 3. Capabilities (Allow all) */
+    uint8_t caps[16];
+    memset(caps, 0xFF, sizeof(caps));
+    if (kernel_set_ucred_caps(pid, caps) != 0) {
+        printf("[PS5] Error: Failed to set capabilities\n");
+    }
+
+    /* 4. Jailbreak (Break out of sandbox) */
+    intptr_t rootvnode = kernel_get_root_vnode();
+    if (rootvnode) {
+        if (kernel_set_proc_rootdir(pid, rootvnode) != 0) printf("[PS5] Warning: Failed to set rootdir\n");
+        if (kernel_set_proc_jaildir(pid, rootvnode) != 0) printf("[PS5] Warning: Failed to set jaildir\n");
+        printf("[PS5] Sandbox escaped (rootdir/jaildir set to rootvnode)\n");
+    } else {
+        printf("[PS5] Error: Failed to get rootvnode\n");
+    }
+}
+
 /**
  * @brief PlayStation 5 entry point
  */
@@ -142,10 +265,21 @@ int main(void)
 {
     printf("[PS5 FTP] Version " RELEASE_VERSION "\n");
     printf("[PS5 FTP] Initializing...\n");
+
+    (void)syscall(SYS_thr_set_name, -1, "zftpd.elf");
+    signal(SIGPIPE, SIG_IGN);
+    (void)pal_notification_init();
+
+    if (find_pid_by_name("zftpd.elf") > 0) {
+        pal_notification_send("zftpd: payload alredy loaded");
+        pal_notification_shutdown();
+        return 0;
+    }
+    
+    /* Apply kernel patches/jailbreak immediately */
+    ps5_jailbreak();
     
     install_signal_handlers();
-
-    (void)pal_notification_init();
     
     /* Get PS5 IP address (simplified) */
     char ip_address[INET_ADDRSTRLEN];
@@ -175,7 +309,10 @@ int main(void)
 
     {
         char notify_msg[128];
-        (void)snprintf(notify_msg, sizeof(notify_msg), "zftpd: listening on %s:%u", ip_address,
+        (void)snprintf(notify_msg, sizeof(notify_msg), "zftpd " RELEASE_VERSION " (PS5) started");
+        pal_notification_send(notify_msg);
+
+        (void)snprintf(notify_msg, sizeof(notify_msg), "FTP: %s:%u", ip_address,
                        (unsigned)FTP_DEFAULT_PORT);
         pal_notification_send(notify_msg);
     }

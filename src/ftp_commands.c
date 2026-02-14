@@ -1,21 +1,44 @@
+/*
+MIT License
+
+Copyright (c) 2026 Seregon
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+
 /**
  * @file ftp_commands.c
  * @brief FTP command handlers implementation
  * 
  * @author SeregonWar
  * @version 1.0.0
- * @date 2025-02-13
+ * @date 2026-02-13
  * 
  * PROTOCOL: RFC 959 (File Transfer Protocol)
  * EXTENSIONS: RFC 3659 (MLST, MLSD, SIZE, MDTM)
  * 
- * SAFETY CLASSIFICATION: Embedded systems, production-grade
- * STANDARDS: MISRA C:2012, CERT C, ISO C11
  */
 
 #include "ftp_commands.h"
 #include "ftp_session.h"
 #include "ftp_path.h"
+#include "ftp_log.h"
 #include "pal_fileio.h"
 #include "pal_network.h"
 #include "pal_filesystem.h"
@@ -28,6 +51,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 /*===========================================================================*
  * AUTHENTICATION AND CONTROL
@@ -45,13 +69,24 @@ ftp_error_t cmd_USER(ftp_session_t *session, const char *args)
     /* This implementation uses anonymous authentication only */
     if ((strcmp(args, "anonymous") == 0) || (strcmp(args, "ftp") == 0)) {
         /* Anonymous user accepted */
+        session->user_ok = 1U;
         return ftp_session_send_reply(session, FTP_REPLY_331_NEED_PASSWORD,
                                        "Any password will work.");
     }
     
     /* Other usernames not supported */
+    session->user_ok = 0U;
+    if (session->auth_attempts < 255U) {
+        session->auth_attempts++;
+    }
+    if (session->auth_attempts >= (uint8_t)FTP_MAX_AUTH_ATTEMPTS) {
+        (void)ftp_session_send_reply(session, FTP_REPLY_530_NOT_LOGGED_IN,
+                                     "Too many authentication attempts.");
+        return FTP_ERR_AUTH_FAILED;
+    }
+    sleep(FTP_AUTH_DELAY);
     return ftp_session_send_reply(session, FTP_REPLY_530_NOT_LOGGED_IN,
-                                   "Only anonymous login supported.");
+                                  "Only anonymous login supported.");
 }
 
 /**
@@ -65,8 +100,22 @@ ftp_error_t cmd_PASS(ftp_session_t *session, const char *args)
         return FTP_ERR_INVALID_PARAM;
     }
     
-    /* Accept any password for anonymous */
+    if (session->user_ok == 0U) {
+        if (session->auth_attempts < 255U) {
+            session->auth_attempts++;
+        }
+        if (session->auth_attempts >= (uint8_t)FTP_MAX_AUTH_ATTEMPTS) {
+            (void)ftp_session_send_reply(session, FTP_REPLY_530_NOT_LOGGED_IN,
+                                         "Too many authentication attempts.");
+            return FTP_ERR_AUTH_FAILED;
+        }
+        sleep(FTP_AUTH_DELAY);
+        return ftp_session_send_reply(session, FTP_REPLY_530_NOT_LOGGED_IN,
+                                      "USER required.");
+    }
+
     session->authenticated = 1U;
+    session->auth_attempts = 0U;
     
     return ftp_session_send_reply(session, FTP_REPLY_230_LOGGED_IN, NULL);
 }
@@ -428,8 +477,10 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args)
     }
     
     size_t remaining = (size_t)(file_size - (uint64_t)offset);
+    uint64_t bytes_sent = 0U;
 
-    if ((vfs_get_caps(&node) & VFS_CAP_SENDFILE) != 0U) {
+    if (((vfs_get_caps(&node) & VFS_CAP_SENDFILE) != 0U) &&
+        (FTP_TRANSFER_RATE_LIMIT_BPS == 0U)) {
         while (remaining > 0U) {
             ssize_t sent = pal_sendfile(session->data_fd, node.fd, &offset, remaining);
 
@@ -441,6 +492,7 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args)
             }
 
             remaining -= (size_t)sent;
+            bytes_sent += (uint64_t)sent;
             atomic_fetch_add(&session->stats.bytes_sent, (uint64_t)sent);
         }
     } else {
@@ -458,28 +510,15 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args)
                     }
                     break;
                 }
-
-                size_t to_send = (size_t)n;
-                size_t sent_total = 0U;
-                while (sent_total < to_send) {
-                    ssize_t sent = PAL_SEND(session->data_fd, (uint8_t *)buf + sent_total,
-                                            to_send - sent_total, 0);
-                    if (sent <= 0) {
-                        if ((sent < 0) && (errno == EINTR)) {
-                            continue;
-                        }
-                        remaining = 1U;
-                        break;
-                    }
-                    sent_total += (size_t)sent;
-                    atomic_fetch_add(&session->stats.bytes_sent, (uint64_t)sent);
-                }
-
-                if (remaining == 1U) {
+                
+                ssize_t sent = ftp_session_send_data(session, buf, (size_t)n);
+                if (sent != n) {
+                    remaining = 1U;
                     break;
                 }
-
-                remaining -= to_send;
+                
+                bytes_sent += (uint64_t)sent;
+                remaining -= (size_t)n;
             }
         }
         ftp_buffer_release(buf);
@@ -492,10 +531,12 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args)
     
     if (remaining == 0U) {
         atomic_fetch_add(&session->stats.files_sent, 1U);
+        ftp_log_session_event(session, "RETR_OK", FTP_OK, bytes_sent);
         return ftp_session_send_reply(session, 
                                        FTP_REPLY_226_TRANSFER_COMPLETE, NULL);
     }
-    
+
+    ftp_log_session_event(session, "RETR_FAIL", FTP_ERR_UNKNOWN, bytes_sent);
     return ftp_session_send_reply(session, FTP_REPLY_426_TRANSFER_ABORTED,
                                    "Transfer failed.");
 }
@@ -570,10 +611,12 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args)
     
     if (total_received > 0) {
         atomic_fetch_add(&session->stats.files_received, 1U);
+        ftp_log_session_event(session, "STOR_OK", FTP_OK, (uint64_t)total_received);
         return ftp_session_send_reply(session,
                                        FTP_REPLY_226_TRANSFER_COMPLETE, NULL);
     }
-    
+
+    ftp_log_session_event(session, "STOR_FAIL", FTP_ERR_UNKNOWN, (uint64_t)total_received);
     return ftp_session_send_reply(session, FTP_REPLY_426_TRANSFER_ABORTED,
                                    "Transfer failed.");
 }
@@ -633,10 +676,12 @@ ftp_error_t cmd_APPE(ftp_session_t *session, const char *args)
     ftp_session_close_data_connection(session);
     
     if (total_received > 0) {
+        ftp_log_session_event(session, "APPE_OK", FTP_OK, (uint64_t)total_received);
         return ftp_session_send_reply(session,
                                        FTP_REPLY_226_TRANSFER_COMPLETE, NULL);
     }
-    
+
+    ftp_log_session_event(session, "APPE_FAIL", FTP_ERR_UNKNOWN, (uint64_t)total_received);
     return ftp_session_send_reply(session, FTP_REPLY_426_TRANSFER_ABORTED,
                                    "Transfer failed.");
 }
@@ -876,6 +921,12 @@ ftp_error_t cmd_PORT(ftp_session_t *session, const char *args)
         return ftp_session_send_reply(session, FTP_REPLY_501_SYNTAX_ARGS,
                                        "Invalid address.");
     }
+
+    if (session->data_addr.sin_addr.s_addr != session->ctrl_addr.sin_addr.s_addr) {
+        session->data_mode = FTP_DATA_MODE_NONE;
+        return ftp_session_send_reply(session, FTP_REPLY_501_SYNTAX_ARGS,
+                                      "Illegal PORT command.");
+    }
     
     /* Set mode to active */
     session->data_mode = FTP_DATA_MODE_ACTIVE;
@@ -894,6 +945,11 @@ ftp_error_t cmd_PASV(ftp_session_t *session, const char *args)
     if (session == NULL) {
         return FTP_ERR_INVALID_PARAM;
     }
+
+    if (session->pasv_fd >= 0) {
+        PAL_CLOSE(session->pasv_fd);
+        session->pasv_fd = -1;
+    }
     
     /* Create passive listener socket */
     int fd = PAL_SOCKET(AF_INET, SOCK_STREAM, 0);
@@ -909,7 +965,7 @@ ftp_error_t cmd_PASV(ftp_session_t *session, const char *args)
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_addr = session->ctrl_addr.sin_addr; /* Same as control */
+    addr.sin_addr.s_addr = PAL_HTONL(INADDR_ANY);
     addr.sin_port = 0; /* Auto-assign port */
     
     if (PAL_BIND(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
@@ -938,7 +994,25 @@ ftp_error_t cmd_PASV(ftp_session_t *session, const char *args)
     session->data_mode = FTP_DATA_MODE_PASSIVE;
     
     /* Format reply: 227 Entering Passive Mode (h1,h2,h3,h4,p1,p2) */
-    uint32_t ip = PAL_NTOHL(pasv_addr.sin_addr.s_addr);
+    struct sockaddr_in local;
+    socklen_t local_len = (socklen_t)sizeof(local);
+    memset(&local, 0, sizeof(local));
+    uint32_t ip = 0U;
+    if (PAL_GETSOCKNAME(session->ctrl_fd, (struct sockaddr*)&local, &local_len) == 0) {
+        ip = PAL_NTOHL(local.sin_addr.s_addr);
+    }
+    if (ip == 0U) {
+        char ip_str[INET_ADDRSTRLEN];
+        if (pal_network_get_primary_ip(ip_str, sizeof(ip_str)) == FTP_OK) {
+            struct in_addr ia;
+            if (PAL_INET_PTON(AF_INET, ip_str, &ia) == 1) {
+                ip = PAL_NTOHL(ia.s_addr);
+            }
+        }
+    }
+    if (ip == 0U) {
+        ip = PAL_NTOHL(pasv_addr.sin_addr.s_addr);
+    }
     uint16_t port = PAL_NTOHS(pasv_addr.sin_port);
     
     unsigned int h1 = (ip >> 24) & 0xFFU;

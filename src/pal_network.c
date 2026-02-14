@@ -1,13 +1,35 @@
+/*
+MIT License
+
+Copyright (c) 2026 Seregon
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+
 /**
  * @file pal_network.c
  * @brief Platform Abstraction Layer - Network Implementation
  * 
  * @author SeregonWar
  * @version 1.0.0
- * @date 2025-02-13
+ * @date 2026-02-13
  * 
- * SAFETY CLASSIFICATION: Embedded systems, production-grade
- * STANDARDS: MISRA C:2012, CERT C, ISO C11
  */
 
 #include "pal_network.h"
@@ -15,6 +37,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/time.h>
 
 /*===========================================================================*
  * NETWORK INITIALIZATION
@@ -199,6 +222,67 @@ ftp_error_t pal_socket_set_reuseaddr(socket_t fd)
     }
     
     return FTP_OK;
+}
+
+ftp_error_t pal_socket_set_timeouts(socket_t fd, uint32_t recv_timeout_ms, uint32_t send_timeout_ms)
+{
+    if (fd < 0) {
+        return FTP_ERR_INVALID_PARAM;
+    }
+
+    struct timeval tv;
+
+    tv.tv_sec = (time_t)(recv_timeout_ms / 1000U);
+    tv.tv_usec = (suseconds_t)((recv_timeout_ms % 1000U) * 1000U);
+    if (PAL_SETSOCKOPT(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, (socklen_t)sizeof(tv)) < 0) {
+        return FTP_ERR_SOCKET_SEND;
+    }
+
+    tv.tv_sec = (time_t)(send_timeout_ms / 1000U);
+    tv.tv_usec = (suseconds_t)((send_timeout_ms % 1000U) * 1000U);
+    if (PAL_SETSOCKOPT(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, (socklen_t)sizeof(tv)) < 0) {
+        return FTP_ERR_SOCKET_SEND;
+    }
+
+    return FTP_OK;
+}
+
+ssize_t pal_send_all(socket_t fd, const void *buffer, size_t length, int flags)
+{
+    if ((buffer == NULL) || (length == 0U)) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (fd < 0) {
+        errno = EBADF;
+        return -1;
+    }
+
+    const uint8_t *p = (const uint8_t *)buffer;
+    size_t total = 0U;
+
+    while (total < length) {
+        size_t chunk = length - total;
+        ssize_t n = PAL_SEND(fd, p + total, chunk, flags);
+        if (n > 0) {
+            total += (size_t)n;
+            continue;
+        }
+        if (n == 0) {
+            errno = EPIPE;
+            return -1;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        if ((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
+            usleep(1000);
+            continue;
+        }
+        return -1;
+    }
+
+    return (ssize_t)total;
 }
 
 /*===========================================================================*

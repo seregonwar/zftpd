@@ -1,18 +1,43 @@
+/*
+MIT License
+
+Copyright (c) 2026 Seregon
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+
 /**
  * @file ftp_path.c
  * @brief Secure path validation and normalization implementation
  * 
  * @author SeregonWar
  * @version 1.0.0
- * @date 2025-02-13
+ * @date 2026-02-13
  * 
- * SAFETY CLASSIFICATION: Security-critical module
- * STANDARDS: MISRA C:2012, CERT C, ISO C11
  */
 
 #include "ftp_path.h"
+#include "pal_fileio.h"
 #include <string.h>
 #include <ctype.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 /* Maximum number of path components (for stack allocation) */
 #define MAX_PATH_COMPONENTS 128U
@@ -72,8 +97,28 @@ ftp_error_t ftp_path_normalize(const char *path,
     memcpy(temp, path, path_len + 1U);
     
     /* Split path into components and process */
-    char *token = strtok(temp, "/");
-    while (token != NULL) {
+    size_t scan = 0U;
+    while (1) {
+        while (temp[scan] == '/') {
+            temp[scan] = '\0';
+            scan++;
+        }
+        if (temp[scan] == '\0') {
+            break;
+        }
+
+        size_t start = scan;
+        while ((temp[scan] != '\0') && (temp[scan] != '/')) {
+            scan++;
+        }
+
+        if (temp[scan] == '/') {
+            temp[scan] = '\0';
+            scan++;
+        }
+
+        const char *token = &temp[start];
+
         if (strcmp(token, ".") == 0) {
             /* Current directory reference: skip */
         } else if (strcmp(token, "..") == 0) {
@@ -89,8 +134,6 @@ ftp_error_t ftp_path_normalize(const char *path,
             components[depth] = token;
             depth++;
         }
-        
-        token = strtok(NULL, "/");
     }
     
     /* Reconstruct normalized path */
@@ -106,8 +149,8 @@ ftp_error_t ftp_path_normalize(const char *path,
     
     /* Build path from components */
     size_t offset = 0U;
-    for (size_t i = 0U; i < depth; i++) {
-        size_t comp_len = strlen(components[i]);
+    for (size_t idx = 0U; idx < depth; idx++) {
+        size_t comp_len = strlen(components[idx]);
         
         /* Check if buffer has space: '/' + component + '\0' */
         if ((offset + comp_len + 2U) > size) {
@@ -119,7 +162,7 @@ ftp_error_t ftp_path_normalize(const char *path,
         offset++;
         
         /* Add component */
-        memcpy(output + offset, components[i], comp_len);
+        memcpy(output + offset, components[idx], comp_len);
         offset += comp_len;
     }
     
@@ -180,7 +223,62 @@ ftp_error_t ftp_path_resolve(const ftp_session_t *session,
     }
     
     /* Normalize the path */
-    return ftp_path_normalize(temp, output, size);
+    ftp_error_t err = ftp_path_normalize(temp, output, size);
+    if (err != FTP_OK) {
+        return err;
+    }
+
+    if (ftp_path_is_within_root(output, session->root_path) != 1) {
+        return FTP_ERR_PATH_INVALID;
+    }
+
+    if (pal_path_exists(output) == 1) {
+        char real_buf[FTP_PATH_MAX];
+        if (realpath(output, real_buf) != NULL) {
+            size_t n = strlen(real_buf);
+            if ((n + 1U) <= size) {
+                memcpy(output, real_buf, n + 1U);
+                if (ftp_path_is_within_root(output, session->root_path) != 1) {
+                    return FTP_ERR_PATH_INVALID;
+                }
+            }
+        }
+        return FTP_OK;
+    }
+
+    char dir_buf[FTP_PATH_MAX];
+    char base_buf[FTP_PATH_MAX];
+    if (ftp_path_dirname(output, dir_buf, sizeof(dir_buf)) != FTP_OK) {
+        return FTP_OK;
+    }
+    if (ftp_path_basename(output, base_buf, sizeof(base_buf)) != FTP_OK) {
+        return FTP_OK;
+    }
+
+    if (pal_path_exists(dir_buf) != 1) {
+        return FTP_OK;
+    }
+
+    char dir_real[FTP_PATH_MAX];
+    if (realpath(dir_buf, dir_real) == NULL) {
+        return FTP_OK;
+    }
+
+    char joined[FTP_PATH_MAX];
+    int nn = snprintf(joined, sizeof(joined), "%s/%s", dir_real, base_buf);
+    if ((nn < 0) || ((size_t)nn >= sizeof(joined))) {
+        return FTP_ERR_PATH_TOO_LONG;
+    }
+
+    err = ftp_path_normalize(joined, output, size);
+    if (err != FTP_OK) {
+        return err;
+    }
+    if (ftp_path_is_within_root(output, session->root_path) != 1) {
+        return FTP_ERR_PATH_INVALID;
+    }
+
+    return FTP_OK;
 }
 
 /*===========================================================================*

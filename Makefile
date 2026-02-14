@@ -68,7 +68,7 @@ ifeq ($(TARGET),ps5)
     export LLVM_CONFIG := $(PROSPERO_LLVM_CONFIG)
     include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
     PLATFORM_DEFS := -DPLATFORM_PS5 -DPS5 -D__PROSPERO__
-    PLATFORM_LIBS := -lkernel -lpthread
+    PLATFORM_LIBS := -lkernel -lpthread -lSceNotification
     PLATFORM_LDFLAGS :=
 endif
 
@@ -195,10 +195,14 @@ SOURCES += src/ftp_session.c
 SOURCES += src/ftp_protocol.c
 SOURCES += src/ftp_commands.c
 SOURCES += src/ftp_buffer_pool.c
+SOURCES += src/ftp_log.c
 SOURCES += src/main.c
 
 # Object files
 OBJECTS := $(patsubst src/%.c,$(OBJ_DIR)/%.o,$(SOURCES))
+
+# Object files without main (for unit tests)
+LIB_OBJECTS := $(filter-out $(OBJ_DIR)/main.o,$(OBJECTS))
 
 # Dependency files
 DEPENDS := $(patsubst $(OBJ_DIR)/%.o,$(DEP_DIR)/%.d,$(OBJECTS))
@@ -267,15 +271,22 @@ analyze:
 	@echo "Analysis complete."
 
 # Run tests
-TEST_BIN := $(BUILD_DIR)/tests/test_size
+TEST_BINS := $(BUILD_DIR)/tests/test_size
+TEST_BINS += $(BUILD_DIR)/tests/test_security
+TEST_BINS += $(BUILD_DIR)/tests/test_path_security
 
-test: $(OUTPUT_ELF) $(TEST_BIN)
+ifeq ($(filter $(TARGET),linux macos),)
+test: $(OUTPUT_ELF)
+	@echo "Tests skipped for TARGET=$(TARGET)"
+else
+test: $(OUTPUT_ELF) $(TEST_BINS)
 	@echo "Running tests..."
-	@./$(TEST_BIN)
+	@for t in $(TEST_BINS); do ./$$t; done
+endif
 
-$(TEST_BIN): tests/test_size.c | $(BUILD_DIR)/tests
+$(BUILD_DIR)/tests/%: tests/%.c $(LIB_OBJECTS) | $(BUILD_DIR)/tests
 	@echo "  [CC]  $<"
-	@$(CC) $(CFLAGS) -o $@ $<
+	@$(CC) $(CFLAGS) -DFTP_AUTH_DELAY=0 -o $@ $< $(LIB_OBJECTS) $(LDFLAGS) $(LIBS)
 
 bin: $(OUTPUT_BIN)
 

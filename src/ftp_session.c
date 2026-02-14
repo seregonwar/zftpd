@@ -1,23 +1,50 @@
+/*
+MIT License
+
+Copyright (c) 2026 Seregon
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+
 /**
  * @file ftp_session.c
  * @brief FTP session management implementation
  * 
  * @author SeregonWar
  * @version 1.0.0
- * @date 2025-02-13
+ * @date 2026-02-13
  * 
- * SAFETY CLASSIFICATION: Embedded systems, production-grade
- * STANDARDS: MISRA C:2012, CERT C, ISO C11
  */
 
 #include "ftp_session.h"
 #include "ftp_protocol.h"
 #include "ftp_path.h"
+#include "ftp_log.h"
 #include "pal_network.h"
+#include "pal_fileio.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
+#include <sys/select.h>
+#include <sys/time.h>
 #include <time.h>
 
 /*===========================================================================*
@@ -48,6 +75,7 @@ ftp_error_t ftp_session_init(ftp_session_t *session,
     /* Control connection */
     session->ctrl_fd = ctrl_fd;
     memcpy(&session->ctrl_addr, client_addr, sizeof(session->ctrl_addr));
+    (void)pal_socket_set_timeouts(session->ctrl_fd, FTP_CTRL_IO_TIMEOUT_MS, FTP_CTRL_IO_TIMEOUT_MS);
     
     /* Data connection (initially closed) */
     session->data_fd = -1;
@@ -63,18 +91,33 @@ ftp_error_t ftp_session_init(ftp_session_t *session,
     session->file_structure = FTP_STRU_FILE;
     session->restart_offset = 0;
     
-    /* File system state (start at root) */
     size_t root_len = strlen(root_path);
-    if (root_len >= sizeof(session->cwd)) {
+    if (root_len >= sizeof(session->root_path)) {
         return FTP_ERR_PATH_TOO_LONG;
     }
+    memcpy(session->root_path, root_path, root_len + 1U);
     memcpy(session->cwd, root_path, root_len + 1U);
+
+    if (pal_path_exists(session->root_path) == 1) {
+        char real_buf[FTP_PATH_MAX];
+        if (realpath(session->root_path, real_buf) != NULL) {
+            size_t n = strlen(real_buf);
+            if (n < sizeof(session->root_path)) {
+                memcpy(session->root_path, real_buf, n + 1U);
+                memcpy(session->cwd, real_buf, n + 1U);
+            }
+        }
+    }
     
     session->rename_from[0] = '\0';
     
     /* Authentication */
     session->auth_attempts = 0U;
     session->authenticated = 0U;
+    session->user_ok = 0U;
+
+    session->ctrl_rx_len = 0U;
+    session->ctrl_rx_off = 0U;
     
     /* Session identification */
     session->session_id = session_id;
@@ -82,6 +125,9 @@ ftp_error_t ftp_session_init(ftp_session_t *session,
     /* Timing */
     session->connect_time = time(NULL);
     session->last_activity = session->connect_time;
+
+    session->rl_tokens = 0U;
+    session->rl_last_ns = 0U;
     
     /* Client IP address (text) */
     ftp_error_t err = pal_sockaddr_to_ip(client_addr, 
@@ -141,19 +187,38 @@ void* ftp_session_thread(void *arg)
     
     /* Send greeting */
     ftp_session_send_reply(session, FTP_REPLY_220_SERVICE_READY, NULL);
+
+    ftp_log_session_event(session, "CONNECT", FTP_OK, 0U);
     
     /* Command processing loop */
     char cmd_buffer[FTP_CMD_BUFFER_SIZE];
     int should_quit = 0;
     
     while (!should_quit) {
+        time_t now = time(NULL);
+        if ((now != (time_t)-1) && (now > session->last_activity)) {
+            if ((uint64_t)(now - session->last_activity) > (uint64_t)FTP_SESSION_TIMEOUT) {
+                (void)ftp_session_send_reply(session, FTP_REPLY_421_SERVICE_UNAVAIL, "Idle timeout.");
+                ftp_log_session_event(session, "IDLE_TIMEOUT", FTP_ERR_TIMEOUT, 0U);
+                break;
+            }
+        }
+
         /* Read command line */
         ssize_t n = ftp_session_read_command(session, 
                                                cmd_buffer,
                                                sizeof(cmd_buffer));
         
-        if (n <= 0) {
-            /* Connection closed or error */
+        if (n == 0) {
+            break;
+        }
+        if (n < 0) {
+            if (n == (ssize_t)FTP_ERR_TIMEOUT) {
+                continue;
+            }
+            if (n == (ssize_t)FTP_ERR_PROTOCOL) {
+                continue;
+            }
             break;
         }
         
@@ -177,6 +242,8 @@ void* ftp_session_thread(void *arg)
     
     /* Cleanup and exit */
     ftp_session_cleanup(session);
+
+    ftp_log_session_event(session, "DISCONNECT", FTP_OK, 0U);
     
     return NULL;
 }
@@ -209,8 +276,7 @@ ftp_error_t ftp_session_send_reply(ftp_session_t *session,
     }
     
     /* Send reply */
-    ssize_t sent = PAL_SEND(session->ctrl_fd, buffer, (size_t)len, 0);
-    
+    ssize_t sent = pal_send_all(session->ctrl_fd, buffer, (size_t)len, 0);
     if (sent != len) {
         return FTP_ERR_SOCKET_SEND;
     }
@@ -245,7 +311,7 @@ ftp_error_t ftp_session_send_multiline_reply(ftp_session_t *session,
             return FTP_ERR_INVALID_PARAM;
         }
         
-        ssize_t sent = PAL_SEND(session->ctrl_fd, buffer, (size_t)n, 0);
+        ssize_t sent = pal_send_all(session->ctrl_fd, buffer, (size_t)n, 0);
         if (sent != n) {
             return FTP_ERR_SOCKET_SEND;
         }
@@ -259,7 +325,7 @@ ftp_error_t ftp_session_send_multiline_reply(ftp_session_t *session,
         return FTP_ERR_INVALID_PARAM;
     }
     
-    ssize_t sent = PAL_SEND(session->ctrl_fd, buffer, (size_t)n, 0);
+    ssize_t sent = pal_send_all(session->ctrl_fd, buffer, (size_t)n, 0);
     if (sent != n) {
         return FTP_ERR_SOCKET_SEND;
     }
@@ -270,6 +336,125 @@ ftp_error_t ftp_session_send_multiline_reply(ftp_session_t *session,
 /*===========================================================================*
  * DATA CONNECTION MANAGEMENT
  *===========================================================================*/
+
+static int wait_fd_ready(int fd, int for_write, uint32_t timeout_ms)
+{
+    if (fd < 0) {
+        errno = EBADF;
+        return -1;
+    }
+
+    struct timeval tv;
+    tv.tv_sec = (time_t)(timeout_ms / 1000U);
+    tv.tv_usec = (suseconds_t)((timeout_ms % 1000U) * 1000U);
+
+    fd_set rfds;
+    fd_set wfds;
+    FD_ZERO(&rfds);
+    FD_ZERO(&wfds);
+
+    if (for_write != 0) {
+        FD_SET(fd, &wfds);
+    } else {
+        FD_SET(fd, &rfds);
+    }
+
+    while (1) {
+        int rc = select(fd + 1,
+                        (for_write != 0) ? NULL : &rfds,
+                        (for_write != 0) ? &wfds : NULL,
+                        NULL,
+                        &tv);
+        if (rc == 0) {
+            errno = ETIMEDOUT;
+            return 0;
+        }
+        if (rc < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+        }
+        return rc;
+    }
+}
+
+static uint64_t monotonic_ns(void)
+{
+#if defined(CLOCK_MONOTONIC)
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
+        return ((uint64_t)ts.tv_sec * 1000000000ULL) + (uint64_t)ts.tv_nsec;
+    }
+#endif
+    struct timeval tv;
+    if (gettimeofday(&tv, NULL) == 0) {
+        return ((uint64_t)tv.tv_sec * 1000000000ULL) + ((uint64_t)tv.tv_usec * 1000ULL);
+    }
+    return 0U;
+}
+
+static void rate_limit(ftp_session_t *session, size_t bytes)
+{
+    if ((session == NULL) || (bytes == 0U)) {
+        return;
+    }
+
+    uint64_t rate = (uint64_t)FTP_TRANSFER_RATE_LIMIT_BPS;
+    if (rate == 0U) {
+        return;
+    }
+
+    uint64_t burst = (uint64_t)FTP_TRANSFER_RATE_BURST_BYTES;
+    uint64_t cap = (burst != 0U) ? burst : rate;
+
+    uint64_t now = monotonic_ns();
+    if (now == 0U) {
+        return;
+    }
+
+    if (session->rl_last_ns == 0U) {
+        session->rl_last_ns = now;
+        session->rl_tokens = cap;
+    } else if (now > session->rl_last_ns) {
+        uint64_t elapsed = now - session->rl_last_ns;
+        uint64_t add = (elapsed * rate) / 1000000000ULL;
+        session->rl_last_ns = now;
+        if (add > 0U) {
+            uint64_t t = session->rl_tokens + add;
+            session->rl_tokens = (t > cap) ? cap : t;
+        }
+    }
+
+    uint64_t need = (uint64_t)bytes;
+    while (session->rl_tokens < need) {
+        uint64_t missing = need - session->rl_tokens;
+        uint64_t wait_ns = (missing * 1000000000ULL + rate - 1U) / rate;
+        uint64_t wait_us = (wait_ns + 999ULL) / 1000ULL;
+        if (wait_us > 500000ULL) {
+            wait_us = 500000ULL;
+        }
+        usleep((useconds_t)wait_us);
+
+        now = monotonic_ns();
+        if ((now != 0U) && (now > session->rl_last_ns)) {
+            uint64_t elapsed = now - session->rl_last_ns;
+            uint64_t add = (elapsed * rate) / 1000000000ULL;
+            session->rl_last_ns = now;
+            if (add > 0U) {
+                uint64_t t = session->rl_tokens + add;
+                session->rl_tokens = (t > cap) ? cap : t;
+            }
+        } else {
+            break;
+        }
+    }
+
+    if (session->rl_tokens >= need) {
+        session->rl_tokens -= need;
+    } else {
+        session->rl_tokens = 0U;
+    }
+}
 
 /**
  * @brief Open data connection
@@ -290,12 +475,36 @@ ftp_error_t ftp_session_open_data_connection(ftp_session_t *session)
         if (fd < 0) {
             return FTP_ERR_SOCKET_CREATE;
         }
-        
+
+        (void)pal_socket_set_nonblocking(fd);
+
         if (PAL_CONNECT(fd, (struct sockaddr*)&session->data_addr,
                         sizeof(session->data_addr)) < 0) {
+            if (errno != EINPROGRESS) {
+                PAL_CLOSE(fd);
+                return FTP_ERR_SOCKET_SEND;
+            }
+        }
+
+        int ready = wait_fd_ready(fd, 1, FTP_DATA_CONNECT_TIMEOUT_MS);
+        if (ready <= 0) {
+            PAL_CLOSE(fd);
+            return FTP_ERR_TIMEOUT;
+        }
+
+        int so_error = 0;
+        socklen_t so_len = (socklen_t)sizeof(so_error);
+        if (PAL_GETSOCKOPT(fd, SOL_SOCKET, SO_ERROR, &so_error, &so_len) < 0) {
             PAL_CLOSE(fd);
             return FTP_ERR_SOCKET_SEND;
         }
+        if (so_error != 0) {
+            errno = so_error;
+            PAL_CLOSE(fd);
+            return FTP_ERR_SOCKET_SEND;
+        }
+
+        (void)pal_socket_set_blocking(fd);
         
         session->data_fd = fd;
         
@@ -308,9 +517,14 @@ ftp_error_t ftp_session_open_data_connection(ftp_session_t *session)
         struct sockaddr_in client_addr;
         socklen_t addr_len = sizeof(client_addr);
         
-        int fd = PAL_ACCEPT(session->pasv_fd,
-                            (struct sockaddr*)&client_addr,
-                            &addr_len);
+        int ready = wait_fd_ready(session->pasv_fd, 0, FTP_DATA_CONNECT_TIMEOUT_MS);
+        if (ready <= 0) {
+            PAL_CLOSE(session->pasv_fd);
+            session->pasv_fd = -1;
+            return FTP_ERR_TIMEOUT;
+        }
+
+        int fd = PAL_ACCEPT(session->pasv_fd, (struct sockaddr*)&client_addr, &addr_len);
         
         if (fd < 0) {
             return FTP_ERR_SOCKET_ACCEPT;
@@ -367,7 +581,8 @@ ssize_t ftp_session_send_data(ftp_session_t *session,
         return FTP_ERR_SOCKET_SEND;
     }
     
-    ssize_t sent = PAL_SEND(session->data_fd, buffer, length, 0);
+    rate_limit(session, length);
+    ssize_t sent = pal_send_all(session->data_fd, buffer, length, 0);
     
     if (sent > 0) {
         atomic_fetch_add(&session->stats.bytes_sent, (uint64_t)sent);
@@ -391,6 +606,7 @@ ssize_t ftp_session_recv_data(ftp_session_t *session,
         return FTP_ERR_SOCKET_RECV;
     }
     
+    rate_limit(session, length);
     ssize_t received = PAL_RECV(session->data_fd, buffer, length, 0);
     
     if (received > 0) {
@@ -423,42 +639,76 @@ ssize_t ftp_session_read_command(ftp_session_t *session,
         return FTP_ERR_INVALID_PARAM;
     }
     
-    /* Read until CRLF */
-    size_t pos = 0U;
-    int found_cr = 0;
-    
-    while (pos < (size - 1U)) {
-        char c;
-        ssize_t n = PAL_RECV(session->ctrl_fd, &c, 1U, 0);
-        
-        if (n <= 0) {
-            if (n == 0) {
-                /* Connection closed */
-                return 0;
+    size_t out_len = 0U;
+    int too_long = 0;
+
+    while (1) {
+        for (uint16_t i = session->ctrl_rx_off; i < session->ctrl_rx_len; i++) {
+            char c = session->ctrl_rxbuf[i];
+
+            if (too_long == 0) {
+                if (out_len < (size - 1U)) {
+                    buffer[out_len] = c;
+                    out_len++;
+                } else {
+                    too_long = 1;
+                }
             }
-            
+
+            if (c == '\n') {
+                uint16_t line_end = (uint16_t)(i + 1U);
+                uint16_t consume = line_end;
+
+                session->ctrl_rx_off = consume;
+                if (session->ctrl_rx_off >= session->ctrl_rx_len) {
+                    session->ctrl_rx_off = 0U;
+                    session->ctrl_rx_len = 0U;
+                }
+
+                if (too_long != 0) {
+                    (void)ftp_session_send_reply(session, FTP_REPLY_500_SYNTAX_ERROR, "Command too long.");
+                    return (ssize_t)FTP_ERR_PROTOCOL;
+                }
+
+                if ((out_len >= 2U) && (buffer[out_len - 2U] == '\r') && (buffer[out_len - 1U] == '\n')) {
+                    out_len -= 2U;
+                    buffer[out_len] = '\0';
+                    return (ssize_t)out_len;
+                }
+
+                out_len = 0U;
+            }
+        }
+
+        if (too_long != 0) {
+            out_len = 0U;
+        }
+
+        if (session->ctrl_rx_off >= session->ctrl_rx_len) {
+            session->ctrl_rx_off = 0U;
+            session->ctrl_rx_len = 0U;
+        }
+
+        ssize_t n = PAL_RECV(session->ctrl_fd,
+                             session->ctrl_rxbuf,
+                             sizeof(session->ctrl_rxbuf),
+                             0);
+        if (n == 0) {
+            return 0;
+        }
+        if (n < 0) {
             if (errno == EINTR) {
-                continue; /* Interrupted, retry */
+                continue;
             }
-            
-            return FTP_ERR_SOCKET_RECV;
+            if ((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
+                return (ssize_t)FTP_ERR_TIMEOUT;
+            }
+            return (ssize_t)FTP_ERR_SOCKET_RECV;
         }
-        
-        if (c == '\r') {
-            found_cr = 1;
-        } else if ((c == '\n') && found_cr) {
-            /* Found CRLF: command complete */
-            buffer[pos] = '\0';
-            return (ssize_t)pos;
-        } else {
-            buffer[pos] = c;
-            pos++;
-            found_cr = 0;
-        }
+
+        session->ctrl_rx_len = (uint16_t)n;
+        session->ctrl_rx_off = 0U;
     }
-    
-    /* Buffer full without CRLF */
-    return FTP_ERR_PROTOCOL;
 }
 
 /**
@@ -490,6 +740,19 @@ int ftp_session_process_command(ftp_session_t *session, const char *line)
                                "Unknown command.");
         return 0;
     }
+
+    if (session->authenticated == 0U) {
+        if ((strcmp(command, "USER") != 0) &&
+            (strcmp(command, "PASS") != 0) &&
+            (strcmp(command, "QUIT") != 0) &&
+            (strcmp(command, "NOOP") != 0) &&
+            (strcmp(command, "FEAT") != 0) &&
+            (strcmp(command, "SYST") != 0)) {
+            ftp_session_send_reply(session, FTP_REPLY_530_NOT_LOGGED_IN,
+                                   "Please login with USER and PASS.");
+            return 0;
+        }
+    }
     
     /* Validate arguments */
     const char *cmd_args = (args[0] != '\0') ? args : NULL;
@@ -502,6 +765,10 @@ int ftp_session_process_command(ftp_session_t *session, const char *line)
     
     /* Execute command */
     err = cmd->handler(session, cmd_args);
+
+    if (FTP_LOG_COMMANDS != 0) {
+        ftp_log_session_cmd(session, command, err);
+    }
     
     if (err != FTP_OK) {
         /* Command failed */

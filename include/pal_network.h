@@ -1,16 +1,38 @@
+/*
+MIT License
+
+Copyright (c) 2026 Seregon
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+
 /**
  * @file pal_network.h
  * @brief Platform-agnostic network I/O operations
  * 
  * @author SeregonWar
  * @version 1.0.0
- * @date 2025-02-13
+ * @date 2026-02-13
  * 
  * DESIGN: Zero-overhead abstraction via compile-time selection
  * PERFORMANCE: Inline functions and macros (no runtime cost)
  * 
- * SAFETY CLASSIFICATION: Embedded systems, production-grade
- * STANDARDS: MISRA C:2012, CERT C, ISO C11
  */
 
 #ifndef PAL_NETWORK_H
@@ -303,6 +325,9 @@ ftp_error_t pal_socket_set_blocking(socket_t fd);
  * @note Required to avoid "Address already in use" errors on restart
  */
 ftp_error_t pal_socket_set_reuseaddr(socket_t fd);
+ftp_error_t pal_socket_set_timeouts(socket_t fd, uint32_t recv_timeout_ms, uint32_t send_timeout_ms);
+
+ssize_t pal_send_all(socket_t fd, const void *buffer, size_t length, int flags);
 
 /*===========================================================================*
  * UTILITY FUNCTIONS

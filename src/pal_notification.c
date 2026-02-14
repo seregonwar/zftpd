@@ -37,6 +37,18 @@ void pal_notification_send(const char *message)
 
 #elif defined(PLATFORM_PS5)
 
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct notify_request {
+    char padding[45];
+    char message[3075];
+} notify_request_t;
+
+int sceKernelSendNotificationRequest(int, notify_request_t *, size_t, int);
+
 int pal_notification_init(void)
 {
     return 0;
@@ -48,7 +60,14 @@ void pal_notification_shutdown(void)
 
 void pal_notification_send(const char *message)
 {
-    (void)message;
+    if (message == NULL) {
+        return;
+    }
+
+    notify_request_t req;
+    memset(&req, 0, sizeof(req));
+    (void)snprintf(req.message, sizeof(req.message), "%s", message);
+    (void)sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
 }
 
 #else
