@@ -141,9 +141,22 @@ ftp_error_t ftp_server_start(ftp_server_context_t *ctx)
     
     /* Create accept thread */
     pthread_t accept_thread;
-    if (pthread_create(&accept_thread, NULL, server_accept_thread, ctx) != 0) {
+    pthread_attr_t attr;
+    int attr_ok = (pthread_attr_init(&attr) == 0);
+    if (attr_ok != 0) {
+        (void)pthread_attr_setstacksize(&attr, (size_t)FTP_THREAD_STACK_SIZE);
+    }
+    
+    if (pthread_create(&accept_thread, (attr_ok != 0) ? &attr : NULL, server_accept_thread, ctx) != 0) {
+        if (attr_ok != 0) {
+            (void)pthread_attr_destroy(&attr);
+        }
         atomic_store(&ctx->running, 0);
         return FTP_ERR_THREAD_CREATE;
+    }
+    
+    if (attr_ok != 0) {
+        (void)pthread_attr_destroy(&attr);
     }
     
     /* Detach thread (we don't need to join it) */
@@ -253,12 +266,25 @@ static void* server_accept_thread(void *arg)
         }
         
         /* Create session thread */
-        if (pthread_create(&session->thread, NULL,
+        pthread_attr_t sess_attr;
+        int sess_attr_ok = (pthread_attr_init(&sess_attr) == 0);
+        if (sess_attr_ok != 0) {
+            (void)pthread_attr_setstacksize(&sess_attr, (size_t)FTP_THREAD_STACK_SIZE);
+        }
+        
+        if (pthread_create(&session->thread, (sess_attr_ok != 0) ? &sess_attr : NULL,
                            ftp_session_thread, session) != 0) {
+            if (sess_attr_ok != 0) {
+                (void)pthread_attr_destroy(&sess_attr);
+            }
             PAL_CLOSE(client_fd);
             free_session(ctx, session);
             atomic_fetch_add(&ctx->stats.total_errors, 1U);
             continue;
+        }
+        
+        if (sess_attr_ok != 0) {
+            (void)pthread_attr_destroy(&sess_attr);
         }
         
         /* Detach thread */

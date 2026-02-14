@@ -303,11 +303,15 @@
 
 /**
  * Thread stack size in bytes
- * @note 64KB is sufficient for our stack usage analysis
+ * @note Console environments may require larger stacks due to libc/network internals
  * @note See whitepaper section 4.2 for worst-case analysis
  */
 #ifndef FTP_THREAD_STACK_SIZE
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+#define FTP_THREAD_STACK_SIZE 524288U
+#else
 #define FTP_THREAD_STACK_SIZE 65536U
+#endif
 #endif
 
 /*===========================================================================*
