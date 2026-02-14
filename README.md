@@ -3,6 +3,7 @@
 [![C11](https://img.shields.io/badge/std-C11-blue.svg)](https://en.cppreference.com/w/c/11)
 [![MISRA C](https://img.shields.io/badge/MISRA-C%3A2012-green.svg)](https://www.misra.org.uk/)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
+[![Downloads](https://imrf.vercel.app/api/badge/downloads?source=github&user=seregonwar&repo=zftpd)]()
 
 A production-grade, safety-critical FTP server designed for embedded systems with multi-platform support (PS3, PS4, PS5, POSIX/Linux).
 
