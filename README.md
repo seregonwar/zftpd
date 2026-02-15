@@ -277,7 +277,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
 ## License
 
-GNU General Public License v3.0 - see [LICENSE](LICENSE) file.
+MIT License - see [LICENSE](LICENSE) file.
 
 ## Acknowledgments
 
