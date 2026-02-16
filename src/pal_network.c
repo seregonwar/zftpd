@@ -33,11 +33,57 @@ SOFTWARE.
  */
 
 #include "pal_network.h"
+#include "ftp_config.h"
+#include "ftp_log.h"
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/time.h>
+
+#if FTP_SOCKET_TELEMETRY
+static void pal_socket_telemetry(socket_t fd)
+{
+    int sndbuf = -1;
+    int rcvbuf = -1;
+    int nodelay = -1;
+    int keepalive = -1;
+    socklen_t optlen = (socklen_t)sizeof(int);
+
+    (void)PAL_GETSOCKOPT(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, &optlen);
+    optlen = (socklen_t)sizeof(int);
+    (void)PAL_GETSOCKOPT(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, &optlen);
+    optlen = (socklen_t)sizeof(int);
+    (void)PAL_GETSOCKOPT(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, &optlen);
+    optlen = (socklen_t)sizeof(int);
+    (void)PAL_GETSOCKOPT(fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, &optlen);
+
+    char lip[INET_ADDRSTRLEN] = "0.0.0.0";
+    char rip[INET_ADDRSTRLEN] = "0.0.0.0";
+    uint16_t lport = 0U;
+    uint16_t rport = 0U;
+
+    struct sockaddr_in sa;
+    socklen_t salen = (socklen_t)sizeof(sa);
+    if (PAL_GETSOCKNAME(fd, (struct sockaddr *)&sa, &salen) == 0) {
+        (void)PAL_INET_NTOP(AF_INET, &sa.sin_addr, lip, sizeof(lip));
+        lport = (uint16_t)PAL_NTOHS(sa.sin_port);
+    }
+
+    salen = (socklen_t)sizeof(sa);
+    if (PAL_GETPEERNAME(fd, (struct sockaddr *)&sa, &salen) == 0) {
+        (void)PAL_INET_NTOP(AF_INET, &sa.sin_addr, rip, sizeof(rip));
+        rport = (uint16_t)PAL_NTOHS(sa.sin_port);
+    }
+
+    char line[256];
+    (void)snprintf(line, sizeof(line),
+                   "SOCK L=%s:%u R=%s:%u SNDBUF=%d RCVBUF=%d NODELAY=%d KEEPALIVE=%d",
+                   lip, (unsigned)lport, rip, (unsigned)rport,
+                   sndbuf, rcvbuf, nodelay, keepalive);
+    ftp_log_line(FTP_LOG_INFO, line);
+}
+#endif
 
 /*===========================================================================*
  * NETWORK INITIALIZATION
@@ -157,6 +203,10 @@ ftp_error_t pal_socket_configure(socket_t fd)
     }
 #endif
 #endif /* FTP_TCP_KEEPALIVE */
+
+#if FTP_SOCKET_TELEMETRY
+    pal_socket_telemetry(fd);
+#endif
     
     return FTP_OK;
 }

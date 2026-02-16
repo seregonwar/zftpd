@@ -260,6 +260,35 @@ ssize_t pal_file_write(int fd, const void *buffer, size_t count)
     return write(fd, buffer, count);
 }
 
+ssize_t pal_file_write_all(int fd, const void *buffer, size_t count)
+{
+    if ((fd < 0) || (buffer == NULL) || (count == 0U)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    const uint8_t *p = (const uint8_t *)buffer;
+    size_t total = 0U;
+
+    while (total < count) {
+        ssize_t n = write(fd, p + total, count - total);
+        if (n > 0) {
+            total += (size_t)n;
+            continue;
+        }
+        if (n == 0) {
+            errno = EIO;
+            return -1;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        return -1;
+    }
+
+    return (ssize_t)total;
+}
+
 /**
  * @brief Seek to file position
  */

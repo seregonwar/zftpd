@@ -182,6 +182,8 @@ ifeq ($(TARGET),macos)
 endif
 
 OBJCOPY ?= objcopy
+STRIP ?= strip
+
 
 # Source files
 SOURCES := src/pal_network.c
@@ -218,7 +220,11 @@ DEPENDS := $(patsubst $(OBJ_DIR)/%.o,$(DEP_DIR)/%.d,$(OBJECTS))
 $(BIN_DIR) $(OBJ_DIR) $(DEP_DIR) $(BUILD_DIR)/tests:
 	@mkdir -p $@
 
+ifeq ($(filter $(TARGET),ps4 ps5),)
 all: $(OUTPUT_ELF)
+else
+all: $(OUTPUT_BIN)
+endif
 
 $(PROJECT): $(OUTPUT_ELF)
 	@true
@@ -291,25 +297,46 @@ $(BUILD_DIR)/tests/%: tests/%.c $(LIB_OBJECTS) | $(BUILD_DIR)/tests
 bin: $(OUTPUT_BIN)
 
 $(OUTPUT_BIN): $(OUTPUT_ELF) | $(BIN_DIR)
-	@echo "  [OBJCOPY]  $@"
+	@echo "  [STRIP]    $@"
 	@command -v $(OBJCOPY) >/dev/null 2>&1 || { echo "error: '$(OBJCOPY)' not found (set OBJCOPY=... or install binutils)"; exit 1; }
+ifeq ($(filter $(TARGET),ps4 ps5),)
 	@$(OBJCOPY) -O binary $< $@
+else
+	@$(STRIP) --strip-unneeded -R .comment -R .GCC.command.line $< -o $@
+endif
 
-deploy: $(OUTPUT_ELF)
-	@if [ "$(TARGET)" != "ps4" ]; then echo "error: deploy supportato solo con TARGET=ps4"; exit 1; fi
-	@command -v socat >/dev/null 2>&1 || { echo "error: 'socat' non trovato (brew install socat)"; exit 1; }
-	@$(PS4_DEPLOY) -h $(PS4_HOST) -p $(PS4_PORT) $(OUTPUT_ELF)
+deploy: $(OUTPUT_BIN)
+	@if [ "$(TARGET)" = "ps4" ]; then \
+		command -v socat >/dev/null 2>&1 || { echo "error: 'socat' non trovato (brew install socat)"; exit 1; }; \
+		$(PS4_DEPLOY) -h $(PS4_HOST) -p $(PS4_PORT) $(OUTPUT_BIN); \
+	elif [ "$(TARGET)" = "ps5" ]; then \
+		$(PS5_DEPLOY) -h $(PS5_HOST) -p $(PS5_PORT) $(OUTPUT_BIN); \
+	else \
+		echo "error: deploy supportato solo con TARGET=ps4 o TARGET=ps5"; exit 1; \
+	fi
 
-deploy-i: $(OUTPUT_ELF)
-	@if [ "$(TARGET)" != "ps4" ]; then echo "error: deploy-i supportato solo con TARGET=ps4"; exit 1; fi
-	@command -v socat >/dev/null 2>&1 || { echo "error: 'socat' non trovato (brew install socat)"; exit 1; }
-	@$(PS4_DEPLOY) -h $(PS4_HOST) -p $(PS4_PORT) -i $(OUTPUT_ELF)
+deploy-i: $(OUTPUT_BIN)
+	@if [ "$(TARGET)" = "ps4" ]; then \
+		command -v socat >/dev/null 2>&1 || { echo "error: 'socat' non trovato (brew install socat)"; exit 1; }; \
+		$(PS4_DEPLOY) -h $(PS4_HOST) -p $(PS4_PORT) -i $(OUTPUT_BIN); \
+	elif [ "$(TARGET)" = "ps5" ]; then \
+		$(PS5_DEPLOY) -h $(PS5_HOST) -p $(PS5_PORT) -i $(OUTPUT_BIN); \
+	else \
+		echo "error: deploy-i supportato solo con TARGET=ps4 o TARGET=ps5"; exit 1; \
+	fi
 
-deploy-nc: $(OUTPUT_ELF)
-	@if [ "$(TARGET)" != "ps4" ]; then echo "error: deploy-nc supportato solo con TARGET=ps4"; exit 1; fi
-	@command -v nc >/dev/null 2>&1 || { echo "error: 'nc' (netcat) non trovato"; exit 1; }
-	@echo "Sending $(OUTPUT_ELF) to $(PS4_HOST):$(PS4_PORT) via nc..."
-	@nc -w 10 $(PS4_HOST) $(PS4_PORT) < $(OUTPUT_ELF)
+deploy-nc: $(OUTPUT_BIN)
+	@if [ "$(TARGET)" = "ps4" ]; then \
+		command -v nc >/dev/null 2>&1 || { echo "error: 'nc' (netcat) non trovato"; exit 1; }; \
+		echo "Sending $(OUTPUT_BIN) to $(PS4_HOST):$(PS4_PORT) via nc..."; \
+		nc -w 10 $(PS4_HOST) $(PS4_PORT) < $(OUTPUT_BIN); \
+	elif [ "$(TARGET)" = "ps5" ]; then \
+		command -v nc >/dev/null 2>&1 || { echo "error: 'nc' (netcat) non trovato"; exit 1; }; \
+		echo "Sending $(OUTPUT_BIN) to $(PS5_HOST):$(PS5_PORT) via nc..."; \
+		nc -w 10 $(PS5_HOST) $(PS5_PORT) < $(OUTPUT_BIN); \
+	else \
+		echo "error: deploy-nc supportato solo con TARGET=ps4 o TARGET=ps5"; exit 1; \
+	fi
 
 doctor-ps4:
 	@echo "TARGET=ps4 prerequisiti (macOS/Homebrew)"

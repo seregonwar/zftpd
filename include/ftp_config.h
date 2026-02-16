@@ -43,7 +43,7 @@ SOFTWARE.
  *===========================================================================*/
 
 #ifndef RELEASE_VERSION
-#define RELEASE_VERSION "1.0.0"
+#define RELEASE_VERSION "1.2.0"
 #endif
 
 /*===========================================================================*
@@ -65,7 +65,11 @@ SOFTWARE.
 #endif
 
 #ifndef FTP_STREAM_BUFFER_SIZE
+#if defined(PS4) || defined(PS5)
+#define FTP_STREAM_BUFFER_SIZE 262144U
+#else
 #define FTP_STREAM_BUFFER_SIZE 65536U
+#endif
 #endif
 
 #ifndef FTP_STREAM_BUFFER_COUNT
@@ -115,7 +119,11 @@ SOFTWARE.
  * @note Larger buffers provide diminishing returns
  */
 #ifndef FTP_BUFFER_SIZE
+#if defined(PS4) || defined(PS5)
+#define FTP_BUFFER_SIZE 262144U
+#else
 #define FTP_BUFFER_SIZE 65536U
+#endif
 #endif
 
 /**
@@ -256,7 +264,11 @@ SOFTWARE.
  * @note 256KB is optimal for gigabit networks
  */
 #ifndef FTP_TCP_SNDBUF
+#if defined(PS4) || defined(PS5)
+#define FTP_TCP_SNDBUF 1048576U
+#else
 #define FTP_TCP_SNDBUF 262144U
+#endif
 #endif
 
 /**
@@ -264,7 +276,11 @@ SOFTWARE.
  * @note Should match send buffer size
  */
 #ifndef FTP_TCP_RCVBUF
+#if defined(PS4) || defined(PS5)
+#define FTP_TCP_RCVBUF 1048576U
+#else
 #define FTP_TCP_RCVBUF 262144U
+#endif
 #endif
 
 /**
@@ -297,6 +313,10 @@ SOFTWARE.
  */
 #ifndef FTP_TCP_KEEPCNT
 #define FTP_TCP_KEEPCNT 3U
+#endif
+
+#ifndef FTP_SOCKET_TELEMETRY
+#define FTP_SOCKET_TELEMETRY 0
 #endif
 
 /*===========================================================================*

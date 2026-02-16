@@ -606,10 +606,10 @@ ssize_t ftp_session_recv_data(ftp_session_t *session,
         return FTP_ERR_SOCKET_RECV;
     }
     
-    rate_limit(session, length);
     ssize_t received = PAL_RECV(session->data_fd, buffer, length, 0);
     
     if (received > 0) {
+        rate_limit(session, (size_t)received);
         atomic_fetch_add(&session->stats.bytes_received, (uint64_t)received);
     }
     

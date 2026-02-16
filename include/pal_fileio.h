@@ -213,6 +213,8 @@ ssize_t pal_file_read(int fd, void *buffer, size_t count);
  */
 ssize_t pal_file_write(int fd, const void *buffer, size_t count);
 
+ssize_t pal_file_write_all(int fd, const void *buffer, size_t count);
+
 /**
  * @brief Seek to file position
  * 

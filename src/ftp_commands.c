@@ -579,11 +579,15 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args)
     }
     
     /* Receive file data */
-    char buffer[FTP_BUFFER_SIZE];
+    void *buffer = ftp_buffer_acquire();
+    size_t buf_sz = ftp_buffer_size();
     ssize_t total_received = 0;
     
     while (1) {
-        ssize_t n = ftp_session_recv_data(session, buffer, sizeof(buffer));
+        if (buffer == NULL) {
+            break;
+        }
+        ssize_t n = ftp_session_recv_data(session, buffer, buf_sz);
         
         if (n < 0) {
             if (errno == EINTR) {
@@ -597,7 +601,7 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args)
         }
         
         /* Write to file */
-        ssize_t written = pal_file_write(fd, buffer, (size_t)n);
+        ssize_t written = pal_file_write_all(fd, buffer, (size_t)n);
         if (written != n) {
             break; /* Write error */
         }
@@ -607,6 +611,7 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args)
     
     /* Cleanup */
     pal_file_close(fd);
+    ftp_buffer_release(buffer);
     ftp_session_close_data_connection(session);
     
     if (total_received > 0) {
@@ -658,21 +663,26 @@ ftp_error_t cmd_APPE(ftp_session_t *session, const char *args)
                                        NULL);
     }
     
-    char buffer[FTP_BUFFER_SIZE];
+    void *buffer = ftp_buffer_acquire();
+    size_t buf_sz = ftp_buffer_size();
     ssize_t total_received = 0;
     
     while (1) {
-        ssize_t n = ftp_session_recv_data(session, buffer, sizeof(buffer));
+        if (buffer == NULL) {
+            break;
+        }
+        ssize_t n = ftp_session_recv_data(session, buffer, buf_sz);
         
         if (n <= 0) break;
         
-        ssize_t written = pal_file_write(fd, buffer, (size_t)n);
+        ssize_t written = pal_file_write_all(fd, buffer, (size_t)n);
         if (written != n) break;
         
         total_received += n;
     }
     
     pal_file_close(fd);
+    ftp_buffer_release(buffer);
     ftp_session_close_data_connection(session);
     
     if (total_received > 0) {
