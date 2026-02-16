@@ -2,7 +2,7 @@
 
 [![C11](https://img.shields.io/badge/std-C11-blue.svg)](https://en.cppreference.com/w/c/11)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-
+<img src="https://img.shields.io/github/downloads/seregonwar/zftpd/total?style=flat-square&color=success" alt="Downloads"/><br/>
 Multi-platform FTP server designed to run both as a POSIX binary (Linux/macOS) and as a console payload (PS3/PS4/PS5).
 
 ## Key Features
