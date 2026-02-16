@@ -25,18 +25,18 @@ SOFTWARE.
 /**
  * @file ftp_config.h
  * @brief Compile-time configuration for multi-platform FTP server
- * 
+ *
  * @author SeregonWar
  * @version 1.0.0
  * @date 2026-02-13
- * 
+ *
  */
 
 #ifndef FTP_CONFIG_H
 #define FTP_CONFIG_H
 
-#include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
 
 /*===========================================================================*
  * VERSION INFORMATION
@@ -58,9 +58,9 @@ SOFTWARE.
  */
 #ifndef FTP_DEFAULT_PORT
 #if defined(PS4) || defined(PS5)
-    #define FTP_DEFAULT_PORT 2122U
+#define FTP_DEFAULT_PORT 2122U
 #else
-    #define FTP_DEFAULT_PORT 2121U
+#define FTP_DEFAULT_PORT 2121U
 #endif
 #endif
 
@@ -155,29 +155,29 @@ SOFTWARE.
  *===========================================================================*/
 
 #if defined(PS4) || defined(PS5)
-    /**
-     * PlayStation maximum path length
-     * @note PS4/PS5 use custom BSD with 1024-byte limit
-     */
-    #ifndef FTP_PATH_MAX
-    #define FTP_PATH_MAX 1024U
-    #endif
+/**
+ * PlayStation maximum path length
+ * @note PS4/PS5 use custom BSD with 1024-byte limit
+ */
+#ifndef FTP_PATH_MAX
+#define FTP_PATH_MAX 1024U
+#endif
 #elif defined(PS3)
-    /**
-     * PlayStation 3 maximum path length
-     * @note PS3 has more limited path support
-     */
-    #ifndef FTP_PATH_MAX
-    #define FTP_PATH_MAX 512U
-    #endif
+/**
+ * PlayStation 3 maximum path length
+ * @note PS3 has more limited path support
+ */
+#ifndef FTP_PATH_MAX
+#define FTP_PATH_MAX 512U
+#endif
 #else
-    /**
-     * POSIX maximum path length
-     * @note Linux typically supports 4096 bytes
-     */
-    #ifndef FTP_PATH_MAX
-    #define FTP_PATH_MAX 4096U
-    #endif
+/**
+ * POSIX maximum path length
+ * @note Linux typically supports 4096 bytes
+ */
+#ifndef FTP_PATH_MAX
+#define FTP_PATH_MAX 4096U
+#endif
 #endif
 
 /**
@@ -215,9 +215,9 @@ SOFTWARE.
  */
 #ifndef FTP_ENABLE_UTF8
 #if defined(PS3)
-    #define FTP_ENABLE_UTF8 0
+#define FTP_ENABLE_UTF8 0
 #else
-    #define FTP_ENABLE_UTF8 1
+#define FTP_ENABLE_UTF8 1
 #endif
 #endif
 
@@ -353,7 +353,8 @@ SOFTWARE.
 
 /**
  * Thread stack size in bytes
- * @note Console environments may require larger stacks due to libc/network internals
+ * @note Console environments may require larger stacks due to libc/network
+ * internals
  * @note See whitepaper section 4.2 for worst-case analysis
  */
 #ifndef FTP_THREAD_STACK_SIZE
@@ -413,12 +414,10 @@ _Static_assert(FTP_CMD_BUFFER_SIZE >= 512U,
                "FTP_CMD_BUFFER_SIZE must be >= 512 bytes (RFC 959)");
 
 /* Ensure at least one session allowed */
-_Static_assert(FTP_MAX_SESSIONS > 0U,
-               "FTP_MAX_SESSIONS must be > 0");
+_Static_assert(FTP_MAX_SESSIONS > 0U, "FTP_MAX_SESSIONS must be > 0");
 
 /* Ensure reasonable session limit (resource exhaustion) */
-_Static_assert(FTP_MAX_SESSIONS <= 256U,
-               "FTP_MAX_SESSIONS must be <= 256");
+_Static_assert(FTP_MAX_SESSIONS <= 256U, "FTP_MAX_SESSIONS must be <= 256");
 
 /* Ensure path depth is reasonable */
 _Static_assert(FTP_MAX_PATH_DEPTH > 0U && FTP_MAX_PATH_DEPTH <= 128U,

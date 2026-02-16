@@ -41,11 +41,61 @@ SOFTWARE.
 #include "pal_notification.h"
 #include <errno.h>
 #include <getopt.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+/*---------------------------------------------------------------------------*
+ * ZHTTPD (Web File Explorer) — conditional compilation
+ *---------------------------------------------------------------------------*/
+#ifndef ENABLE_ZHTTPD
+#define ENABLE_ZHTTPD 0
+#endif
+
+#if ENABLE_ZHTTPD
+#include "event_loop.h"
+#include "http_config.h"
+#include "http_csrf.h"
+#include "http_server.h"
+
+static event_loop_t *g_event_loop = NULL;
+static http_server_t *g_http_server = NULL;
+
+/**
+ * @brief Background thread running the HTTP event loop
+ *
+ * The FTP server runs its own accept loop in a separate thread.
+ * This thread drives the non-blocking HTTP event loop alongside it.
+ */
+static void *http_event_loop_thread(void *arg) {
+  event_loop_t *loop = (event_loop_t *)arg;
+  event_loop_run(loop);
+  return NULL;
+}
+
+static int start_http_thread(pthread_t *thread, event_loop_t *loop) {
+  if ((thread == NULL) || (loop == NULL)) {
+    return -1;
+  }
+
+  pthread_attr_t attr;
+  int rc = pthread_attr_init(&attr);
+  if (rc != 0) {
+    return rc;
+  }
+
+  rc = pthread_attr_setstacksize(&attr, (size_t)HTTP_THREAD_STACK_SIZE);
+  if (rc == 0) {
+    rc = pthread_create(thread, &attr, http_event_loop_thread, loop);
+  }
+
+  (void)pthread_attr_destroy(&attr);
+  return rc;
+}
+#endif /* ENABLE_ZHTTPD */
 
 #if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
 #include <stdint.h>
@@ -259,6 +309,35 @@ int main(void) {
     pal_notification_send(notify_msg);
   }
 
+  /*=========================================================================*
+   * ZHTTPD — Start Web File Explorer
+   *=========================================================================*/
+#if ENABLE_ZHTTPD
+  http_csrf_init();
+  g_event_loop = event_loop_create();
+  if (g_event_loop != NULL) {
+    g_http_server = http_server_create(g_event_loop, HTTP_DEFAULT_PORT);
+    if (g_http_server != NULL) {
+      pthread_t http_thread;
+      int rc = start_http_thread(&http_thread, g_event_loop);
+
+      if (rc == 0) {
+        (void)pthread_detach(http_thread);
+        printf("[PS4 HTTP] Web Explorer: http://%s:%u\n", display_ip,
+               (unsigned)HTTP_DEFAULT_PORT);
+        {
+          char msg[128];
+          (void)snprintf(msg, sizeof(msg), "HTTP: %s:%u", display_ip,
+                         (unsigned)HTTP_DEFAULT_PORT);
+          pal_notification_send(msg);
+        }
+      } else {
+        printf("[PS4 HTTP] Failed to start HTTP thread (rc=%d)\n", rc);
+      }
+    }
+  }
+#endif
+
   /* Main loop */
   while (!g_shutdown_requested) {
     sleep(1);
@@ -266,6 +345,22 @@ int main(void) {
 
   /* Shutdown */
   printf("[PS4 FTP] Shutting down...\n");
+
+#if ENABLE_ZHTTPD
+  if (g_event_loop != NULL) {
+    event_loop_stop(g_event_loop);
+  }
+  if (g_http_server != NULL) {
+    http_server_destroy(g_http_server);
+    g_http_server = NULL;
+  }
+  if (g_event_loop != NULL) {
+    event_loop_destroy(g_event_loop);
+    g_event_loop = NULL;
+  }
+  printf("[PS4 HTTP] Stopped\n");
+#endif
+
   ftp_server_stop(&g_server_ctx);
   ftp_server_cleanup(&g_server_ctx);
   pal_notification_shutdown();
@@ -416,6 +511,33 @@ int main(void) {
     pal_notification_send(notify_msg);
   }
 
+  /*=========================================================================*
+   * ZHTTPD — Start Web File Explorer
+   *=========================================================================*/
+#if ENABLE_ZHTTPD
+  g_event_loop = event_loop_create();
+  if (g_event_loop != NULL) {
+    g_http_server = http_server_create(g_event_loop, HTTP_DEFAULT_PORT);
+    if (g_http_server != NULL) {
+      pthread_t http_thread;
+      int rc = start_http_thread(&http_thread, g_event_loop);
+      if (rc == 0) {
+        pthread_detach(http_thread);
+        printf("[PS5 HTTP] Web Explorer: http://%s:%u\n", ip_address,
+               (unsigned)HTTP_DEFAULT_PORT);
+        {
+          char msg[128];
+          (void)snprintf(msg, sizeof(msg), "HTTP: %s:%u", ip_address,
+                         (unsigned)HTTP_DEFAULT_PORT);
+          pal_notification_send(msg);
+        }
+      } else {
+        printf("[PS5 HTTP] Failed to start HTTP thread (rc=%d)\n", rc);
+      }
+    }
+  }
+#endif
+
   /* Main loop */
   while (!g_shutdown_requested) {
     sleep(1);
@@ -431,6 +553,22 @@ int main(void) {
   }
 
   printf("\n[PS5 FTP] Shutting down...\n");
+
+#if ENABLE_ZHTTPD
+  if (g_event_loop != NULL) {
+    event_loop_stop(g_event_loop);
+  }
+  if (g_http_server != NULL) {
+    http_server_destroy(g_http_server);
+    g_http_server = NULL;
+  }
+  if (g_event_loop != NULL) {
+    event_loop_destroy(g_event_loop);
+    g_event_loop = NULL;
+  }
+  printf("[PS5 HTTP] Stopped\n");
+#endif
+
   ftp_server_stop(&g_server_ctx);
   ftp_server_cleanup(&g_server_ctx);
   pal_notification_shutdown();
@@ -451,8 +589,11 @@ static void print_usage(const char *program) {
   printf("Usage: %s [OPTIONS]\n", program);
   printf("\n");
   printf("Options:\n");
-  printf("  -p PORT       Listen port (default: %u)\n", FTP_DEFAULT_PORT);
+  printf("  -p PORT       FTP listen port (default: %u)\n", FTP_DEFAULT_PORT);
   printf("  -d DIR        Root directory (default: current directory)\n");
+#if ENABLE_ZHTTPD
+  printf("  -w PORT       HTTP listen port (default: %u)\n", HTTP_DEFAULT_PORT);
+#endif
   printf("  -h            Show this help message\n");
   printf("\n");
   printf("Example:\n");
@@ -466,6 +607,9 @@ static void print_usage(const char *program) {
 int main(int argc, char **argv) {
   uint16_t port = FTP_DEFAULT_PORT;
   char root_path[FTP_PATH_MAX];
+#if ENABLE_ZHTTPD
+  uint16_t http_port = HTTP_DEFAULT_PORT;
+#endif
 
   /* Get current directory as default */
   if (getcwd(root_path, sizeof(root_path)) == NULL) {
@@ -475,7 +619,11 @@ int main(int argc, char **argv) {
 
   /* Parse command-line arguments */
   int opt;
+#if ENABLE_ZHTTPD
+  while ((opt = getopt(argc, argv, "p:d:w:h")) != -1) {
+#else
   while ((opt = getopt(argc, argv, "p:d:h")) != -1) {
+#endif
     switch (opt) {
     case 'p': {
       long port_arg = strtol(optarg, NULL, 10);
@@ -495,6 +643,17 @@ int main(int argc, char **argv) {
       memcpy(root_path, optarg, len + 1U);
     } break;
 
+#if ENABLE_ZHTTPD
+    case 'w': {
+      long wp = strtol(optarg, NULL, 10);
+      if ((wp <= 0) || (wp > 65535)) {
+        fprintf(stderr, "Error: Invalid HTTP port: %s\n", optarg);
+        return EXIT_FAILURE;
+      }
+      http_port = (uint16_t)wp;
+    } break;
+#endif
+
     case 'h':
       print_usage(argv[0]);
       return EXIT_SUCCESS;
@@ -511,17 +670,20 @@ int main(int argc, char **argv) {
   printf("Multi-Platform FTP Server v" RELEASE_VERSION "\n");
   printf("=====================================\n");
   printf("Root directory: %s\n", root_path);
-  printf("Listen port:    %u\n", port);
+  printf("FTP port:       %u\n", port);
+#if ENABLE_ZHTTPD
+  printf("HTTP port:      %u\n", http_port);
+#endif
   printf("Max sessions:   %u\n", FTP_MAX_SESSIONS);
   printf("=====================================\n");
 
   (void)pal_notification_init();
 
-  /* Initialize server */
+  /* Initialize FTP server */
   ftp_error_t err = ftp_server_init(&g_server_ctx, "0.0.0.0", port, root_path);
 
   if (err != FTP_OK) {
-    fprintf(stderr, "Error: Server initialization failed: %d\n", (int)err);
+    fprintf(stderr, "Error: FTP server initialization failed: %d\n", (int)err);
 
     if (err == FTP_ERR_SOCKET_BIND) {
       fprintf(stderr, "Hint: Port %u may already be in use.\n", port);
@@ -531,25 +693,57 @@ int main(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
-  /* Start server */
+  /* Start FTP server */
   err = ftp_server_start(&g_server_ctx);
 
   if (err != FTP_OK) {
-    fprintf(stderr, "Error: Failed to start server: %d\n", (int)err);
+    fprintf(stderr, "Error: Failed to start FTP server: %d\n", (int)err);
     ftp_server_cleanup(&g_server_ctx);
     return EXIT_FAILURE;
   }
 
   printf("\n");
-  printf("Server started successfully!\n");
-  printf("Listening on all interfaces, port %u\n", port);
-  printf("Press Ctrl+C to stop.\n");
-  printf("\n");
+  printf("FTP server started on 0.0.0.0:%u\n", port);
+
+  /*=========================================================================*
+   * ZHTTPD — Start Web File Explorer
+   *=========================================================================*/
+#if ENABLE_ZHTTPD
+  http_csrf_init();
+  g_event_loop = event_loop_create();
+  if (g_event_loop != NULL) {
+    g_http_server = http_server_create(g_event_loop, http_port);
+    if (g_http_server != NULL) {
+      pthread_t http_thread;
+      int rc = start_http_thread(&http_thread, g_event_loop);
+      if (rc == 0) {
+        pthread_detach(http_thread);
+        printf("HTTP server started on 0.0.0.0:%u\n", http_port);
+        printf("Web File Explorer: http://localhost:%u\n", http_port);
+        {
+          char msg[128];
+          (void)snprintf(msg, sizeof(msg), "HTTP: 0.0.0.0:%u",
+                         (unsigned)http_port);
+          pal_notification_send(msg);
+        }
+      } else {
+        fprintf(stderr, "Warning: Failed to start HTTP thread (rc=%d)\n", rc);
+      }
+    } else {
+      fprintf(stderr, "Warning: Failed to create HTTP server on port %u\n",
+              http_port);
+    }
+  } else {
+    fprintf(stderr, "Warning: Failed to create event loop\n");
+  }
+#endif
+
+  printf("\nPress Ctrl+C to stop.\n\n");
 
   {
     char notify_msg[128];
-    (void)snprintf(notify_msg, sizeof(notify_msg),
-                   "zftpd: listening on 0.0.0.0:%u", (unsigned)port);
+    (void)snprintf(notify_msg, sizeof(notify_msg), "zftpd: FTP 0.0.0.0:%u",
+                   (unsigned)port);
     pal_notification_send(notify_msg);
   }
 
@@ -579,14 +773,28 @@ int main(int argc, char **argv) {
   }
 
   /* Graceful shutdown */
-  printf("\n");
-  printf("Shutdown requested. Closing active connections...\n");
+  printf("\nShutdown requested...\n");
+
+#if ENABLE_ZHTTPD
+  if (g_event_loop != NULL) {
+    event_loop_stop(g_event_loop);
+  }
+  if (g_http_server != NULL) {
+    http_server_destroy(g_http_server);
+    g_http_server = NULL;
+  }
+  if (g_event_loop != NULL) {
+    event_loop_destroy(g_event_loop);
+    g_event_loop = NULL;
+  }
+  printf("HTTP server stopped.\n");
+#endif
 
   ftp_server_stop(&g_server_ctx);
   ftp_server_cleanup(&g_server_ctx);
   pal_notification_shutdown();
 
-  printf("Server stopped.\n");
+  printf("FTP server stopped.\n");
 
   return EXIT_SUCCESS;
 }

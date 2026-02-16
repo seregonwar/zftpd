@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>zftpd | File Explorer</title>
+    <link rel="stylesheet" href="style.css">
+    <!-- CSRF_TOKEN -->
+</head>
+<body>
+    <header class="topbar">
+        <div class="topbar-left">
+            <div class="brand">
+                <div class="brand-title">zftpd | File Explorer</div>
+                <div class="brand-subtitle" id="current-path">/</div>
+            </div>
+        </div>
+
+        <div class="topbar-right">
+            <div id="status" class="status-pill status-ok">Connected</div>
+        </div>
+    </header>
+
+    <section class="toolbar">
+        <button id="btn-up" class="btn" type="button">Up</button>
+        <button id="btn-refresh" class="btn" type="button">Refresh</button>
+        <button id="btn-upload" class="btn" type="button">Upload File</button>
+        <button id="btn-create" class="btn" type="button">Create File</button>
+        <div class="spacer"></div>
+        <input id="search" class="search" type="text" placeholder="Search..." autocomplete="off" autocapitalize="off" spellcheck="false">
+    </section>
+
+    <nav id="breadcrumb" class="breadcrumb"></nav>
+
+    <main class="content">
+        <div id="file-list" class="file-list"></div>
+    </main>
+
+    <input id="file-input" type="file" multiple style="display:none">
+    <div id="drop" class="drop">
+        <div class="drop-card">
+            <div class="drop-title">Drop files to upload</div>
+            <div id="drop-sub" class="drop-sub">Release to start upload</div>
+            <div class="drop-bar"><div id="drop-bar" class="drop-bar-fill"></div></div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

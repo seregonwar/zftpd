@@ -151,6 +151,11 @@ endif
 # Platform-specific flags
 CFLAGS += $(PLATFORM_DEFS)
 
+# Avoid symbol interposition when injected into host processes (PS4/PS5 payload).
+ifneq ($(filter $(TARGET),ps4 ps5),)
+    CFLAGS += -fvisibility=hidden
+endif
+
 # Include directories
 CFLAGS += -I./include
 
@@ -199,6 +204,29 @@ SOURCES += src/ftp_commands.c
 SOURCES += src/ftp_buffer_pool.c
 SOURCES += src/ftp_log.c
 SOURCES += src/main.c
+
+#============================================================================
+# ZHTTPD (Web File Explorer) — compile-time toggle
+# Enabled by default on consoles (PS4/PS5), disabled on PC
+#============================================================================
+
+ifneq ($(filter $(TARGET),ps4 ps5),)
+    ENABLE_ZHTTPD ?= 1
+else
+    ENABLE_ZHTTPD ?= 0
+endif
+
+ifeq ($(ENABLE_ZHTTPD),1)
+    CFLAGS += -DENABLE_ZHTTPD=1
+    CFLAGS += -DENABLE_WEB_UPLOAD=1
+    SOURCES += src/event_loop_kqueue.c
+    SOURCES += src/http_server.c
+    SOURCES += src/http_parser.c
+    SOURCES += src/http_response.c
+    SOURCES += src/http_api.c
+    SOURCES += src/http_csrf.c
+    SOURCES += src/http_resources.c
+endif
 
 # Object files
 OBJECTS := $(patsubst src/%.c,$(OBJ_DIR)/%.o,$(SOURCES))
@@ -280,6 +308,7 @@ analyze:
 TEST_BINS := $(BUILD_DIR)/tests/test_size
 TEST_BINS += $(BUILD_DIR)/tests/test_security
 TEST_BINS += $(BUILD_DIR)/tests/test_path_security
+TEST_BINS += $(BUILD_DIR)/tests/test_http_query
 
 ifeq ($(filter $(TARGET),linux macos),)
 test: $(OUTPUT_ELF)
@@ -289,6 +318,12 @@ test: $(OUTPUT_ELF) $(TEST_BINS)
 	@echo "Running tests..."
 	@for t in $(TEST_BINS); do ./$$t; done
 endif
+
+$(BUILD_DIR)/tests/test_http_query: tests/test_http_query.c src/http_api.c \
+    src/http_response.c src/http_parser.c src/http_csrf.c src/http_resources.c \
+    | $(BUILD_DIR)/tests
+	@echo "  [CC]  $<"
+	@$(CC) $(CFLAGS) -DFTP_AUTH_DELAY=0 -o $@ $^ $(LDFLAGS) $(LIBS)
 
 $(BUILD_DIR)/tests/%: tests/%.c $(LIB_OBJECTS) | $(BUILD_DIR)/tests
 	@echo "  [CC]  $<"
