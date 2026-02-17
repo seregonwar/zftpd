@@ -25,7 +25,7 @@ SOFTWARE.
  * @file event_loop.h
  * @brief Unified event loop abstraction (kqueue/epoll)
  * 
- * @author zhttpd Project
+ * @author Seregon
  * @version 1.0.0
  * 
  * PLATFORMS: FreeBSD (PS4/PS5 kqueue), Linux (epoll)

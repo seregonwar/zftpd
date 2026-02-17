@@ -3,8 +3,21 @@
 # Standards: MISRA C:2012, CERT C, ISO C11
 
 # Project information
-PROJECT := ftpd
-VERSION := 1.0.0
+PROJECT := zftpd
+VERSION := $(shell grep -E 'define[[:space:]]+RELEASE_VERSION' include/ftp_config.h | head -n 1 | cut -d'"' -f2)
+ifeq ($(strip $(VERSION)),)
+VERSION := 0.0.0
+endif
+ARTIFACT_PREFIX ?= zftpd
+HOST_ARCH := $(shell uname -m)
+ifeq ($(TARGET),macos)
+PLATFORM_TAG := macos-$(HOST_ARCH)
+else ifeq ($(TARGET),linux)
+PLATFORM_TAG := linux-$(HOST_ARCH)
+else
+PLATFORM_TAG := $(TARGET)
+endif
+ARTIFACT_BASE := $(ARTIFACT_PREFIX)-$(PLATFORM_TAG)-v$(VERSION)
 
 # Host OS detection (for toolchain/linker compatibility)
 HOST_OS := $(shell uname -s)
@@ -179,12 +192,12 @@ OBJ_DIR := $(BUILD_DIR)/obj
 DEP_DIR := $(BUILD_DIR)/dep
 BIN_DIR := $(BUILD_DIR)
 
-OUTPUT_ELF := $(BIN_DIR)/$(PROJECT).elf
-OUTPUT_BIN := $(BIN_DIR)/$(PROJECT).bin
-
 ifeq ($(TARGET),macos)
-    OUTPUT_ELF := $(BIN_DIR)/$(PROJECT)
+OUTPUT_ELF := $(BIN_DIR)/$(ARTIFACT_BASE)
+else
+OUTPUT_ELF := $(BIN_DIR)/$(ARTIFACT_BASE).elf
 endif
+OUTPUT_BIN := $(BIN_DIR)/$(ARTIFACT_BASE).bin
 
 OBJCOPY ?= objcopy
 STRIP ?= strip
@@ -193,6 +206,8 @@ STRIP ?= strip
 # Source files
 SOURCES := src/pal_network.c
 SOURCES += src/pal_fileio.c
+SOURCES += src/pal_alloc.c
+SOURCES += src/pal_scratch.c
 SOURCES += src/pal_notification.c
 SOURCES += src/pal_filesystem.c
 SOURCES += src/pal_filesystem_psx.c
@@ -242,6 +257,7 @@ DEPENDS := $(patsubst $(OBJ_DIR)/%.o,$(DEP_DIR)/%.d,$(OBJECTS))
 #============================================================================
 
 .PHONY: all clean distclean install test help bin deploy deploy-i deploy-nc doctor-ps4
+.PHONY: all-platforms release-all debug-all
 
 .DEFAULT_GOAL := all
 
@@ -254,7 +270,7 @@ else
 all: $(OUTPUT_BIN)
 endif
 
-$(PROJECT): $(OUTPUT_ELF)
+$(PROJECT): all
 	@true
 
 # Link executable
@@ -263,6 +279,29 @@ $(OUTPUT_ELF): $(OBJECTS) | $(BIN_DIR)
 	@$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 	@echo "Build complete: $(PROJECT) ($(TARGET), $(BUILD_TYPE))"
 
+# Build all supported platforms (best-effort: includes only toolchains found on the host).
+TARGETS_ALL ?= $(shell \
+  echo macos; \
+  command -v gcc >/dev/null 2>&1 && echo linux || true; \
+  command -v ppu-gcc >/dev/null 2>&1 && echo ps3 || true; \
+  [ -d external/ps4-payload-sdk ] && echo ps4 || true; \
+  [ -d external/ps5-payload-sdk ] && echo ps5 || true)
+
+all-platforms: release-all
+
+release-all:
+	@set -e; \
+	for t in $(TARGETS_ALL); do \
+		echo "==> Building $$t (release)"; \
+		$(MAKE) TARGET=$$t BUILD_TYPE=release clean all; \
+	done
+
+debug-all:
+	@set -e; \
+	for t in $(TARGETS_ALL); do \
+		echo "==> Building $$t (debug)"; \
+		$(MAKE) TARGET=$$t BUILD_TYPE=debug clean all; \
+	done
 # Compile C source files
 $(OBJ_DIR)/%.o: src/%.c | $(OBJ_DIR) $(DEP_DIR)
 	@echo "  [CC]  $<"
@@ -308,6 +347,9 @@ analyze:
 TEST_BINS := $(BUILD_DIR)/tests/test_size
 TEST_BINS += $(BUILD_DIR)/tests/test_security
 TEST_BINS += $(BUILD_DIR)/tests/test_path_security
+TEST_BINS += $(BUILD_DIR)/tests/test_buffer_pool
+TEST_BINS += $(BUILD_DIR)/tests/test_scratch
+TEST_BINS += $(BUILD_DIR)/tests/test_alloc
 TEST_BINS += $(BUILD_DIR)/tests/test_http_query
 
 ifeq ($(filter $(TARGET),linux macos),)

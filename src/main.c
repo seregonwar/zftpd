@@ -101,6 +101,7 @@ static int start_http_thread(pthread_t *thread, event_loop_t *loop) {
 #include <stdint.h>
 #include <sys/syscall.h>
 #include <sys/sysctl.h>
+#include "pal_scratch.h"
 #endif
 
 /*===========================================================================*
@@ -122,13 +123,12 @@ static pid_t find_pid_by_name(const char *name) {
     return -1;
   }
 
-  buf = (uint8_t *)malloc(buf_size);
-  if (buf == NULL) {
+  if (pal_scratch_acquire(&buf, buf_size) != 0) {
     return -1;
   }
 
   if (sysctl(mib, 4, buf, &buf_size, NULL, 0) != 0) {
-    free(buf);
+    pal_scratch_release(buf);
     return -1;
   }
 
@@ -148,7 +148,7 @@ static pid_t find_pid_by_name(const char *name) {
     }
   }
 
-  free(buf);
+  pal_scratch_release(buf);
   return pid;
 }
 

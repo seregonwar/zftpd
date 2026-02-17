@@ -43,7 +43,7 @@ SOFTWARE.
  *===========================================================================*/
 
 #ifndef RELEASE_VERSION
-#define RELEASE_VERSION "1.2.0"
+#define RELEASE_VERSION "1.2.1"
 #endif
 
 /*===========================================================================*
@@ -248,6 +248,14 @@ SOFTWARE.
 /*===========================================================================*
  * PERFORMANCE TUNING
  *===========================================================================*/
+
+#ifndef FTP_LIST_SAFE_MODE
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+#define FTP_LIST_SAFE_MODE 1
+#else
+#define FTP_LIST_SAFE_MODE 0
+#endif
+#endif
 
 /**
  * Enable TCP_NODELAY (disable Nagle's algorithm)

@@ -117,7 +117,7 @@ ssize_t pal_sendfile(int sock_fd, int file_fd, off_t *offset, size_t count)
      * Fallback: Buffered read/write
      * Used on platforms without sendfile() support
      */
-    static char buffer[FALLBACK_BUFFER_SIZE];
+    static _Thread_local char buffer[FALLBACK_BUFFER_SIZE];
     
     /* Read from file at specified offset */
     ssize_t nread = pread(file_fd, buffer,

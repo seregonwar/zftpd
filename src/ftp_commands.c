@@ -50,6 +50,9 @@ SOFTWARE.
 #include <fcntl.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#if defined(__APPLE__) || (defined(__FreeBSD__) && !defined(PLATFORM_PS4) && !defined(PLATFORM_PS5))
+#include <sys/mount.h>
+#endif
 #include <time.h>
 #include <unistd.h>
 
@@ -248,6 +251,31 @@ static ftp_error_t send_directory_listing(ftp_session_t *session,
     
     char line_buffer[FTP_LIST_LINE_SIZE];
     struct dirent *entry;
+
+    int skip_stat = 0;
+    if (FTP_LIST_SAFE_MODE != 0) {
+        if ((strncmp(path, "/dev", 4) == 0) && ((path[4] == '\0') || (path[4] == '/'))) {
+            skip_stat = 1;
+        } else if ((strncmp(path, "/proc", 5) == 0) && ((path[5] == '\0') || (path[5] == '/'))) {
+            skip_stat = 1;
+        } else if ((strncmp(path, "/sys", 4) == 0) && ((path[4] == '\0') || (path[4] == '/'))) {
+            skip_stat = 1;
+        }
+#if defined(__APPLE__) || (defined(__FreeBSD__) && !defined(PLATFORM_PS4) && !defined(PLATFORM_PS5))
+        if (skip_stat == 0) {
+            struct statfs sfs;
+            if (statfs(path, &sfs) == 0) {
+                const char *t = sfs.f_fstypename;
+                if ((t != NULL) &&
+                    ((strcmp(t, "devfs") == 0) || (strcmp(t, "procfs") == 0) ||
+                     (strcmp(t, "fdescfs") == 0) || (strcmp(t, "sysfs") == 0) ||
+                     (strcmp(t, "linsysfs") == 0))) {
+                    skip_stat = 1;
+                }
+            }
+        }
+#endif
+    }
     
     while ((entry = readdir(dir)) != NULL) {
         /* Skip . and .. */
@@ -256,19 +284,26 @@ static ftp_error_t send_directory_listing(ftp_session_t *session,
             continue;
         }
         
-        if (detailed) {
+        if (detailed != 0) {
             /* Detailed listing (ls -l format) */
-            char fullpath[FTP_PATH_MAX];
-            int n = snprintf(fullpath, sizeof(fullpath), "%s/%s",
-                             path, entry->d_name);
-            
-            if ((n < 0) || ((size_t)n >= sizeof(fullpath))) {
-                continue; /* Skip if path too long */
-            }
-            
             vfs_stat_t st;
-            if (vfs_stat(fullpath, &st) != FTP_OK) {
-                continue; /* Skip if stat fails */
+            int have_stat = 0;
+            if (skip_stat == 0) {
+                char fullpath[FTP_PATH_MAX];
+                int n = snprintf(fullpath, sizeof(fullpath), "%s/%s", path, entry->d_name);
+                if ((n >= 0) && ((size_t)n < sizeof(fullpath))) {
+                    if (vfs_stat(fullpath, &st) == FTP_OK) {
+                        have_stat = 1;
+                    }
+                }
+            }
+            if (have_stat == 0) {
+                memset(&st, 0, sizeof(st));
+                if (entry->d_type == DT_DIR) {
+                    st.mode = (uint32_t)S_IFDIR;
+                } else {
+                    st.mode = (uint32_t)S_IFREG;
+                }
             }
             
             /* Format: -rw-r--r-- 1 user group size date filename */
@@ -293,9 +328,12 @@ static ftp_error_t send_directory_listing(ftp_session_t *session,
             char time_str[32];
             strftime(time_str, sizeof(time_str), "%b %d %H:%M", &tm_time);
             
-            n = snprintf(line_buffer, sizeof(line_buffer),
+            int n = snprintf(line_buffer, sizeof(line_buffer),
                          "%s 1 ftp ftp %10lld %s %s\r\n",
                          perms, (long long)st.size, time_str, entry->d_name);
+            if ((n < 0) || ((size_t)n >= sizeof(line_buffer))) {
+                continue;
+            }
         } else {
             /* Simple listing (names only) */
             int n = snprintf(line_buffer, sizeof(line_buffer), "%s\r\n",
@@ -456,11 +494,27 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args)
         return ftp_session_send_reply(session, FTP_REPLY_550_FILE_ERROR, "Cannot open file.");
     }
     uint64_t file_size = vfs_get_size(&node);
+
+    vfs_stat_t st;
+    int have_stat = 0;
+    if (vfs_stat(resolved, &st) == FTP_OK) {
+        have_stat = 1;
+    }
+    if (have_stat != 0) {
+        uint32_t fmt = (uint32_t)(st.mode & (uint32_t)S_IFMT);
+        if (fmt != (uint32_t)S_IFREG) {
+            vfs_close(&node);
+            session->restart_offset = 0;
+            return ftp_session_send_reply(session, FTP_REPLY_550_FILE_ERROR,
+                                           "Not a regular file.");
+        }
+    }
     
     /* Handle REST (resume) offset */
     off_t offset = session->restart_offset;
-    if ((offset < 0) || ((uint64_t)offset >= file_size)) {
+    if ((offset < 0) || ((uint64_t)offset > file_size)) {
         vfs_close(&node);
+        session->restart_offset = 0;
         return ftp_session_send_reply(session, FTP_REPLY_550_FILE_ERROR,
                                        "Invalid offset.");
     }
@@ -581,10 +635,12 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args)
     /* Receive file data */
     void *buffer = ftp_buffer_acquire();
     size_t buf_sz = ftp_buffer_size();
-    ssize_t total_received = 0;
+    uint64_t total_received = 0U;
+    int ok = 1;
     
     while (1) {
         if (buffer == NULL) {
+            ok = 0;
             break;
         }
         ssize_t n = ftp_session_recv_data(session, buffer, buf_sz);
@@ -593,7 +649,8 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args)
             if (errno == EINTR) {
                 continue;
             }
-            break; /* Error */
+            ok = 0;
+            break;
         }
         
         if (n == 0) {
@@ -603,10 +660,11 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args)
         /* Write to file */
         ssize_t written = pal_file_write_all(fd, buffer, (size_t)n);
         if (written != n) {
-            break; /* Write error */
+            ok = 0;
+            break;
         }
         
-        total_received += n;
+        total_received += (uint64_t)n;
     }
     
     /* Cleanup */
@@ -614,14 +672,14 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args)
     ftp_buffer_release(buffer);
     ftp_session_close_data_connection(session);
     
-    if (total_received > 0) {
+    if (ok != 0) {
         atomic_fetch_add(&session->stats.files_received, 1U);
-        ftp_log_session_event(session, "STOR_OK", FTP_OK, (uint64_t)total_received);
+        ftp_log_session_event(session, "STOR_OK", FTP_OK, total_received);
         return ftp_session_send_reply(session,
                                        FTP_REPLY_226_TRANSFER_COMPLETE, NULL);
     }
 
-    ftp_log_session_event(session, "STOR_FAIL", FTP_ERR_UNKNOWN, (uint64_t)total_received);
+    ftp_log_session_event(session, "STOR_FAIL", FTP_ERR_UNKNOWN, total_received);
     return ftp_session_send_reply(session, FTP_REPLY_426_TRANSFER_ABORTED,
                                    "Transfer failed.");
 }
@@ -665,33 +723,47 @@ ftp_error_t cmd_APPE(ftp_session_t *session, const char *args)
     
     void *buffer = ftp_buffer_acquire();
     size_t buf_sz = ftp_buffer_size();
-    ssize_t total_received = 0;
+    uint64_t total_received = 0U;
+    int ok = 1;
     
     while (1) {
         if (buffer == NULL) {
+            ok = 0;
             break;
         }
         ssize_t n = ftp_session_recv_data(session, buffer, buf_sz);
         
-        if (n <= 0) break;
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            ok = 0;
+            break;
+        }
+        if (n == 0) {
+            break;
+        }
         
         ssize_t written = pal_file_write_all(fd, buffer, (size_t)n);
-        if (written != n) break;
+        if (written != n) {
+            ok = 0;
+            break;
+        }
         
-        total_received += n;
+        total_received += (uint64_t)n;
     }
     
     pal_file_close(fd);
     ftp_buffer_release(buffer);
     ftp_session_close_data_connection(session);
     
-    if (total_received > 0) {
-        ftp_log_session_event(session, "APPE_OK", FTP_OK, (uint64_t)total_received);
+    if (ok != 0) {
+        ftp_log_session_event(session, "APPE_OK", FTP_OK, total_received);
         return ftp_session_send_reply(session,
                                        FTP_REPLY_226_TRANSFER_COMPLETE, NULL);
     }
 
-    ftp_log_session_event(session, "APPE_FAIL", FTP_ERR_UNKNOWN, (uint64_t)total_received);
+    ftp_log_session_event(session, "APPE_FAIL", FTP_ERR_UNKNOWN, total_received);
     return ftp_session_send_reply(session, FTP_REPLY_426_TRANSFER_ABORTED,
                                    "Transfer failed.");
 }

@@ -585,6 +585,7 @@ ssize_t ftp_session_send_data(ftp_session_t *session,
     ssize_t sent = pal_send_all(session->data_fd, buffer, length, 0);
     
     if (sent > 0) {
+        session->last_activity = time(NULL);
         atomic_fetch_add(&session->stats.bytes_sent, (uint64_t)sent);
     }
     
@@ -609,6 +610,7 @@ ssize_t ftp_session_recv_data(ftp_session_t *session,
     ssize_t received = PAL_RECV(session->data_fd, buffer, length, 0);
     
     if (received > 0) {
+        session->last_activity = time(NULL);
         rate_limit(session, (size_t)received);
         atomic_fetch_add(&session->stats.bytes_received, (uint64_t)received);
     }

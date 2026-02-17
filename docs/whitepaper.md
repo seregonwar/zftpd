@@ -556,82 +556,25 @@ void ftp_session_cleanup(ftp_session_t *session);
 
 **No Dynamic Allocation in Critical Paths**
 
+To maintain predictability on embedded platforms (PS4/PS5) and keep transfer code robust under high concurrency, the project uses a layered memory strategy:
+
+1. **Static streaming buffers** are used for large, repetitive I/O operations in STOR/RETR. The implementation is a fixed-size buffer pool with an atomic bitmask (no heap, no locks), designed to be fast and deterministic under contention.
+2. **Scratch buffers** cover temporary, non-streaming needs without general-purpose allocation.
+3. **Deterministic arena allocation (pal_alloc)** is used for bounded, controlled allocations where a pool is not appropriate, still avoiding `malloc` in request/transfer hot paths.
+
+In practice, the transfer layer follows this rule: either use OS-assisted zero-copy (where available), or fall back to pool-backed buffered I/O. A key constraint is that any shared buffers must be thread-safe; the current implementation avoids global shared scratch buffers in the data path to prevent cross-session corruption.
+
 ```c
-/**
- * @file ftp_memory.h
- * @brief Memory management subsystem
- * 
- * DESIGN PRINCIPLES:
- * 1. All allocations are static or from pre-allocated pools
- * 2. No malloc() in request handling paths
- * 3. Stack usage is bounded and verified
+/*
+ * STREAM BUFFER POOL (conceptual)
+ *
+ * - N fixed buffers of FTP_STREAM_BUFFER_SIZE
+ * - atomic bitmask allocation (bounded scan)
+ * - acquire() returns NULL if exhausted (caller must handle gracefully)
  */
-
-#ifndef FTP_MEMORY_H
-#define FTP_MEMORY_H
-
-#include <stdint.h>
-#include <stddef.h>
-
-/* Compile-time memory limits */
-#define FTP_MAX_SESSIONS      16U     // Maximum concurrent clients
-#define FTP_BUFFER_POOL_SIZE  (16U * 65536U) // 1 MB total buffer pool
-#define FTP_BUFFER_SIZE       65536U  // 64KB per buffer
-
-/**
- * Memory pool for I/O buffers
- * 
- * IMPLEMENTATION: Fixed-size buffer pool with bitmap allocation
- */
-typedef struct {
-    uint8_t data[FTP_BUFFER_POOL_SIZE];
-    uint32_t allocation_bitmap; // 1 bit per buffer (max 32 buffers)
-    pthread_mutex_t lock;
-} ftp_buffer_pool_t;
-
-/**
- * @brief Initialize buffer pool
- * 
- * @param pool Pool to initialize
- * 
- * @return 0 on success, negative on error
- * 
- * @pre pool != NULL
- * 
- * @post All buffers marked as free
- * @post Mutex initialized
- */
-int ftp_buffer_pool_init(ftp_buffer_pool_t *pool);
-
-/**
- * @brief Allocate buffer from pool
- * 
- * @param pool Buffer pool
- * 
- * @return Pointer to buffer, or NULL if pool exhausted
- * 
- * @pre pool != NULL
- * 
- * @note Thread-safe
- * @note WCET: O(1) - bitmap scan is bounded
- */
-void *ftp_buffer_alloc(ftp_buffer_pool_t *pool);
-
-/**
- * @brief Return buffer to pool
- * 
- * @param pool   Buffer pool
- * @param buffer Buffer to free
- * 
- * @pre pool != NULL
- * @pre buffer was allocated from this pool
- * 
- * @note Thread-safe
- * @note WCET: O(1)
- */
-void ftp_buffer_free(ftp_buffer_pool_t *pool, void *buffer);
-
-#endif /* FTP_MEMORY_H */
+void *ftp_buffer_acquire(void);
+void ftp_buffer_release(void *buffer);
+size_t ftp_buffer_size(void);
 ```
 
 ### 4.2 Stack Usage Analysis
