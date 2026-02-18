@@ -33,15 +33,25 @@ SOFTWARE.
  */
 
 #include "pal_fileio.h"
+#include "pal_network.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdatomic.h>
 
 /* Fallback buffer size for non-sendfile platforms */
 #define FALLBACK_BUFFER_SIZE FTP_BUFFER_SIZE
+
+#ifndef PAL_FILE_COPY_BUFFER_SIZE
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+#define PAL_FILE_COPY_BUFFER_SIZE (1024U * 1024U)
+#else
+#define PAL_FILE_COPY_BUFFER_SIZE FTP_BUFFER_SIZE
+#endif
+#endif
 
 /*===========================================================================*
  * ZERO-COPY FILE TRANSFER
@@ -128,11 +138,11 @@ ssize_t pal_sendfile(int sock_fd, int file_fd, off_t *offset, size_t count)
     }
     
     /* Send via socket */
-    ssize_t nsent = send(sock_fd, buffer, (size_t)nread, 0);
-    if (nsent > 0) {
-        *offset += nsent;
+    ssize_t nsent = pal_send_all(sock_fd, buffer, (size_t)nread, 0);
+    if (nsent < 0) {
+        return -1;
     }
-    
+    *offset += nsent;
     return nsent;
 #endif
 }
@@ -140,6 +150,117 @@ ssize_t pal_sendfile(int sock_fd, int file_fd, off_t *offset, size_t count)
 /*===========================================================================*
  * FILE OPERATIONS
  *===========================================================================*/
+
+static ftp_error_t pal_file_copy_atomic(const char *src_path, const char *dst_path)
+{
+    if ((src_path == NULL) || (dst_path == NULL)) {
+        return FTP_ERR_INVALID_PARAM;
+    }
+
+    struct stat st;
+    if (stat(src_path, &st) < 0) {
+        switch (errno) {
+            case ENOENT:
+                return FTP_ERR_NOT_FOUND;
+            case EACCES:
+            case EPERM:
+                return FTP_ERR_PERMISSION;
+            default:
+                return FTP_ERR_FILE_STAT;
+        }
+    }
+
+    if ((st.st_mode & S_IFMT) != S_IFREG) {
+        return FTP_ERR_INVALID_PARAM;
+    }
+
+    int src_fd = -1;
+    int dst_fd = -1;
+    ftp_error_t out_err = FTP_ERR_FILE_WRITE;
+
+    static atomic_uint_fast32_t g_tmp_counter = ATOMIC_VAR_INIT(0U);
+    uint_fast32_t counter = atomic_fetch_add(&g_tmp_counter, 1U);
+
+    char tmp_path[FTP_PATH_MAX];
+    int n = snprintf(tmp_path, sizeof(tmp_path), "%s.zftpd-tmp-%lu-%lu",
+                     dst_path, (unsigned long)getpid(), (unsigned long)counter);
+    if ((n < 0) || ((size_t)n >= sizeof(tmp_path))) {
+        return FTP_ERR_PATH_TOO_LONG;
+    }
+
+    src_fd = open(src_path, O_RDONLY);
+    if (src_fd < 0) {
+        switch (errno) {
+            case ENOENT:
+                out_err = FTP_ERR_NOT_FOUND;
+                break;
+            case EACCES:
+            case EPERM:
+                out_err = FTP_ERR_PERMISSION;
+                break;
+            default:
+                out_err = FTP_ERR_FILE_OPEN;
+                break;
+        }
+        goto cleanup;
+    }
+
+    mode_t mode = (mode_t)(st.st_mode & 0777);
+    dst_fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode);
+    if (dst_fd < 0) {
+        switch (errno) {
+            case EACCES:
+            case EPERM:
+                out_err = FTP_ERR_PERMISSION;
+                break;
+            default:
+                out_err = FTP_ERR_FILE_OPEN;
+                break;
+        }
+        goto cleanup;
+    }
+
+    static _Thread_local uint8_t copy_buf[PAL_FILE_COPY_BUFFER_SIZE];
+
+    for (;;) {
+        ssize_t r = read(src_fd, copy_buf, (size_t)PAL_FILE_COPY_BUFFER_SIZE);
+        if (r > 0) {
+            ssize_t w = pal_file_write_all(dst_fd, copy_buf, (size_t)r);
+            if (w != r) {
+                out_err = FTP_ERR_FILE_WRITE;
+                goto cleanup;
+            }
+            continue;
+        }
+        if (r == 0) {
+            break;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        out_err = FTP_ERR_FILE_READ;
+        goto cleanup;
+    }
+
+    if (rename(tmp_path, dst_path) < 0) {
+        out_err = FTP_ERR_FILE_WRITE;
+        goto cleanup;
+    }
+
+    out_err = FTP_OK;
+
+cleanup:
+    if (dst_fd >= 0) {
+        (void)close(dst_fd);
+    }
+    if (src_fd >= 0) {
+        (void)close(src_fd);
+    }
+    if (out_err != FTP_OK) {
+        (void)unlink(tmp_path);
+    }
+    return out_err;
+}
 
 /**
  * @brief Safe file open
@@ -369,8 +490,16 @@ ftp_error_t pal_file_rename(const char *old_path, const char *new_path)
             case EPERM:
                 return FTP_ERR_PERMISSION;
             case EXDEV:
-                /* Cross-device rename not supported */
-                return FTP_ERR_INVALID_PARAM;
+                {
+                    ftp_error_t copy_err = pal_file_copy_atomic(old_path, new_path);
+                    if (copy_err != FTP_OK) {
+                        return copy_err;
+                    }
+                    if (unlink(old_path) < 0) {
+                        return FTP_ERR_FILE_WRITE;
+                    }
+                    return FTP_OK;
+                }
             default:
                 return FTP_ERR_FILE_WRITE;
         }

@@ -547,6 +547,7 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args)
 
             remaining -= (size_t)sent;
             bytes_sent += (uint64_t)sent;
+            session->last_activity = time(NULL);
             atomic_fetch_add(&session->stats.bytes_sent, (uint64_t)sent);
         }
     } else {
