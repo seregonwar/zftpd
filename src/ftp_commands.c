@@ -37,6 +37,7 @@ SOFTWARE.
 
 #include "ftp_commands.h"
 #include "ftp_buffer_pool.h"
+#include "ftp_crypto.h"
 #include "ftp_log.h"
 #include "ftp_path.h"
 #include "ftp_session.h"
@@ -573,8 +574,21 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
   size_t remaining = (size_t)(file_size - (uint64_t)offset);
   uint64_t bytes_sent = 0U;
 
-  if (((vfs_get_caps(&node) & VFS_CAP_SENDFILE) != 0U) &&
-      (FTP_TRANSFER_RATE_LIMIT_BPS == 0U)) {
+  /*
+   * sendfile fast path: kernel-to-kernel transfer
+   *
+   *   Disabled when encryption is active because XOR must happen
+   *   in userspace. Falls through to the buffered read-encrypt-send
+   *   path below, which still saturates gigabit links with ChaCha20.
+   */
+  int use_sendfile = ((vfs_get_caps(&node) & VFS_CAP_SENDFILE) != 0U) &&
+                     (FTP_TRANSFER_RATE_LIMIT_BPS == 0U);
+#if FTP_ENABLE_CRYPTO
+  if (session->crypto.active != 0U) {
+    use_sendfile = 0;
+  }
+#endif
+  if (use_sendfile != 0) {
     while (remaining > 0U) {
       ssize_t sent =
           pal_sendfile(session->data_fd, node.fd, &offset, remaining);
@@ -1310,6 +1324,9 @@ ftp_error_t cmd_FEAT(ftp_session_t *session, const char *args) {
                             " MLSD",
                             " MLST",
 #endif
+#if FTP_ENABLE_CRYPTO
+                            " XCRYPT",
+#endif
                             "End"};
 
   return ftp_session_send_multiline_reply(
@@ -1399,3 +1416,114 @@ ftp_error_t cmd_STRU(ftp_session_t *session, const char *args) {
   return ftp_session_send_reply(session, FTP_REPLY_504_NOT_IMPL_PARAM,
                                 "Only File structure supported.");
 }
+
+/*===========================================================================*
+ * ENCRYPTION (ChaCha20)
+ *
+ *  AUTH XCRYPT handshake:
+ *
+ *    Client                          Server
+ *    ──────                          ──────
+ *    AUTH XCRYPT ──────────────────►
+ *                ◄────────────────── 234 XCRYPT <24-hex-nonce>
+ *
+ *    Both sides derive:
+ *      session_key = ChaCha20_KDF(PSK, nonce)
+ *
+ *    All subsequent traffic is XORed with ChaCha20 keystream.
+ *
+ *===========================================================================*/
+
+#if FTP_ENABLE_CRYPTO
+
+/**
+ * @brief Convert nibble (0-15) to hex character
+ */
+static char nibble_to_hex(uint8_t n) {
+  return (n < 10U) ? (char)('0' + n) : (char)('a' + (n - 10U));
+}
+
+/**
+ * @brief Generate cryptographic random nonce from /dev/urandom or fallback
+ */
+static int generate_nonce(uint8_t *buf, size_t len) {
+  /*
+   * /dev/urandom is available on Linux, macOS.
+   * Falls back to time-based PRNG if unavailable.
+   */
+  int fd = pal_file_open("/dev/urandom", O_RDONLY, 0);
+  if (fd >= 0) {
+    ssize_t n = pal_file_read(fd, buf, len);
+    pal_file_close(fd);
+    if (n == (ssize_t)len) {
+      return 0;
+    }
+  }
+
+  /* Fallback: time-based seed (weaker but functional) */
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  uint64_t seed = ((uint64_t)ts.tv_sec * 1000000000ULL) + (uint64_t)ts.tv_nsec;
+  for (size_t i = 0U; i < len; i++) {
+    seed = (seed * 6364136223846793005ULL) + 1442695040888963407ULL;
+    buf[i] = (uint8_t)(seed >> 33U);
+  }
+  return 0;
+}
+
+ftp_error_t cmd_AUTH(ftp_session_t *session, const char *args) {
+  if ((session == NULL) || (args == NULL)) {
+    return FTP_ERR_INVALID_PARAM;
+  }
+
+  /* Only XCRYPT mechanism is supported */
+  if ((strcmp(args, "XCRYPT") != 0) && (strcmp(args, "xcrypt") != 0)) {
+    return ftp_session_send_reply(session, FTP_REPLY_504_NOT_IMPL_PARAM,
+                                  "Unsupported AUTH mechanism.");
+  }
+
+  /* Already encrypted? */
+  if (session->crypto.active != 0U) {
+    return ftp_session_send_reply(session, FTP_REPLY_503_BAD_SEQUENCE,
+                                  "Already encrypted.");
+  }
+
+  /* Generate 12-byte random nonce */
+  uint8_t nonce[12];
+  (void)generate_nonce(nonce, sizeof(nonce));
+
+  /* Derive session key from PSK + nonce */
+  static const uint8_t psk[32] = FTP_CRYPTO_PSK;
+  uint8_t session_key[32];
+  ftp_crypto_derive_key(psk, nonce, session_key);
+
+  /* Format nonce as hex string for reply */
+  char hex_nonce[25]; /* 24 hex chars + NUL */
+  for (size_t i = 0U; i < 12U; i++) {
+    hex_nonce[i * 2U] = nibble_to_hex((nonce[i] >> 4U) & 0x0FU);
+    hex_nonce[(i * 2U) + 1U] = nibble_to_hex(nonce[i] & 0x0FU);
+  }
+  hex_nonce[24] = '\0';
+
+  /* Reply: 234 XCRYPT <nonce-hex> */
+  char reply_msg[64];
+  (void)snprintf(reply_msg, sizeof(reply_msg), "XCRYPT %s", hex_nonce);
+  ftp_error_t err =
+      ftp_session_send_reply(session, FTP_REPLY_234_AUTH_OK, reply_msg);
+
+  if (err == FTP_OK) {
+    /* Activate encryption on this session */
+    ftp_crypto_init(&session->crypto, session_key, nonce);
+    ftp_log_session_event(session, "CRYPTO_ON", FTP_OK, 0U);
+  }
+
+  /* Scrub key material from stack */
+  volatile uint8_t *vk = (volatile uint8_t *)session_key;
+  for (size_t i = 0U; i < sizeof(session_key); i++) {
+    vk[i] = 0U;
+  }
+
+  return err;
+}
+
+#endif /* FTP_ENABLE_CRYPTO */

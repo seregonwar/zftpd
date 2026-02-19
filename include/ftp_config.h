@@ -245,6 +245,39 @@ SOFTWARE.
 #define FTP_ENABLE_REST 1
 #endif
 
+/**
+ * Enable ChaCha20 stream encryption (AUTH XCRYPT)
+ *
+ *   ON  (1) : Linux, macOS — encrypts ctrl + data channels
+ *   OFF (0) : PS4, PS5    — local-network trust, no overhead
+ *
+ * @note Encryption is negotiated per-session via AUTH XCRYPT.
+ *       Clients that do not send AUTH XCRYPT transfer in cleartext.
+ */
+#ifndef FTP_ENABLE_CRYPTO
+#if defined(PS4) || defined(PS5) || defined(PLATFORM_PS4) ||                   \
+    defined(PLATFORM_PS5)
+#define FTP_ENABLE_CRYPTO 0
+#else
+#define FTP_ENABLE_CRYPTO 1
+#endif
+#endif
+
+/**
+ * Pre-shared key for ChaCha20 encryption (256-bit / 32 bytes)
+ *
+ * Override at compile time:
+ *   -DFTP_CRYPTO_PSK='{ 0x01,0x02,...,0x20 }'
+ *
+ * @warning Change this default before deploying to production!
+ */
+#ifndef FTP_CRYPTO_PSK
+#define FTP_CRYPTO_PSK                                                         \
+  {0x7A, 0x46, 0x54, 0x50, 0x44, 0x2D, 0x43, 0x68, 0x61, 0x43, 0x68,           \
+   0x61, 0x32, 0x30, 0x2D, 0x4B, 0x65, 0x79, 0x2D, 0x44, 0x65, 0x66,           \
+   0x61, 0x75, 0x6C, 0x74, 0x21, 0x40, 0x23, 0x24, 0x25, 0x5E}
+#endif
+
 /*===========================================================================*
  * PERFORMANCE TUNING
  *===========================================================================*/

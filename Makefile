@@ -218,6 +218,7 @@ SOURCES += src/ftp_protocol.c
 SOURCES += src/ftp_commands.c
 SOURCES += src/ftp_buffer_pool.c
 SOURCES += src/ftp_log.c
+SOURCES += src/ftp_crypto.c
 SOURCES += src/main.c
 
 #============================================================================
