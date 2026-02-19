@@ -82,7 +82,7 @@ SOFTWARE.
  * @note Each client requires ~2KB of memory plus thread stack
  */
 #ifndef FTP_MAX_SESSIONS
-#define FTP_MAX_SESSIONS 16U
+#define FTP_MAX_SESSIONS 32U
 #endif
 
 /**
