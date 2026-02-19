@@ -90,7 +90,7 @@ ssize_t pal_sendfile(int sock_fd, int file_fd, off_t *offset, size_t count)
     ssize_t result = sendfile(sock_fd, file_fd, offset, count);
     return result;
     
-#elif defined(__FreeBSD__) && !defined(PLATFORM_PS4) && !defined(PLATFORM_PS5)
+#elif defined(__FreeBSD__) || defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
     /*
      * FreeBSD sendfile(2)
      * Signature: sendfile(in_fd, out_fd, offset, count, hdtr, sbytes, flags)

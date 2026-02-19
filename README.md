@@ -7,12 +7,28 @@ Multi-platform FTP server designed to run both as a POSIX binary (Linux/macOS) a
 
 ## Key Features
 
-- Robust TCP I/O (handling partial sends, EINTR, backpressure)
+- Zero-copy data path where available (`sendfile` fast path; falls back to buffered I/O when encrypted)
+- Robust TCP I/O (partial sends, EINTR, backpressure-aware send buffers)
 - Control/data channel timeouts + session idle timeout
-- Path hardening (no traversal + best-effort canonicalization)
-- Structured logging per session/command
-- Transfer rate limiting (optional, compile-time)
+- Path hardening (canonicalization, traversal blocking, optional safe-list for /dev, /proc, /sys)
+- Structured per-session logging + stats (bytes/files sent/received)
+- Transfer rate limiting (token bucket, compile-time toggle)
+- Resume uploads via `REST` + `STOR`; append uploads via `APPE`
+- Optional ChaCha20 stream cipher (`AUTH XCRYPT`) with PSK
 - On-screen notifications on PS4/PS5 (IP/port and status)
+- Optional ZHTTP web file explorer (compile-time, enabled by default on PS4/PS5)
+
+## Supported FTP Commands
+
+- **Authentication & control:** `USER`, `PASS`, `QUIT`, `NOOP`
+- **Navigation:** `CWD`, `CDUP`, `PWD`
+- **Listing:** `LIST`, `NLST`, `MLSD`, `MLST` (MLST minimal)
+- **Transfer:** `RETR`, `STOR`, `APPE`, `REST`
+- **File management:** `DELE`, `RMD`, `MKD`, `RNFR`, `RNTO`
+- **Data connection:** `PORT`, `PASV`
+- **Information:** `SIZE`, `MDTM`, `STAT`, `SYST`, `FEAT`, `HELP`
+- **Transfer parameters:** `TYPE`, `MODE`, `STRU`
+- **Encryption (opt-in):** `AUTH XCRYPT` (ChaCha20 PSK)
 
 ## Build
 
@@ -101,6 +117,14 @@ Compile-time configuration is in [ftp_config.h](include/ftp_config.h). Useful ma
 
 - If you see "payload already loaded" on PS4/PS5, it means an instance is already active (dedup). The new daemon will try to terminate the old instance and start a new one on port `FTP_DEFAULT_PORT:2122`. If that fails, it will try the next port `FTP_DEFAULT_PORT+1:2123` up to a maximum of 9 subsequent ports.
 - For host testing: `make TARGET=linux test` or `make TARGET=macos test`.
+
+## ZHTTP (Web File Explorer)
+
+- **What it is:** Lightweight web UI to browse, download, and (optionally) upload files from a browser.
+- **Enable/disable:** On by default on PS4/PS5. Disabled by default elsewhere. Override with `ENABLE_ZHTTPD=1` or disable with `ENABLE_ZHTTPD=0` at build time (e.g., `make TARGET=ps5 ENABLE_ZHTTPD=0`).
+- **Build impact:** Adds HTTP modules (`event_loop_kqueue`, `http_server`, `http_parser`, `http_response`, `http_api`, `http_csrf`, `http_resources`).
+- **Usage:** After starting the daemon, open `http://<ip>:<port>/` (port matches the configured FTP port). Shows a file explorer with breadcrumb, direct download, and—if built with `ENABLE_WEB_UPLOAD=1` (enabled alongside ZHTTP)—an upload button.
+- **Security:** Intended for LAN/payload scenarios; no additional auth beyond local network context. Keep the port closed on WAN.
 
 ## Support
 

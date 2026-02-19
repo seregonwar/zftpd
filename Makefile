@@ -25,6 +25,8 @@ HOST_OS := $(shell uname -s)
 # Target platform (default: linux)
 # Valid values: linux, macos, ps3, ps4, ps5
 TARGET ?= linux
+# Normalize target to lowercase so TARGET=PS5/PS4 still matches rules
+TARGET := $(shell echo $(TARGET) | tr '[:upper:]' '[:lower:]')
 
 # Build configuration
 BUILD_TYPE ?= release
@@ -354,10 +356,10 @@ TEST_BINS += $(BUILD_DIR)/tests/test_alloc
 TEST_BINS += $(BUILD_DIR)/tests/test_http_query
 
 ifeq ($(filter $(TARGET),linux macos),)
-test: $(OUTPUT_ELF)
+test: $(OUTPUT_BIN)
 	@echo "Tests skipped for TARGET=$(TARGET)"
 else
-test: $(OUTPUT_ELF) $(TEST_BINS)
+test: $(OUTPUT_ELF) $(OUTPUT_BIN) $(TEST_BINS)
 	@echo "Running tests..."
 	@for t in $(TEST_BINS); do ./$$t; done
 endif
