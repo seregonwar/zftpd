@@ -44,27 +44,38 @@ typedef struct notify_request {
     char message[3075];
 } notify_request_t;
 
+__attribute__((weak))
 int sceKernelSendNotificationRequest(int, notify_request_t *, size_t, int);
+
+static int g_notify_available = 0;
 
 int pal_notification_init(void)
 {
+    if (sceKernelSendNotificationRequest == NULL) {
+        g_notify_available = 0;
+        return -1;
+    }
+    g_notify_available = 1;
     return 0;
 }
 
 void pal_notification_shutdown(void)
 {
+    g_notify_available = 0;
 }
 
 void pal_notification_send(const char *message)
 {
-    if (message == NULL) {
+    if ((g_notify_available == 0) || (message == NULL)) {
         return;
     }
 
     notify_request_t req;
     memset(&req, 0, sizeof(req));
     (void)snprintf(req.message, sizeof(req.message), "%s", message);
-    (void)sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
+    if (sceKernelSendNotificationRequest != NULL) {
+        (void)sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
+    }
 }
 
 #elif defined(PLATFORM_PS5)
@@ -79,27 +90,38 @@ typedef struct notify_request {
     char message[3075];
 } notify_request_t;
 
+__attribute__((weak))
 int sceKernelSendNotificationRequest(int, notify_request_t *, size_t, int);
+
+static int g_notify_available = 0;
 
 int pal_notification_init(void)
 {
+    if (sceKernelSendNotificationRequest == NULL) {
+        g_notify_available = 0;
+        return -1;
+    }
+    g_notify_available = 1;
     return 0;
 }
 
 void pal_notification_shutdown(void)
 {
+    g_notify_available = 0;
 }
 
 void pal_notification_send(const char *message)
 {
-    if (message == NULL) {
+    if ((g_notify_available == 0) || (message == NULL)) {
         return;
     }
 
     notify_request_t req;
     memset(&req, 0, sizeof(req));
     (void)snprintf(req.message, sizeof(req.message), "%s", message);
-    (void)sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
+    if (sceKernelSendNotificationRequest != NULL) {
+        (void)sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
+    }
 }
 
 #else

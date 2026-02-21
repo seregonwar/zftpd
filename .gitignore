@@ -65,3 +65,8 @@ ftpd.log
 /uploads_test
 /plist-test
 /qa
+/zFrame
+*.plist
+test_mc_ping.py
+*.txt
+/backup

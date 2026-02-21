@@ -61,7 +61,19 @@ void http_csrf_init(void) {
 
   /* Convert to hex string */
   for (int i = 0; i < HTTP_CSRF_TOKEN_LENGTH / 2; i++) {
-    sprintf(g_csrf_token + (i * 2), "%02x", random_bytes[i]);
+    size_t offset = (size_t)i * 2U;
+    size_t remaining = sizeof(g_csrf_token) - offset;
+    if (remaining < 3U) {
+      snprintf(g_csrf_token, sizeof(g_csrf_token),
+               "0123456789abcdef0123456789abcdef");
+      return;
+    }
+    int n = snprintf(g_csrf_token + offset, remaining, "%02x", random_bytes[i]);
+    if ((n < 0) || (n >= (int)remaining)) {
+      snprintf(g_csrf_token, sizeof(g_csrf_token),
+               "0123456789abcdef0123456789abcdef");
+      return;
+    }
   }
 }
 

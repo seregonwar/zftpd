@@ -297,6 +297,15 @@ int pal_file_open(const char *path, int flags, mode_t mode)
         }
     }
     
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+#ifdef F_NOCACHE
+    (void)fcntl(fd, F_NOCACHE, 1);
+#endif
+#if defined(PLATFORM_PS5) && defined(POSIX_FADV_SEQUENTIAL)
+    (void)posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+#endif
+#endif
+
     return fd;
 }
 

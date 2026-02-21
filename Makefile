@@ -279,6 +279,7 @@ $(PROJECT): all
 # Link executable
 $(OUTPUT_ELF): $(OBJECTS) | $(BIN_DIR)
 	@echo "  [LD]  $@"
+	@mkdir -p $(BIN_DIR)
 	@$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 	@echo "Build complete: $(PROJECT) ($(TARGET), $(BUILD_TYPE))"
 
@@ -308,6 +309,7 @@ debug-all:
 # Compile C source files
 $(OBJ_DIR)/%.o: src/%.c | $(OBJ_DIR) $(DEP_DIR)
 	@echo "  [CC]  $<"
+	@mkdir -p $(OBJ_DIR) $(DEP_DIR)
 	@$(CC) $(CFLAGS) -MMD -MP -MF $(DEP_DIR)/$*.d -MT $@ -c $< -o $@
 
 # Include dependency files

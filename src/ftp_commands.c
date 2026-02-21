@@ -458,60 +458,6 @@ ftp_error_t cmd_MLST(ftp_session_t *session, const char *args) {
  * FILE TRANSFER
  *===========================================================================*/
 
-/*---------------------------------------------------------------------------*
- * RATE LIMITER  (token-bucket, per-session)
- *
- *   bucket fills at FTP_TRANSFER_RATE_LIMIT_BPS bytes/sec.
- *   burst cap  = FTP_TRANSFER_RATE_BURST_BYTES
- *   When bucket empty -> nanosleep until tokens available.
- *   No-op when rate == 0 (unlimited).
- *---------------------------------------------------------------------------*/
-static void ftp_rate_limit_wait(ftp_session_t *session, uint64_t bytes) {
-#if FTP_TRANSFER_RATE_LIMIT_BPS == 0U
-  (void)session;
-  (void)bytes;
-#else
-  const uint64_t rate = (uint64_t)FTP_TRANSFER_RATE_LIMIT_BPS;
-  const uint64_t burst = (uint64_t)FTP_TRANSFER_RATE_BURST_BYTES;
-
-  /* Refill tokens based on elapsed time */
-  struct timespec now;
-  clock_gettime(CLOCK_MONOTONIC, &now);
-  uint64_t now_ns =
-      (uint64_t)now.tv_sec * 1000000000ULL + (uint64_t)now.tv_nsec;
-
-  if (session->rl_last_ns == 0U) {
-    /* First call: fill bucket to burst capacity */
-    session->rl_tokens = burst;
-    session->rl_last_ns = now_ns;
-  } else {
-    uint64_t elapsed_ns = now_ns - session->rl_last_ns;
-    /* tokens += rate * elapsed / 1e9, capped at burst */
-    uint64_t new_tokens = (rate * elapsed_ns) / 1000000000ULL;
-    session->rl_tokens += new_tokens;
-    if (session->rl_tokens > burst) {
-      session->rl_tokens = burst;
-    }
-    session->rl_last_ns = now_ns;
-  }
-
-  /* Consume tokens; sleep if insufficient */
-  if (bytes <= session->rl_tokens) {
-    session->rl_tokens -= bytes;
-  } else {
-    uint64_t deficit = bytes - session->rl_tokens;
-    session->rl_tokens = 0U;
-    /* sleep_ns = deficit * 1e9 / rate */
-    uint64_t sleep_ns = (deficit * 1000000000ULL) / rate;
-    struct timespec ts;
-    ts.tv_sec = (time_t)(sleep_ns / 1000000000ULL);
-    ts.tv_nsec = (long)(sleep_ns % 1000000000ULL);
-    nanosleep(&ts, NULL);
-    session->rl_last_ns += sleep_ns;
-  }
-#endif
-}
-
 /**
  * @brief RETR command - Retrieve (download) file
  */
@@ -589,6 +535,7 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
   }
 #endif
   if (use_sendfile != 0) {
+    pal_socket_cork(session->data_fd);
     while (remaining > 0U) {
       ssize_t sent =
           pal_sendfile(session->data_fd, node.fd, &offset, remaining);
@@ -605,12 +552,14 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
       session->last_activity = time(NULL);
       atomic_fetch_add(&session->stats.bytes_sent, (uint64_t)sent);
     }
+    pal_socket_uncork(session->data_fd);
   } else {
     void *buf = ftp_buffer_acquire();
     size_t buf_sz = ftp_buffer_size();
     if (buf == NULL) {
       remaining = 1U;
     } else {
+      pal_socket_cork(session->data_fd);
       while (remaining > 0U) {
         size_t chunk = (remaining < buf_sz) ? remaining : buf_sz;
         ssize_t n = vfs_read(&node, buf, chunk);
@@ -630,8 +579,8 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
         bytes_sent += (uint64_t)sent;
         remaining -= (size_t)n;
         session->last_activity = time(NULL);
-        ftp_rate_limit_wait(session, (uint64_t)sent);
       }
+      pal_socket_uncork(session->data_fd);
     }
     ftp_buffer_release(buf);
   }
@@ -723,9 +672,12 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
   size_t buf_sz = ftp_buffer_size();
   uint64_t total_received = 0U;
   int ok = 1;
+  int fail_stage = 0; /* 1 = no buffer, 2 = recv error, 3 = write error */
+  int saved_errno = 0;
 
   while (1) {
     if (buffer == NULL) {
+      fail_stage = 1;
       ok = 0;
       break;
     }
@@ -735,6 +687,8 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
       if (errno == EINTR) {
         continue;
       }
+      saved_errno = errno;
+      fail_stage = 2;
       ok = 0;
       break;
     }
@@ -746,16 +700,24 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
     /* Write to file */
     ssize_t written = pal_file_write_all(fd, buffer, (size_t)n);
     if (written != n) {
+      saved_errno = errno;
+      fail_stage = 3;
       ok = 0;
       break;
     }
 
     total_received += (uint64_t)n;
     session->last_activity = time(NULL);
-    ftp_rate_limit_wait(session, (uint64_t)n);
   }
 
   /* Cleanup */
+  if (ok != 0) {
+    /* Flush to persistent storage before closing.
+     * Prevents M.2 / USB data loss if device is unmounted
+     * or power-cycled while write-back cache is dirty.
+     */
+    (void)fsync(fd);
+  }
   pal_file_close(fd);
   ftp_buffer_release(buffer);
   ftp_session_close_data_connection(session);
@@ -769,12 +731,29 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
   }
 
   ftp_log_session_event(session, "STOR_FAIL", FTP_ERR_UNKNOWN, total_received);
+
+  char detail[128];
+  if (fail_stage == 2) {
+    snprintf(detail, sizeof(detail),
+             "Transfer failed: network receive error (errno=%d).", saved_errno);
+  } else if (fail_stage == 3) {
+    snprintf(detail, sizeof(detail),
+             "Transfer failed: disk write error (errno=%d).", saved_errno);
+  } else {
+    snprintf(detail, sizeof(detail), "Transfer failed.");
+  }
+
   return ftp_session_send_reply(session, FTP_REPLY_426_TRANSFER_ABORTED,
-                                "Transfer failed.");
+                                detail);
 }
 
 /**
  * @brief APPE command - Append to file
+ *
+ *  REST + APPE resume workflow
+ *  ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ *  If restart_offset > 0, the file is opened for writing (not append)
+ *  and seeked to the offset. Otherwise it opens with O_APPEND.
  */
 ftp_error_t cmd_APPE(ftp_session_t *session, const char *args) {
   if ((session == NULL) || (args == NULL)) {
@@ -786,23 +765,46 @@ ftp_error_t cmd_APPE(ftp_session_t *session, const char *args) {
   ftp_error_t err = ftp_path_resolve(session, args, resolved, sizeof(resolved));
 
   if (err != FTP_OK) {
+    session->restart_offset = 0;
     return ftp_session_send_reply(session, FTP_REPLY_550_FILE_ERROR,
                                   "Invalid path.");
   }
 
-  /* Open file for appending */
-  int fd = pal_file_open(resolved, O_WRONLY | O_CREAT | O_APPEND, FILE_PERM);
+  /*
+   * Open flags depend on REST offset:
+   *
+   *   offset == 0  ->  O_WRONLY | O_CREAT | O_APPEND  (true append)
+   *   offset >  0  ->  O_WRONLY | O_CREAT             (seek to offset)
+   */
+  int open_flags = O_WRONLY | O_CREAT;
+  if (session->restart_offset == 0) {
+    open_flags |= O_APPEND;
+  }
+
+  int fd = pal_file_open(resolved, open_flags, FILE_PERM);
   if (fd < 0) {
+    session->restart_offset = 0;
     return ftp_session_send_reply(session, FTP_REPLY_550_FILE_ERROR,
                                   "Cannot open file.");
   }
 
-  /* Same as STOR but with append mode */
+  /* Seek to restart offset when provided */
+  if (session->restart_offset > 0) {
+    if (lseek(fd, session->restart_offset, SEEK_SET) < 0) {
+      pal_file_close(fd);
+      session->restart_offset = 0;
+      return ftp_session_send_reply(session, FTP_REPLY_451_LOCAL_ERROR,
+                                    "Seek failed.");
+    }
+  }
+
+  /* Open data connection */
   ftp_session_send_reply(session, FTP_REPLY_150_FILE_OK, NULL);
 
   err = ftp_session_open_data_connection(session);
   if (err != FTP_OK) {
     pal_file_close(fd);
+    session->restart_offset = 0;
     return ftp_session_send_reply(session, FTP_REPLY_425_CANT_OPEN_DATA, NULL);
   }
 
@@ -810,9 +812,12 @@ ftp_error_t cmd_APPE(ftp_session_t *session, const char *args) {
   size_t buf_sz = ftp_buffer_size();
   uint64_t total_received = 0U;
   int ok = 1;
+  int fail_stage = 0; /* 1 = no buffer, 2 = recv error, 3 = write error */
+  int saved_errno = 0;
 
   while (1) {
     if (buffer == NULL) {
+      fail_stage = 1;
       ok = 0;
       break;
     }
@@ -822,6 +827,8 @@ ftp_error_t cmd_APPE(ftp_session_t *session, const char *args) {
       if (errno == EINTR) {
         continue;
       }
+      saved_errno = errno;
+      fail_stage = 2;
       ok = 0;
       break;
     }
@@ -831,18 +838,24 @@ ftp_error_t cmd_APPE(ftp_session_t *session, const char *args) {
 
     ssize_t written = pal_file_write_all(fd, buffer, (size_t)n);
     if (written != n) {
+      saved_errno = errno;
+      fail_stage = 3;
       ok = 0;
       break;
     }
 
     total_received += (uint64_t)n;
     session->last_activity = time(NULL);
-    ftp_rate_limit_wait(session, (uint64_t)n);
   }
 
+  /* Flush to persistent storage before closing */
+  if (ok != 0) {
+    (void)fsync(fd);
+  }
   pal_file_close(fd);
   ftp_buffer_release(buffer);
   ftp_session_close_data_connection(session);
+  session->restart_offset = 0;
 
   if (ok != 0) {
     ftp_log_session_event(session, "APPE_OK", FTP_OK, total_received);
@@ -851,8 +864,20 @@ ftp_error_t cmd_APPE(ftp_session_t *session, const char *args) {
   }
 
   ftp_log_session_event(session, "APPE_FAIL", FTP_ERR_UNKNOWN, total_received);
+
+  char detail[128];
+  if (fail_stage == 2) {
+    snprintf(detail, sizeof(detail),
+             "Transfer failed: network receive error (errno=%d).", saved_errno);
+  } else if (fail_stage == 3) {
+    snprintf(detail, sizeof(detail),
+             "Transfer failed: disk write error (errno=%d).", saved_errno);
+  } else {
+    snprintf(detail, sizeof(detail), "Transfer failed.");
+  }
+
   return ftp_session_send_reply(session, FTP_REPLY_426_TRANSFER_ABORTED,
-                                "Transfer failed.");
+                                detail);
 }
 
 /**

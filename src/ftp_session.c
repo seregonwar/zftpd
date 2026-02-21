@@ -534,8 +534,12 @@ ftp_error_t ftp_session_open_data_connection(ftp_session_t *session) {
     session->pasv_fd = -1;
   }
 
-  /* Configure socket for optimal performance */
-  (void)pal_socket_configure(session->data_fd);
+  /* Configure data socket for bulk transfer
+   *   - Nagle ON (TCP_NODELAY=0) for packet coalescing
+   *   - SO_RCVTIMEO / SO_SNDTIMEO = 120s (prevent infinite stall)
+   *   - SO_LINGER = 10s (flush buffer before close)
+   */
+  (void)pal_socket_configure_data(session->data_fd);
 
   return FTP_OK;
 }
@@ -549,6 +553,44 @@ void ftp_session_close_data_connection(ftp_session_t *session) {
   }
 
   if (session->data_fd >= 0) {
+    /*
+     * Graceful close sequence (prevents client ECONNRESET)
+     *
+     *   Problem:
+     *     close() on a socket with unread data in the kernel
+     *     receive buffer sends TCP RST instead of FIN.
+     *
+     *   Solution:
+     *     1. shutdown(SHUT_WR) → send FIN, stop our writes
+     *     2. Drain remaining incoming data the client may
+     *        still be sending (read until EOF or error)
+     *     3. close() → now the recv buffer is empty, so
+     *        the kernel sends a clean FIN, not RST
+     *
+     *            Server                Client
+     *            ──────                ──────
+     *        shutdown(WR) ── FIN ───►
+     *                       ◄── data──  (client still sending)
+     *        drain loop     ◄── data──
+     *                       ◄── FIN ──  (client done)
+     *        close()      ── FIN ───►   (clean teardown)
+     */
+    (void)shutdown(session->data_fd, SHUT_WR);
+
+    /* Drain: read and discard until EOF or error */
+    {
+      char drain_buf[4096];
+      struct timeval tv = {.tv_sec = 2, .tv_usec = 0};
+      (void)PAL_SETSOCKOPT(session->data_fd, SOL_SOCKET, SO_RCVTIMEO, &tv,
+                           (socklen_t)sizeof(tv));
+      for (;;) {
+        ssize_t n = PAL_RECV(session->data_fd, drain_buf, sizeof(drain_buf), 0);
+        if (n <= 0) {
+          break;
+        }
+      }
+    }
+
     PAL_CLOSE(session->data_fd);
     session->data_fd = -1;
   }

@@ -43,7 +43,7 @@ SOFTWARE.
  *===========================================================================*/
 
 #ifndef RELEASE_VERSION
-#define RELEASE_VERSION "1.2.1"
+#define RELEASE_VERSION "1.2.2"
 #endif
 
 /*===========================================================================*
@@ -65,10 +65,12 @@ SOFTWARE.
 #endif
 
 #ifndef FTP_STREAM_BUFFER_SIZE
-#if defined(PS4) || defined(PS5)
-#define FTP_STREAM_BUFFER_SIZE 262144U
+#if defined(PS5)
+#define FTP_STREAM_BUFFER_SIZE 1048576U /* 1 MB  — PS5 has plenty of RAM  */
+#elif defined(PS4)
+#define FTP_STREAM_BUFFER_SIZE 262144U /* 256 KB                         */
 #else
-#define FTP_STREAM_BUFFER_SIZE 65536U
+#define FTP_STREAM_BUFFER_SIZE 524288U /* 512 KB — saturates GbE links   */
 #endif
 #endif
 
@@ -90,11 +92,37 @@ SOFTWARE.
  * @note Client disconnected after this period of inactivity
  */
 #ifndef FTP_SESSION_TIMEOUT
+#if defined(PS5) || defined(PS4)
+#define FTP_SESSION_TIMEOUT 7200U
+#else
 #define FTP_SESSION_TIMEOUT 300U
+#endif
 #endif
 
 #ifndef FTP_CTRL_IO_TIMEOUT_MS
 #define FTP_CTRL_IO_TIMEOUT_MS 1000U
+#endif
+
+/**
+ * Data socket I/O timeout (recv/send) in milliseconds
+ *
+ *   Prevents infinite stalls when disk write-back cache fills
+ *   or the remote client disappears.  2 minutes is generous
+ *   enough for slow USB drives while still detecting dead links.
+ */
+#ifndef FTP_DATA_IO_TIMEOUT_MS
+#define FTP_DATA_IO_TIMEOUT_MS 120000U
+#endif
+
+/**
+ * SO_LINGER timeout for data sockets (seconds)
+ *
+ *   After close(), the kernel keeps the socket open for this
+ *   long to flush remaining data.  Prevents ECONNRESET on the
+ *   client when the server closes right after the last write.
+ */
+#ifndef FTP_DATA_LINGER_TIMEOUT_S
+#define FTP_DATA_LINGER_TIMEOUT_S 10
 #endif
 
 #ifndef FTP_DATA_CONNECT_TIMEOUT_MS
@@ -119,10 +147,12 @@ SOFTWARE.
  * @note Larger buffers provide diminishing returns
  */
 #ifndef FTP_BUFFER_SIZE
-#if defined(PS4) || defined(PS5)
-#define FTP_BUFFER_SIZE 262144U
+#if defined(PS5)
+#define FTP_BUFFER_SIZE 1048576U /* 1 MB    */
+#elif defined(PS4)
+#define FTP_BUFFER_SIZE 262144U /* 256 KB  */
 #else
-#define FTP_BUFFER_SIZE 65536U
+#define FTP_BUFFER_SIZE 524288U /* 512 KB  */
 #endif
 #endif
 
@@ -301,27 +331,20 @@ SOFTWARE.
 
 /**
  * TCP send buffer size in bytes
- * @note Larger buffers improve throughput for bulk transfers
- * @note 256KB is optimal for gigabit networks
+ *
+ *   Sized to fill the bandwidth-delay product (BDP):
+ *     GbE 1 ms RTT  ->  BDP = 125 KB  ->  1 MB is generous
+ *     WiFi 5 ms RTT ->  BDP = 62 KB   ->  1 MB has headroom
  */
 #ifndef FTP_TCP_SNDBUF
-#if defined(PS4) || defined(PS5)
 #define FTP_TCP_SNDBUF 1048576U
-#else
-#define FTP_TCP_SNDBUF 262144U
-#endif
 #endif
 
 /**
  * TCP receive buffer size in bytes
- * @note Should match send buffer size
  */
 #ifndef FTP_TCP_RCVBUF
-#if defined(PS4) || defined(PS5)
 #define FTP_TCP_RCVBUF 1048576U
-#else
-#define FTP_TCP_RCVBUF 262144U
-#endif
 #endif
 
 /**
@@ -440,6 +463,13 @@ SOFTWARE.
 
 #ifndef FTP_TRANSFER_RATE_BURST_BYTES
 #define FTP_TRANSFER_RATE_BURST_BYTES (FTP_TRANSFER_RATE_LIMIT_BPS)
+#endif
+
+#if defined(PLATFORM_PS5)
+#undef FTP_TRANSFER_RATE_LIMIT_BPS
+#define FTP_TRANSFER_RATE_LIMIT_BPS 0U
+#undef FTP_TRANSFER_RATE_BURST_BYTES
+#define FTP_TRANSFER_RATE_BURST_BYTES 0U
 #endif
 
 /*===========================================================================*
