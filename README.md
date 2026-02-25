@@ -1,9 +1,58 @@
-# zftpd - Zero-copy FTP Daemon compatible with all POSIX systems
+# zftpd
 
-[![C11](https://img.shields.io/badge/std-C11-blue.svg)](https://en.cppreference.com/w/c/11)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-<img src="https://img.shields.io/github/downloads/seregonwar/zftpd/total?style=flat-square&color=success" alt="Downloads"/><br/>
-Multi-platform FTP server designed to run both as a POSIX binary (Linux/macOS) and as a console payload (PS3/PS4/PS5).
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/7261881d-8ae0-488b-9636-4ba6f9be8e5d" 
+       alt="zftpd banner" 
+       width="100%" />
+</p>
+
+<p align="center">
+  <strong>Zero-copy FTP Daemon compatible with all POSIX systems</strong><br/>
+  Multi-platform FTP server running as:
+  <br/>
+  • Native POSIX binary (Linux / macOS)  
+  • Console payload (PS3 / PS4 / PS5)
+</p>
+
+<p align="center">
+  <a href="https://en.cppreference.com/w/c/11">
+    <img src="https://img.shields.io/badge/std-C11-blue.svg" alt="C11"/>
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"/>
+  </a>
+  <img src="https://img.shields.io/github/downloads/seregonwar/zftpd/total?style=flat-square&color=success" alt="Downloads"/>
+</p>
+
+---
+
+## Overview
+
+`zftpd` is a high-performance, zero-copy oriented FTP server written in C11.
+
+It is designed with a clear philosophy:
+
+- Keep the data path fast (`sendfile` when available)
+- Stay portable across POSIX systems
+- Run cleanly as a console payload on Play* platforms
+- Avoid unnecessary abstractions
+- Be predictable under load
+
+If the OS supports zero-copy, it uses it.  
+If encryption is enabled, it falls back gracefully.  
+No magic. Just solid systems programming.
+
+---
+
+## Core Principles
+
+- **Performance first** — optimized TCP handling and partial-send awareness  
+- **Security-aware** — path canonicalization, traversal blocking  
+- **Cross-platform** — Linux, macOS, PS4, PS5  
+- **Minimal dependencies** — standard toolchain + make  
+- **Optional extras** — encryption and web file explorer (compile-time)
+
+---
 
 ## Key Features
 
