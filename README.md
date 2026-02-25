@@ -71,12 +71,14 @@ No magic. Just solid systems programming.
 
 - **Authentication & control:** `USER`, `PASS`, `QUIT`, `NOOP`
 - **Navigation:** `CWD`, `CDUP`, `PWD`
-- **Listing:** `LIST`, `NLST`, `MLSD`, `MLST` (MLST minimal)
+- **Listing:** `LIST`, `NLST`, `MLSD`, `MLST`
 - **Transfer:** `RETR`, `STOR`, `APPE`, `REST`
 - **File management:** `DELE`, `RMD`, `MKD`, `RNFR`, `RNTO`
-- **Data connection:** `PORT`, `PASV`
+- **Data connection:** `PORT`, `PASV`, `EPSV`
 - **Information:** `SIZE`, `MDTM`, `STAT`, `SYST`, `FEAT`, `HELP`
 - **Transfer parameters:** `TYPE`, `MODE`, `STRU`
+- **Feature negotiation:** `OPTS`, `CLNT`
+- **Site-specific:** `SITE` (CHMOD)
 - **Encryption (opt-in):** `AUTH XCRYPT` (ChaCha20 PSK)
 
 ## Build
