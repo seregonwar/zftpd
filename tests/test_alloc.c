@@ -6,6 +6,9 @@
 #define THREADS 6
 #define ITERS 4000
 #define SLOTS 256
+#define TEST_ARENA_SIZE (64U * 1024U * 1024U)
+
+static _Alignas(4096) uint8_t g_test_arena[TEST_ARENA_SIZE];
 
 static uint32_t xs32(uint32_t *s)
 {
@@ -68,7 +71,7 @@ static void *worker(void *arg)
 
 int main(void)
 {
-    if (pal_alloc_init_default() != 0) {
+    if (pal_alloc_init(g_test_arena, sizeof(g_test_arena)) != 0) {
         return 10;
     }
     pal_alloc_reset_stats();

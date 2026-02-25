@@ -43,7 +43,7 @@ SOFTWARE.
  *===========================================================================*/
 
 #ifndef RELEASE_VERSION
-#define RELEASE_VERSION "1.2.2"
+#define RELEASE_VERSION "1.2.3"
 #endif
 
 /*===========================================================================*
@@ -446,7 +446,7 @@ SOFTWARE.
  * @note Logs all FTP commands (privacy concern in production)
  */
 #ifndef FTP_LOG_COMMANDS
-#define FTP_LOG_COMMANDS 0
+#define FTP_LOG_COMMANDS 1
 #endif
 
 /**

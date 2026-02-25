@@ -44,6 +44,7 @@ SOFTWARE.
 #include "pal_fileio.h"
 #include "pal_filesystem.h"
 #include "pal_network.h"
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -70,27 +71,21 @@ ftp_error_t cmd_USER(ftp_session_t *session, const char *args) {
     return FTP_ERR_INVALID_PARAM;
   }
 
-  /* This implementation uses anonymous authentication only */
-  if ((strcmp(args, "anonymous") == 0) || (strcmp(args, "ftp") == 0)) {
-    /* Anonymous user accepted */
-    session->user_ok = 1U;
-    return ftp_session_send_reply(session, FTP_REPLY_331_NEED_PASSWORD,
-                                  "Any password will work.");
-  }
-
-  /* Other usernames not supported */
-  session->user_ok = 0U;
-  if (session->auth_attempts < 255U) {
-    session->auth_attempts++;
-  }
-  if (session->auth_attempts >= (uint8_t)FTP_MAX_AUTH_ATTEMPTS) {
-    (void)ftp_session_send_reply(session, FTP_REPLY_530_NOT_LOGGED_IN,
-                                 "Too many authentication attempts.");
-    return FTP_ERR_AUTH_FAILED;
-  }
-  sleep(FTP_AUTH_DELAY);
-  return ftp_session_send_reply(session, FTP_REPLY_530_NOT_LOGGED_IN,
-                                "Only anonymous login supported.");
+  /*
+   * Open server — accept any username and log in immediately.
+   *
+   *    Android apps (File Manager+, SuperFTP) expect 230 right
+   *    after USER and never send PASS.  GoldHEN/ftpsrv does the
+   *    same: USER always returns 230.
+   *
+   *    Clients that DO send PASS (FileZilla, WinSCP) will just
+   *    receive a harmless 230 from cmd_PASS too.
+   */
+  (void)args;
+  session->user_ok = 1U;
+  session->authenticated = 1U;
+  session->auth_attempts = 0U;
+  return ftp_session_send_reply(session, FTP_REPLY_230_LOGGED_IN, NULL);
 }
 
 /**
@@ -103,23 +98,9 @@ ftp_error_t cmd_PASS(ftp_session_t *session, const char *args) {
     return FTP_ERR_INVALID_PARAM;
   }
 
-  if (session->user_ok == 0U) {
-    if (session->auth_attempts < 255U) {
-      session->auth_attempts++;
-    }
-    if (session->auth_attempts >= (uint8_t)FTP_MAX_AUTH_ATTEMPTS) {
-      (void)ftp_session_send_reply(session, FTP_REPLY_530_NOT_LOGGED_IN,
-                                   "Too many authentication attempts.");
-      return FTP_ERR_AUTH_FAILED;
-    }
-    sleep(FTP_AUTH_DELAY);
-    return ftp_session_send_reply(session, FTP_REPLY_530_NOT_LOGGED_IN,
-                                  "USER required.");
-  }
-
+  /* Already logged in from USER — accept PASS as harmless no-op */
   session->authenticated = 1U;
   session->auth_attempts = 0U;
-
   return ftp_session_send_reply(session, FTP_REPLY_230_LOGGED_IN, NULL);
 }
 
@@ -370,13 +351,29 @@ ftp_error_t cmd_LIST(ftp_session_t *session, const char *args) {
                                   "Invalid path.");
   }
 
-  /* Open data connection */
-  ftp_session_send_reply(session, FTP_REPLY_150_FILE_OK, NULL);
-
+  /* Open data connection FIRST, then send 150.
+   * GoldHEN/ftpsrv does accept() before 150. This ensures the
+   * client receives 150 after data channel is ready, preventing
+   * 150+226 from merging in the same TCP segment.
+   */
+  ftp_log_line(FTP_LOG_INFO, "[DBG] LIST: opening data connection...");
   err = ftp_session_open_data_connection(session);
   if (err != FTP_OK) {
+    char dbg[64];
+    snprintf(dbg, sizeof(dbg), "[DBG] LIST: data conn FAILED err=%d", (int)err);
+    ftp_log_line(FTP_LOG_INFO, dbg);
     return ftp_session_send_reply(session, FTP_REPLY_425_CANT_OPEN_DATA, NULL);
   }
+  ftp_log_line(FTP_LOG_INFO, "[DBG] LIST: data conn OK, sending 150");
+  ftp_session_send_reply(session, FTP_REPLY_150_FILE_OK, NULL);
+
+  /* Protocol pacing: ensure the 150 reply is delivered as a
+   * separate TCP segment before the data transfer + 226.
+   * On LAN, LIST completes in microseconds, so 150 and 226
+   * merge in the client's recv() buffer.  File Manager+
+   * cannot handle multi-reply reads, causing Loading Error.
+   */
+  usleep(50000); /* 50 ms */
 
   /* Send listing */
   err = send_directory_listing(session, resolved, 1);
@@ -412,12 +409,15 @@ ftp_error_t cmd_NLST(ftp_session_t *session, const char *args) {
                                   "Invalid path.");
   }
 
-  ftp_session_send_reply(session, FTP_REPLY_150_FILE_OK, NULL);
-
   err = ftp_session_open_data_connection(session);
   if (err != FTP_OK) {
     return ftp_session_send_reply(session, FTP_REPLY_425_CANT_OPEN_DATA, NULL);
   }
+
+  ftp_session_send_reply(session, FTP_REPLY_150_FILE_OK, NULL);
+
+  /* Protocol pacing: prevent 150 and 226 from merging */
+  usleep(50000); /* 50 ms */
 
   err = send_directory_listing(session, resolved, 0);
 
@@ -433,25 +433,119 @@ ftp_error_t cmd_NLST(ftp_session_t *session, const char *args) {
 
 /**
  * @brief MLSD command - Machine listing (RFC 3659)
+ *
+ *   Unlike LIST which outputs human-readable "ls -l" lines,
+ *   MLSD outputs machine-readable facts per entry:
+ *
+ *     type=dir;size=0;modify=20250222120000; dirname
+ *     type=file;size=1234;modify=20250222120000; filename
+ *
+ *   Android apps (File Manager+, SuperFTP) use MLSD exclusively
+ *   and cannot parse LIST format.
  */
 ftp_error_t cmd_MLSD(ftp_session_t *session, const char *args) {
-  /* Simplified implementation: redirect to LIST */
-  return cmd_LIST(session, args);
+  if (session == NULL) {
+    return FTP_ERR_INVALID_PARAM;
+  }
+
+  /* Resolve path (use CWD if no args) */
+  const char *path_arg = (args != NULL) ? args : session->cwd;
+
+  char resolved[FTP_PATH_MAX];
+  ftp_error_t err =
+      ftp_path_resolve(session, path_arg, resolved, sizeof(resolved));
+
+  if (err != FTP_OK) {
+    return ftp_session_send_reply(session, FTP_REPLY_550_FILE_ERROR,
+                                  "Invalid path.");
+  }
+
+  /* Open data connection FIRST, then send 150 (same as LIST) */
+  err = ftp_session_open_data_connection(session);
+  if (err != FTP_OK) {
+    return ftp_session_send_reply(session, FTP_REPLY_425_CANT_OPEN_DATA, NULL);
+  }
+
+  ftp_session_send_reply(session, FTP_REPLY_150_FILE_OK, NULL);
+
+  /* Protocol pacing: prevent 150 and 226 from merging */
+  usleep(50000); /* 50 ms */
+
+  /* Read directory and send machine-readable entries */
+  DIR *dir = opendir(resolved);
+  if (dir != NULL) {
+    struct dirent *entry;
+    char line_buffer[FTP_LIST_LINE_SIZE];
+
+    while ((entry = readdir(dir)) != NULL) {
+      /* Skip . and .. */
+      if ((strcmp(entry->d_name, ".") == 0) ||
+          (strcmp(entry->d_name, "..") == 0)) {
+        continue;
+      }
+
+      /* Stat the entry */
+      vfs_stat_t st;
+      int have_stat = 0;
+      char fullpath[FTP_PATH_MAX];
+      int n = snprintf(fullpath, sizeof(fullpath), "%s/%s", resolved,
+                       entry->d_name);
+      if ((n >= 0) && ((size_t)n < sizeof(fullpath))) {
+        if (vfs_stat(fullpath, &st) == FTP_OK) {
+          have_stat = 1;
+        }
+      }
+
+      if (have_stat == 0) {
+        memset(&st, 0, sizeof(st));
+        if (entry->d_type == DT_DIR) {
+          st.mode = (uint32_t)S_IFDIR;
+        } else {
+          st.mode = (uint32_t)S_IFREG;
+        }
+      }
+
+      /* Format modify time: YYYYMMDDHHMMSS */
+      struct tm tm_time;
+      time_t mtime = (time_t)st.mtime;
+      gmtime_r(&mtime, &tm_time);
+      char timebuf[20];
+      strftime(timebuf, sizeof(timebuf), "%Y%m%d%H%M%S", &tm_time);
+
+      /*
+       * RFC 3659 fact line format:
+       *
+       *   type=dir;size=0;modify=20250222120000; dirname\r\n
+       *   type=file;size=1234;modify=20250222120000; filename\r\n
+       *                                            ^
+       *                                   space before name is required
+       */
+      const char *type_str = (((st.mode & S_IFMT) == S_IFDIR)) ? "dir" : "file";
+
+      n = snprintf(line_buffer, sizeof(line_buffer),
+                   "type=%s;size=%lld;modify=%s; %s\r\n", type_str,
+                   (long long)st.size, timebuf, entry->d_name);
+
+      if ((n > 0) && ((size_t)n < sizeof(line_buffer))) {
+        (void)ftp_session_send_data(session, line_buffer, (size_t)n);
+      }
+    }
+
+    closedir(dir);
+  }
+
+  /* Close data connection */
+  ftp_session_close_data_connection(session);
+
+  return ftp_session_send_reply(session, FTP_REPLY_226_TRANSFER_COMPLETE, NULL);
 }
 
 /**
  * @brief MLST command - Machine list single file (RFC 3659)
  */
 ftp_error_t cmd_MLST(ftp_session_t *session, const char *args) {
-  (void)args;
-
-  if (session == NULL) {
-    return FTP_ERR_INVALID_PARAM;
-  }
-
-  /* Return file info (simplified) */
-  return ftp_session_send_reply(session, FTP_REPLY_502_NOT_IMPLEMENTED,
-                                "MLST not fully implemented.");
+  /* Redirect to STAT which provides per-file info on the control channel */
+  return cmd_STAT(session, args);
 }
 
 /*===========================================================================*
@@ -631,16 +725,39 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
   }
 
   /*
-   * Open flags depend on whether we are resuming:
-   *   offset == 0  ->  O_WRONLY | O_CREAT | O_TRUNC  (fresh upload)
-   *   offset >  0  ->  O_WRONLY | O_CREAT            (resume)
+   * Atomic write strategy
+   * ~~~~~~~~~~~~~~~~~~~~~
+   *   Fresh upload (offset == 0):
+   *     write to  /path/.zftpd.tmp.FILENAME
+   *     rename()  to final path on success
+   *     → external daemons (ShadowMount) never see a partial file
+   *
+   *   Resume upload (offset > 0):
+   *     write directly to the original file (need to lseek)
    */
+  char tmp_path[FTP_PATH_MAX];
+  int use_atomic = (session->restart_offset == 0) ? 1 : 0;
+
+  if (use_atomic != 0) {
+    /* Build temp name: /dir/.zftpd.tmp.basename */
+    const char *slash = strrchr(resolved, '/');
+    if (slash != NULL) {
+      size_t dir_len = (size_t)(slash - resolved);
+      snprintf(tmp_path, sizeof(tmp_path), "%.*s/.zftpd.tmp.%s", (int)dir_len,
+               resolved, slash + 1);
+    } else {
+      snprintf(tmp_path, sizeof(tmp_path), ".zftpd.tmp.%s", resolved);
+    }
+  }
+
+  const char *write_path = (use_atomic != 0) ? tmp_path : resolved;
+
   int open_flags = O_WRONLY | O_CREAT;
   if (session->restart_offset == 0) {
     open_flags |= O_TRUNC;
   }
 
-  int fd = pal_file_open(resolved, open_flags, FILE_PERM);
+  int fd = pal_file_open(write_path, open_flags, FILE_PERM);
   if (fd < 0) {
     session->restart_offset = 0;
     return ftp_session_send_reply(session, FTP_REPLY_550_FILE_ERROR,
@@ -663,6 +780,9 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
   err = ftp_session_open_data_connection(session);
   if (err != FTP_OK) {
     pal_file_close(fd);
+    if (use_atomic != 0) {
+      (void)unlink(tmp_path);
+    }
     session->restart_offset = 0;
     return ftp_session_send_reply(session, FTP_REPLY_425_CANT_OPEN_DATA, NULL);
   }
@@ -712,10 +832,6 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
 
   /* Cleanup */
   if (ok != 0) {
-    /* Flush to persistent storage before closing.
-     * Prevents M.2 / USB data loss if device is unmounted
-     * or power-cycled while write-back cache is dirty.
-     */
     (void)fsync(fd);
   }
   pal_file_close(fd);
@@ -724,10 +840,30 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
   session->restart_offset = 0;
 
   if (ok != 0) {
+    /*
+     * Atomic commit: rename temp → final
+     *
+     * rename() is atomic on POSIX: ShadowMount's stat() will
+     * see either the old file or the new complete file, never
+     * a half-written intermediate state.
+     */
+    if (use_atomic != 0) {
+      if (rename(tmp_path, resolved) != 0) {
+        (void)unlink(tmp_path);
+        return ftp_session_send_reply(session, FTP_REPLY_451_LOCAL_ERROR,
+                                      "Rename to final path failed.");
+      }
+    }
+
     atomic_fetch_add(&session->stats.files_received, 1U);
     ftp_log_session_event(session, "STOR_OK", FTP_OK, total_received);
     return ftp_session_send_reply(session, FTP_REPLY_226_TRANSFER_COMPLETE,
                                   NULL);
+  }
+
+  /* On failure, clean up temp file */
+  if (use_atomic != 0) {
+    (void)unlink(tmp_path);
   }
 
   ftp_log_session_event(session, "STOR_FAIL", FTP_ERR_UNKNOWN, total_received);
@@ -1097,6 +1233,12 @@ ftp_error_t cmd_PORT(ftp_session_t *session, const char *args) {
   /* Build port */
   uint16_t port = (uint16_t)((p1 << 8) | p2);
 
+  /* Debug: log PORT target */
+  {
+    char dbg[128];
+    snprintf(dbg, sizeof(dbg), "[DBG] PORT target: %s:%u", ip, (unsigned)port);
+    ftp_log_line(FTP_LOG_INFO, dbg);
+  }
   /* Create sockaddr */
   ftp_error_t err = pal_make_sockaddr(ip, port, &session->data_addr);
   if (err != FTP_OK) {
@@ -1104,12 +1246,10 @@ ftp_error_t cmd_PORT(ftp_session_t *session, const char *args) {
                                   "Invalid address.");
   }
 
-  if (session->data_addr.sin_addr.s_addr !=
-      session->ctrl_addr.sin_addr.s_addr) {
-    session->data_mode = FTP_DATA_MODE_NONE;
-    return ftp_session_send_reply(session, FTP_REPLY_501_SYNTAX_ARGS,
-                                  "Illegal PORT command.");
-  }
+  /* GoldHEN/ftpsrv does not validate the PORT IP.
+   * NAT environments (Android emulators) send PORT with
+   * an IP that differs from the control connection.
+   */
 
   /* Set mode to active */
   session->data_mode = FTP_DATA_MODE_ACTIVE;
@@ -1210,6 +1350,191 @@ ftp_error_t cmd_PASV(ftp_session_t *session, const char *args) {
            h1, h2, h3, h4, p1, p2);
 
   return ftp_session_send_reply(session, FTP_REPLY_227_PASV_MODE, reply);
+}
+
+/*---------------------------------------------------------------------------*
+ * EPSV  (RFC 2428 — Extended Passive Mode)
+ *
+ *   Client:  EPSV
+ *   Server:  229 Entering Extended Passive Mode (|||port|)
+ *
+ *   WinSCP and many IPv6-aware clients try EPSV first.
+ *   Without it they fall back to PORT which often fails behind NAT.
+ *---------------------------------------------------------------------------*/
+
+ftp_error_t cmd_EPSV(ftp_session_t *session, const char *args) {
+  (void)args;
+
+  if (session == NULL) {
+    return FTP_ERR_INVALID_PARAM;
+  }
+
+  /* Reuse PASV socket setup */
+  if (session->pasv_fd >= 0) {
+    PAL_CLOSE(session->pasv_fd);
+    session->pasv_fd = -1;
+  }
+
+  int fd = PAL_SOCKET(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) {
+    return ftp_session_send_reply(session, FTP_REPLY_425_CANT_OPEN_DATA,
+                                  "Cannot create socket.");
+  }
+
+  (void)pal_socket_set_reuseaddr(fd);
+
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = PAL_HTONL(INADDR_ANY);
+  addr.sin_port = 0;
+
+  if (PAL_BIND(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    PAL_CLOSE(fd);
+    return ftp_session_send_reply(session, FTP_REPLY_425_CANT_OPEN_DATA,
+                                  "Bind failed.");
+  }
+
+  if (PAL_LISTEN(fd, 1) < 0) {
+    PAL_CLOSE(fd);
+    return ftp_session_send_reply(session, FTP_REPLY_425_CANT_OPEN_DATA,
+                                  "Listen failed.");
+  }
+
+  struct sockaddr_in pasv_addr;
+  socklen_t addr_len = sizeof(pasv_addr);
+  if (PAL_GETSOCKNAME(fd, (struct sockaddr *)&pasv_addr, &addr_len) < 0) {
+    PAL_CLOSE(fd);
+    return ftp_session_send_reply(session, FTP_REPLY_425_CANT_OPEN_DATA,
+                                  "Cannot get socket name.");
+  }
+
+  session->pasv_fd = fd;
+  session->data_mode = FTP_DATA_MODE_PASSIVE;
+
+  /*
+   * RFC 2428: 229 Entering Extended Passive Mode (|||port|)
+   *
+   * The triple-pipe delimiter is protocol-agnostic (works for IPv4 + IPv6).
+   * The client already knows the server IP from the control connection.
+   */
+  uint16_t port = PAL_NTOHS(pasv_addr.sin_port);
+  char reply[FTP_REPLY_BUFFER_SIZE];
+  snprintf(reply, sizeof(reply), "Entering Extended Passive Mode (|||%u|).",
+           (unsigned)port);
+
+  return ftp_session_send_reply(session, FTP_REPLY_229_EPSV_MODE, reply);
+}
+
+/*---------------------------------------------------------------------------*
+ * OPTS  (RFC 2389 — Feature Negotiation)
+ *
+ *   Client:  OPTS UTF8 ON
+ *   Server:  200 UTF8 mode enabled.
+ *
+ *   Almost every modern client sends "OPTS UTF8 ON" right after FEAT.
+ *   Without this command, they get 500 Unknown Command → may disconnect.
+ *---------------------------------------------------------------------------*/
+
+ftp_error_t cmd_OPTS(ftp_session_t *session, const char *args) {
+  if (session == NULL) {
+    return FTP_ERR_INVALID_PARAM;
+  }
+
+  if (args == NULL) {
+    return ftp_session_send_reply(session, FTP_REPLY_501_SYNTAX_ARGS,
+                                  "OPTS requires an argument.");
+  }
+
+  /* Case-insensitive check for "UTF8 ON" / "UTF8" / "utf8 on" */
+  char upper[64];
+  size_t len = strlen(args);
+  if (len >= sizeof(upper)) {
+    len = sizeof(upper) - 1U;
+  }
+  for (size_t i = 0U; i < len; i++) {
+    upper[i] = (char)toupper((unsigned char)args[i]);
+  }
+  upper[len] = '\0';
+
+  if ((strncmp(upper, "UTF8", 4) == 0) &&
+      (len == 4U || strcmp(upper + 4, " ON") == 0)) {
+    return ftp_session_send_reply(session, FTP_REPLY_200_OK,
+                                  "UTF8 mode enabled.");
+  }
+
+  /*
+   *  OPTS MLST type*;size*;modify*;
+   *  Some clients send this to negotiate MLST facts.
+   *  Accept it silently.
+   */
+  if (strncmp(upper, "MLST", 4) == 0) {
+    return ftp_session_send_reply(session, FTP_REPLY_200_OK, "MLST OPTS set.");
+  }
+
+  return ftp_session_send_reply(session, FTP_REPLY_501_SYNTAX_ARGS,
+                                "Option not recognized.");
+}
+
+/*---------------------------------------------------------------------------*
+ * SITE  (RFC 959 — Site-Specific Commands)
+ *
+ *   Client:  SITE CHMOD 755 somefile.txt
+ *   Server:  200 CHMOD ok.          (no-op on consoles)
+ *
+ *   WinSCP sends SITE CHMOD after every upload. Without this
+ *   command the client logs errors and some abort the transfer.
+ *---------------------------------------------------------------------------*/
+
+ftp_error_t cmd_SITE(ftp_session_t *session, const char *args) {
+  if (session == NULL) {
+    return FTP_ERR_INVALID_PARAM;
+  }
+
+  if (args == NULL || args[0] == '\0') {
+    return ftp_session_send_reply(session, FTP_REPLY_501_SYNTAX_ARGS,
+                                  "SITE requires a command.");
+  }
+
+  /* Accept CHMOD as a no-op (console filesystems don't use UNIX perms) */
+  char upper[16];
+  size_t len = strlen(args);
+  if (len > 5U) {
+    len = 5U;
+  }
+  for (size_t i = 0U; i < len; i++) {
+    upper[i] = (char)toupper((unsigned char)args[i]);
+  }
+  upper[len] = '\0';
+
+  if (strncmp(upper, "CHMOD", 5) == 0) {
+    return ftp_session_send_reply(session, FTP_REPLY_200_OK,
+                                  "CHMOD command successful.");
+  }
+
+  return ftp_session_send_reply(session, FTP_REPLY_502_NOT_IMPLEMENTED,
+                                "SITE command not supported.");
+}
+
+/*---------------------------------------------------------------------------*
+ * CLNT  (Client Identification)
+ *
+ *   Client:  CLNT SuperFTP/1.0
+ *   Server:  200 Noted.
+ *
+ *   Android apps (File Manager+, SuperFTP) send CLNT to identify
+ *   themselves before USER/PASS. Without it they get 500 Unknown
+ *   Command and disconnect immediately.
+ *---------------------------------------------------------------------------*/
+
+ftp_error_t cmd_CLNT(ftp_session_t *session, const char *args) {
+  (void)args;
+
+  if (session == NULL) {
+    return FTP_ERR_INVALID_PARAM;
+  }
+
+  return ftp_session_send_reply(session, FTP_REPLY_200_OK, "Noted.");
 }
 
 /*===========================================================================*
@@ -1342,6 +1667,7 @@ ftp_error_t cmd_FEAT(ftp_session_t *session, const char *args) {
                             " REST STREAM",
 #endif
                             " APPE",
+                            " EPSV",
 #if FTP_ENABLE_UTF8
                             " UTF8",
 #endif

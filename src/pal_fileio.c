@@ -44,6 +44,7 @@ SOFTWARE.
 
 /* Fallback buffer size for non-sendfile platforms */
 #define FALLBACK_BUFFER_SIZE FTP_BUFFER_SIZE
+#define PAL_FILE_WRITE_CHUNK_MAX 262144U
 
 #ifndef PAL_FILE_COPY_BUFFER_SIZE
 #if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
@@ -80,6 +81,9 @@ ssize_t pal_sendfile(int sock_fd, int file_fd, off_t *offset, size_t count)
     
     if (count == 0U) {
         return 0;
+    }
+    if (count > (size_t)PAL_FILE_WRITE_CHUNK_MAX) {
+        count = (size_t)PAL_FILE_WRITE_CHUNK_MAX;
     }
     
 #if defined(__linux__)
@@ -401,7 +405,12 @@ ssize_t pal_file_write_all(int fd, const void *buffer, size_t count)
     size_t total = 0U;
 
     while (total < count) {
-        ssize_t n = write(fd, p + total, count - total);
+        size_t remaining = count - total;
+        size_t chunk = remaining;
+        if (chunk > (size_t)PAL_FILE_WRITE_CHUNK_MAX) {
+            chunk = (size_t)PAL_FILE_WRITE_CHUNK_MAX;
+        }
+        ssize_t n = write(fd, p + total, chunk);
         if (n > 0) {
             total += (size_t)n;
             continue;

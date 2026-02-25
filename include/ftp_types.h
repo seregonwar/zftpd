@@ -103,6 +103,7 @@ typedef enum {
   FTP_REPLY_225_DATA_OPEN = 225,         /**< Data connection open */
   FTP_REPLY_226_TRANSFER_COMPLETE = 226, /**< Transfer complete */
   FTP_REPLY_227_PASV_MODE = 227,         /**< Entering passive mode */
+  FTP_REPLY_229_EPSV_MODE = 229,         /**< Entering extended passive mode */
   FTP_REPLY_230_LOGGED_IN = 230,         /**< User logged in */
   FTP_REPLY_234_AUTH_OK = 234,           /**< AUTH mechanism accepted */
   FTP_REPLY_250_FILE_ACTION_OK = 250,    /**< File action okay */

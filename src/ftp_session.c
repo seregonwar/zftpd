@@ -76,6 +76,16 @@ ftp_error_t ftp_session_init(ftp_session_t *session, int ctrl_fd,
   (void)pal_socket_set_timeouts(session->ctrl_fd, FTP_CTRL_IO_TIMEOUT_MS,
                                 FTP_CTRL_IO_TIMEOUT_MS);
 
+  /* Disable Nagle on control channel so 220 greeting + short replies
+   * are sent immediately instead of being coalesced.  Many Android FTP
+   * clients timeout if the greeting is delayed even slightly.
+   */
+  {
+    int nodelay = 1;
+    (void)PAL_SETSOCKOPT(session->ctrl_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay,
+                         sizeof(nodelay));
+  }
+
   /* Data connection (initially closed) */
   session->data_fd = -1;
   session->pasv_fd = -1;
@@ -466,42 +476,45 @@ ftp_error_t ftp_session_open_data_connection(ftp_session_t *session) {
   }
 
   if (session->data_mode == FTP_DATA_MODE_ACTIVE) {
-    /* Active mode: Connect to client */
+    /* Active mode: Connect to client.
+     * GoldHEN/ftpsrv uses a simple blocking connect().
+     * The non-blocking + EINPROGRESS + select() approach
+     * has portability issues on FreeBSD/PS4/PS5.
+     */
     int fd = PAL_SOCKET(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
       return FTP_ERR_SOCKET_CREATE;
     }
 
-    (void)pal_socket_set_nonblocking(fd);
+    /* Short connect timeout (3s) so PORT fails quickly through NAT.
+     * File Manager+ opens both PASV and PORT sessions — if PORT
+     * hangs for 15s the app shows a network error even though
+     * the PASV session works.  A fast failure lets the app
+     * fall back to the working PASV session.
+     */
+    struct timeval tv;
+    tv.tv_sec = 3;
+    tv.tv_usec = 0;
+    (void)PAL_SETSOCKOPT(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    {
+      char dbg[128];
+      snprintf(dbg, sizeof(dbg), "[DBG] ACTIVE connect to %s:%u ...",
+               inet_ntoa(session->data_addr.sin_addr),
+               (unsigned)PAL_NTOHS(session->data_addr.sin_port));
+      ftp_log_line(FTP_LOG_INFO, dbg);
+    }
 
     if (PAL_CONNECT(fd, (struct sockaddr *)&session->data_addr,
                     sizeof(session->data_addr)) < 0) {
-      if (errno != EINPROGRESS) {
-        PAL_CLOSE(fd);
-        return FTP_ERR_SOCKET_SEND;
-      }
-    }
-
-    int ready = wait_fd_ready(fd, 1, FTP_DATA_CONNECT_TIMEOUT_MS);
-    if (ready <= 0) {
-      PAL_CLOSE(fd);
-      return FTP_ERR_TIMEOUT;
-    }
-
-    int so_error = 0;
-    socklen_t so_len = (socklen_t)sizeof(so_error);
-    if (PAL_GETSOCKOPT(fd, SOL_SOCKET, SO_ERROR, &so_error, &so_len) < 0) {
-      PAL_CLOSE(fd);
-      return FTP_ERR_SOCKET_SEND;
-    }
-    if (so_error != 0) {
-      errno = so_error;
+      char dbg[128];
+      snprintf(dbg, sizeof(dbg), "[DBG] ACTIVE connect FAILED errno=%d", errno);
+      ftp_log_line(FTP_LOG_INFO, dbg);
       PAL_CLOSE(fd);
       return FTP_ERR_SOCKET_SEND;
     }
 
-    (void)pal_socket_set_blocking(fd);
-
+    ftp_log_line(FTP_LOG_INFO, "[DBG] ACTIVE connect OK");
     session->data_fd = fd;
 
   } else if (session->data_mode == FTP_DATA_MODE_PASSIVE) {
@@ -553,44 +566,14 @@ void ftp_session_close_data_connection(ftp_session_t *session) {
   }
 
   if (session->data_fd >= 0) {
-    /*
-     * Graceful close sequence (prevents client ECONNRESET)
+    /* Simple close — matches GoldHEN/ftpsrv exactly.
      *
-     *   Problem:
-     *     close() on a socket with unread data in the kernel
-     *     receive buffer sends TCP RST instead of FIN.
+     *   GoldHEN:  close(env->data_fd);
      *
-     *   Solution:
-     *     1. shutdown(SHUT_WR) → send FIN, stop our writes
-     *     2. Drain remaining incoming data the client may
-     *        still be sending (read until EOF or error)
-     *     3. close() → now the recv buffer is empty, so
-     *        the kernel sends a clean FIN, not RST
-     *
-     *            Server                Client
-     *            ──────                ──────
-     *        shutdown(WR) ── FIN ───►
-     *                       ◄── data──  (client still sending)
-     *        drain loop     ◄── data──
-     *                       ◄── FIN ──  (client done)
-     *        close()      ── FIN ───►   (clean teardown)
+     * The previous shutdown(SHUT_WR) + drain + close sequence
+     * caused File Manager+ to receive RST on FreeBSD/PS4,
+     * triggering "Loading Error! Check your network connection."
      */
-    (void)shutdown(session->data_fd, SHUT_WR);
-
-    /* Drain: read and discard until EOF or error */
-    {
-      char drain_buf[4096];
-      struct timeval tv = {.tv_sec = 2, .tv_usec = 0};
-      (void)PAL_SETSOCKOPT(session->data_fd, SOL_SOCKET, SO_RCVTIMEO, &tv,
-                           (socklen_t)sizeof(tv));
-      for (;;) {
-        ssize_t n = PAL_RECV(session->data_fd, drain_buf, sizeof(drain_buf), 0);
-        if (n <= 0) {
-          break;
-        }
-      }
-    }
-
     PAL_CLOSE(session->data_fd);
     session->data_fd = -1;
   }
@@ -753,11 +736,20 @@ ssize_t ftp_session_read_command(ftp_session_t *session, char *buffer,
 
         if ((out_len >= 2U) && (buffer[out_len - 2U] == '\r') &&
             (buffer[out_len - 1U] == '\n')) {
+          /* Standard \r\n line ending */
           out_len -= 2U;
           buffer[out_len] = '\0';
           return (ssize_t)out_len;
         }
 
+        if ((out_len >= 1U) && (buffer[out_len - 1U] == '\n')) {
+          /* Bare \n (some Android/mobile clients send this) */
+          out_len -= 1U;
+          buffer[out_len] = '\0';
+          return (ssize_t)out_len;
+        }
+
+        /* Line contains \n but no usable content — retry */
         out_len = 0U;
       }
     }
@@ -824,7 +816,8 @@ int ftp_session_process_command(ftp_session_t *session, const char *line) {
     if ((strcmp(command, "USER") != 0) && (strcmp(command, "PASS") != 0) &&
         (strcmp(command, "QUIT") != 0) && (strcmp(command, "NOOP") != 0) &&
         (strcmp(command, "FEAT") != 0) && (strcmp(command, "SYST") != 0) &&
-        (strcmp(command, "AUTH") != 0)) {
+        (strcmp(command, "AUTH") != 0) && (strcmp(command, "OPTS") != 0) &&
+        (strcmp(command, "CLNT") != 0)) {
       ftp_session_send_reply(session, FTP_REPLY_530_NOT_LOGGED_IN,
                              "Please login with USER and PASS.");
       return 0;

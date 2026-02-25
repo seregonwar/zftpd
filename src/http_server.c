@@ -56,6 +56,7 @@ SOFTWARE.
 #include "http_parser.h"
 #include "http_response.h"
 #include "pal_fileio.h"
+#include "pal_network.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -748,17 +749,51 @@ static int http_handle_request(http_connection_t *conn) {
 
   /* Send response headers (+ body if no sendfile) */
   if (response->used > 0) {
-    size_t total = 0;
-    size_t remain = response->used;
-
-    while (remain > 0) {
-      ssize_t sent = write(conn->fd, response->data + total, remain);
-      if (sent <= 0) {
-        break;
-      }
-      total += (size_t)sent;
-      remain -= (size_t)sent;
+    if (pal_send_all(conn->fd, response->data, response->used, 0) < 0) {
+      http_response_destroy(response);
+      return -1;
     }
+  }
+
+  /*
+   *  ┌────────────────────────────────────────────────────┐
+   *  │  MEMORY BODY PATH — stream embedded static assets   │
+   *  └────────────────────────────────────────────────────┘
+   */
+  if ((response->mem_seg_count > 0U) && (response->mem_seg_index < response->mem_seg_count)) {
+    while (response->mem_seg_index < response->mem_seg_count) {
+      const void *seg = response->mem_segs[response->mem_seg_index];
+      size_t seg_len = response->mem_lens[response->mem_seg_index];
+      if ((seg == NULL) || (seg_len == 0U)) {
+        response->mem_seg_index++;
+        response->mem_seg_sent = 0U;
+        continue;
+      }
+      if (response->mem_seg_sent >= seg_len) {
+        response->mem_seg_index++;
+        response->mem_seg_sent = 0U;
+        continue;
+      }
+      const unsigned char *p = (const unsigned char *)seg;
+      const unsigned char *start = p + response->mem_seg_sent;
+      size_t remaining = seg_len - response->mem_seg_sent;
+      if (pal_send_all(conn->fd, start, remaining, 0) < 0) {
+        http_response_destroy(response);
+        return -1;
+      }
+      response->mem_seg_sent = seg_len;
+    }
+  }
+
+  if ((response->mem_body != NULL) && (response->mem_sent < response->mem_length)) {
+    const unsigned char *p = (const unsigned char *)response->mem_body;
+    const unsigned char *start = p + response->mem_sent;
+    size_t remaining = response->mem_length - response->mem_sent;
+    if (pal_send_all(conn->fd, start, remaining, 0) < 0) {
+      http_response_destroy(response);
+      return -1;
+    }
+    response->mem_sent = response->mem_length;
   }
 
   /*
@@ -787,14 +822,8 @@ static int http_handle_request(http_connection_t *conn) {
         break;
       }
 
-      size_t written = 0;
-      while (written < (size_t)nread) {
-        ssize_t nsent =
-            write(conn->fd, g_sendfile_chunk + written, (size_t)nread - written);
-        if (nsent <= 0) {
-          goto done_sendfile;
-        }
-        written += (size_t)nsent;
+      if (pal_send_all(conn->fd, g_sendfile_chunk, (size_t)nread, 0) < 0) {
+        goto done_sendfile;
       }
 
       remaining -= (size_t)nread;
@@ -821,6 +850,13 @@ static int http_handle_request(http_connection_t *conn) {
      */
     while ((entry = readdir(dir)) != NULL) {
       if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+        continue;
+      }
+      if ((strcmp(response->stream_path, "/") == 0) &&
+          ((strcmp(entry->d_name, "dev") == 0) ||
+           (strcmp(entry->d_name, "proc") == 0) ||
+           (strcmp(entry->d_name, "sys") == 0) ||
+           (strcmp(entry->d_name, "kern") == 0))) {
         continue;
       }
 
@@ -862,11 +898,11 @@ static int http_handle_request(http_connection_t *conn) {
       int header_len =
           snprintf(chunk_header, sizeof(chunk_header), "%zx\r\n", pos);
 
-      if (write(conn->fd, chunk_header, (size_t)header_len) <= 0)
+      if (pal_send_all(conn->fd, chunk_header, (size_t)header_len, 0) < 0)
         break;
-      if (write(conn->fd, buffer, pos) <= 0)
+      if (pal_send_all(conn->fd, buffer, pos, 0) < 0)
         break;
-      if (write(conn->fd, "\r\n", 2) <= 0)
+      if (pal_send_all(conn->fd, "\r\n", 2, 0) < 0)
         break;
     }
 
@@ -879,12 +915,12 @@ static int http_handle_request(http_connection_t *conn) {
     char chunk_header[32];
     int header_len =
         snprintf(chunk_header, sizeof(chunk_header), "%zx\r\n", closer_len);
-    write(conn->fd, chunk_header, (size_t)header_len);
-    write(conn->fd, closer, closer_len);
-    write(conn->fd, "\r\n", 2);
+    (void)pal_send_all(conn->fd, chunk_header, (size_t)header_len, 0);
+    (void)pal_send_all(conn->fd, closer, closer_len, 0);
+    (void)pal_send_all(conn->fd, "\r\n", 2, 0);
 
     /* End of stream: 0\r\n\r\n */
-    write(conn->fd, "0\r\n\r\n", 5);
+    (void)pal_send_all(conn->fd, "0\r\n\r\n", 5, 0);
   }
 
   http_response_destroy(response);

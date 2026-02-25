@@ -71,6 +71,19 @@ typedef struct {
   char data[HTTP_RESPONSE_BUFFER_SIZE];
   size_t used;
 
+  /* In-memory body streaming (for large embedded static assets) */
+  const void *mem_body;   /**< Pointer to body bytes (NULL = not used) */
+  size_t mem_length;      /**< Total bytes to send                    */
+  size_t mem_sent;        /**< Bytes already sent                     */
+
+  /* In-memory segmented body streaming (for injected HTML) */
+  const void *mem_segs[3]; /**< Segment pointers                       */
+  size_t mem_lens[3];      /**< Segment lengths                        */
+  size_t mem_seg_count;    /**< 0 = disabled, otherwise 1..3           */
+  size_t mem_seg_index;    /**< Current segment index                  */
+  size_t mem_seg_sent;     /**< Bytes sent in current segment          */
+  char mem_inline[160];    /**< Inline storage for small injected data */
+
   /* sendfile() support for zero-copy file downloads */
   int sendfile_fd;       /**< File fd (-1 = not used)           */
   off_t sendfile_offset; /**< Current offset in file            */
@@ -90,6 +103,12 @@ int http_response_add_header(http_response_t *resp, const char *name,
                              const char *value);
 int http_response_set_body(http_response_t *resp, const void *body,
                            size_t length);
+int http_response_set_body_ref(http_response_t *resp, const void *body,
+                               size_t length);
+int http_response_set_body_splice(http_response_t *resp, const void *prefix,
+                                  size_t prefix_len, const void *insert,
+                                  size_t insert_len, const void *suffix,
+                                  size_t suffix_len);
 int http_response_append_raw(http_response_t *resp, const void *data,
                              size_t length);
 int http_response_finalize(http_response_t *resp);

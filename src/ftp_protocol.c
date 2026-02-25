@@ -37,6 +37,7 @@ SOFTWARE.
 #include <ctype.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 /*===========================================================================*
  * COMMAND TABLE
@@ -86,6 +87,12 @@ static const ftp_command_entry_t command_table[] = {
     /* Data connection */
     {"PORT", cmd_PORT, FTP_ARGS_REQUIRED},
     {"PASV", cmd_PASV, FTP_ARGS_NONE},
+    {"EPSV", cmd_EPSV, FTP_ARGS_OPTIONAL},
+
+    /* Feature negotiation  */
+    {"OPTS", cmd_OPTS, FTP_ARGS_REQUIRED},
+    {"SITE", cmd_SITE, FTP_ARGS_REQUIRED},
+    {"CLNT", cmd_CLNT, FTP_ARGS_OPTIONAL},
 
 /* Information */
 #if FTP_ENABLE_SIZE
@@ -139,6 +146,10 @@ static const char *get_default_message(ftp_reply_code_t code) {
     return "Service ready for new user.";
   case FTP_REPLY_221_GOODBYE:
     return "Service closing control connection.";
+  case FTP_REPLY_227_PASV_MODE:
+    return "Entering Passive Mode.";
+  case FTP_REPLY_229_EPSV_MODE:
+    return "Entering Extended Passive Mode.";
   case FTP_REPLY_225_DATA_OPEN:
     return "Data connection open; no transfer in progress.";
   case FTP_REPLY_226_TRANSFER_COMPLETE:
@@ -271,7 +282,7 @@ const ftp_command_entry_t *ftp_find_command(const char *name) {
 
   /* Linear search (table is small, ~30 entries) */
   for (size_t i = 0U; i < command_table_size; i++) {
-    if (strcmp(name, command_table[i].name) == 0) {
+    if (strcasecmp(name, command_table[i].name) == 0) {
       return &command_table[i];
     }
   }

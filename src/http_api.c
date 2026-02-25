@@ -39,10 +39,22 @@ SOFTWARE.
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
+#include <sys/time.h>
+#include <time.h>
+#if defined(PLATFORM_LINUX)
+#include <sys/sysinfo.h>
+#endif
+#if defined(PLATFORM_MACOS) || defined(PLATFORM_PS4) || defined(PLATFORM_PS5) || \
+    defined(PS4) || defined(PS5)
+#include <sys/sysctl.h>
+#endif
 #include <unistd.h>
 
 /*===========================================================================*
@@ -57,6 +69,7 @@ extern const char *http_get_resource(const char *path, size_t *size);
 
 static http_response_t *api_list(const http_request_t *request);
 static http_response_t *api_download(const http_request_t *request);
+static http_response_t *api_stats(const http_request_t *request);
 static http_response_t *serve_static(const http_request_t *request);
 #if ENABLE_WEB_UPLOAD
 static http_response_t *api_create_file(const http_request_t *request);
@@ -144,6 +157,298 @@ static int validate_path(const char *path) {
 #endif
 
   return 1;
+}
+
+static int buf_append_bytes(char *buf, size_t cap, size_t *pos,
+                            const char *data, size_t len) {
+  if ((buf == NULL) || (pos == NULL) || (data == NULL)) {
+    return -1;
+  }
+  if (*pos > cap) {
+    return -1;
+  }
+  if (len > (cap - *pos)) {
+    return -1;
+  }
+  if (len > 0U) {
+    memcpy(buf + *pos, data, len);
+    *pos += len;
+  }
+  return 0;
+}
+
+static int buf_append_cstr(char *buf, size_t cap, size_t *pos,
+                           const char *str) {
+  if (str == NULL) {
+    return -1;
+  }
+  return buf_append_bytes(buf, cap, pos, str, strlen(str));
+}
+
+static int buf_append_u64(char *buf, size_t cap, size_t *pos, uint64_t v) {
+  char tmp[32];
+  int n = snprintf(tmp, sizeof(tmp), "%" PRIu64, v);
+  if ((n < 0) || ((size_t)n >= sizeof(tmp))) {
+    return -1;
+  }
+  return buf_append_bytes(buf, cap, pos, tmp, (size_t)n);
+}
+
+static int buf_append_u32(char *buf, size_t cap, size_t *pos, uint32_t v) {
+  char tmp[16];
+  int n = snprintf(tmp, sizeof(tmp), "%" PRIu32, v);
+  if ((n < 0) || ((size_t)n >= sizeof(tmp))) {
+    return -1;
+  }
+  return buf_append_bytes(buf, cap, pos, tmp, (size_t)n);
+}
+
+static int buf_append_i32(char *buf, size_t cap, size_t *pos, int32_t v) {
+  char tmp[16];
+  int n = snprintf(tmp, sizeof(tmp), "%" PRId32, v);
+  if ((n < 0) || ((size_t)n >= sizeof(tmp))) {
+    return -1;
+  }
+  return buf_append_bytes(buf, cap, pos, tmp, (size_t)n);
+}
+
+static int u64_mul_checked(uint64_t a, uint64_t b, uint64_t *out) {
+  if (out == NULL) {
+    return -1;
+  }
+  if ((a != 0U) && (b > (UINT64_MAX / a))) {
+    *out = UINT64_MAX;
+    return -1;
+  }
+  *out = a * b;
+  return 0;
+}
+
+static int get_disk_stats_bytes(const char *path, uint64_t *total, uint64_t *used,
+                                uint64_t *free_b) {
+  if ((path == NULL) || (total == NULL) || (used == NULL) || (free_b == NULL)) {
+    return -1;
+  }
+
+  struct statvfs s;
+  if (statvfs(path, &s) != 0) {
+    return -1;
+  }
+
+  uint64_t fr = (uint64_t)((s.f_frsize != 0U) ? s.f_frsize : s.f_bsize);
+  uint64_t total_bytes = 0U;
+  uint64_t free_bytes = 0U;
+
+  if (u64_mul_checked(fr, (uint64_t)s.f_blocks, &total_bytes) != 0) {
+    return -1;
+  }
+  if (u64_mul_checked(fr, (uint64_t)s.f_bavail, &free_bytes) != 0) {
+    return -1;
+  }
+
+  uint64_t used_bytes = (total_bytes >= free_bytes) ? (total_bytes - free_bytes)
+                                                    : total_bytes;
+
+  *total = total_bytes;
+  *free_b = free_bytes;
+  *used = used_bytes;
+  return 0;
+}
+
+static int get_best_disk_stats(const char *hint_path, const char **out_path,
+                               uint64_t *total, uint64_t *used,
+                               uint64_t *free_b) {
+  if ((out_path == NULL) || (total == NULL) || (used == NULL) ||
+      (free_b == NULL)) {
+    return -1;
+  }
+
+  const char *candidates[] = {
+      "/user",
+      "/data",
+      "/system_data",
+      "/mnt/usb0",
+      "/mnt/usb1",
+      "/",
+      NULL,
+  };
+
+  const char *best = NULL;
+  uint64_t best_total = 0U;
+  uint64_t best_used = 0U;
+  uint64_t best_free = 0U;
+
+  if (hint_path != NULL) {
+    uint64_t t = 0U, u = 0U, f = 0U;
+    if (get_disk_stats_bytes(hint_path, &t, &u, &f) == 0) {
+      best = hint_path;
+      best_total = t;
+      best_used = u;
+      best_free = f;
+    }
+  }
+
+  for (size_t i = 0U; candidates[i] != NULL; i++) {
+    uint64_t t = 0U, u = 0U, f = 0U;
+    if (get_disk_stats_bytes(candidates[i], &t, &u, &f) != 0) {
+      continue;
+    }
+    if (t > best_total) {
+      best = candidates[i];
+      best_total = t;
+      best_used = u;
+      best_free = f;
+    }
+  }
+
+  if (best == NULL) {
+    return -1;
+  }
+
+  *out_path = best;
+  *total = best_total;
+  *used = best_used;
+  *free_b = best_free;
+  return 0;
+}
+
+static int count_dir_items(const char *path, uint32_t *out_count) {
+  if ((path == NULL) || (out_count == NULL)) {
+    return -1;
+  }
+
+  DIR *dir = opendir(path);
+  if (dir == NULL) {
+    return -1;
+  }
+
+  uint32_t count = 0U;
+  for (;;) {
+    errno = 0;
+    struct dirent *ent = readdir(dir);
+    if (ent == NULL) {
+      if (errno != 0) {
+        closedir(dir);
+        return -1;
+      }
+      break;
+    }
+    if ((strcmp(ent->d_name, ".") == 0) || (strcmp(ent->d_name, "..") == 0)) {
+      continue;
+    }
+    if (count == UINT32_MAX) {
+      closedir(dir);
+      return -1;
+    }
+    count++;
+  }
+
+  closedir(dir);
+  *out_count = count;
+  return 0;
+}
+
+static int get_boot_epoch_seconds(uint64_t *out_epoch) {
+  if (out_epoch == NULL) {
+    return -1;
+  }
+
+#if defined(PLATFORM_LINUX)
+  struct sysinfo info;
+  if (sysinfo(&info) != 0) {
+    return -1;
+  }
+  time_t now = time(NULL);
+  if (now < 0) {
+    return -1;
+  }
+  uint64_t now_u = (uint64_t)now;
+  uint64_t up_u = (uint64_t)info.uptime;
+  *out_epoch = (now_u >= up_u) ? (now_u - up_u) : 0U;
+  return 0;
+#elif defined(PLATFORM_MACOS) || defined(PLATFORM_PS4) || defined(PLATFORM_PS5) || \
+    defined(PS4) || defined(PS5)
+  struct timeval bt;
+  size_t sz = sizeof(bt);
+  if (sysctlbyname("kern.boottime", &bt, &sz, NULL, 0) != 0) {
+    return -1;
+  }
+  if (sz < sizeof(bt)) {
+    return -1;
+  }
+  if (bt.tv_sec < 0) {
+    return -1;
+  }
+  *out_epoch = (uint64_t)bt.tv_sec;
+  return 0;
+#else
+  (void)out_epoch;
+  return -1;
+#endif
+}
+
+static int get_cpu_temp_c(int32_t *out_c) {
+  if (out_c == NULL) {
+    return -1;
+  }
+
+#if defined(PLATFORM_PS4) || defined(PS4)
+  __attribute__((weak)) int32_t sceKernelGetCpuTemperature(uint64_t *temperature);
+  if (sceKernelGetCpuTemperature != NULL) {
+    uint64_t raw = 0U;
+    int32_t rc = sceKernelGetCpuTemperature(&raw);
+    if (rc == 0) {
+      if ((raw >= 20U) && (raw <= 110U)) {
+        *out_c = (int32_t)raw;
+        return 0;
+      }
+    }
+  }
+#endif
+
+#if defined(PLATFORM_MACOS) || defined(PLATFORM_PS4) || defined(PLATFORM_PS5) || \
+    defined(PS4) || defined(PS5)
+  const char *names[] = {
+      "dev.cpu.0.temperature",
+      "dev.cpu.0.coretemp.temperature",
+      "dev.cpu.0.temp",
+      "dev.amdtemp.0.temperature",
+      "dev.amdtemp.0.core0.sensor0",
+      "dev.thermal.0.temperature",
+      "hw.acpi.thermal.tz0.temperature",
+      "hw.temperature",
+      NULL,
+  };
+
+  for (size_t i = 0U; names[i] != NULL; i++) {
+    int v = 0;
+    size_t sz = sizeof(v);
+    if (sysctlbyname(names[i], &v, &sz, NULL, 0) != 0) {
+      continue;
+    }
+    if (sz != sizeof(v)) {
+      continue;
+    }
+
+    int32_t c = 0;
+    if (v > 1000) {
+      int32_t dk = (int32_t)v;
+      c = (dk - 2731 + 5) / 10;
+    } else {
+      c = (int32_t)v;
+    }
+    if ((c < -40) || (c > 200)) {
+      continue;
+    }
+    *out_c = c;
+    return 0;
+  }
+
+  return -1;
+#else
+  (void)out_c;
+  return -1;
+#endif
 }
 
 /*===========================================================================*
@@ -419,6 +724,11 @@ http_response_t *http_api_handle(const http_request_t *request) {
     return api_download(request);
   }
 
+  /*  /api/stats?path=...  */
+  if (strncmp(request->uri, "/api/stats", 10) == 0) {
+    return api_stats(request);
+  }
+
 #if ENABLE_WEB_UPLOAD
   /*  POST /api/create_file?path=...&name=...  */
   if (strncmp(request->uri, "/api/create_file", 16) == 0) {
@@ -574,6 +884,113 @@ static http_response_t *api_download(const http_request_t *request) {
   return resp;
 }
 
+static http_response_t *api_stats(const http_request_t *request) {
+  const char *query = strchr(request->uri, '?');
+  char path[1024] = "/";
+
+  if (query != NULL) {
+    (void)parse_path_param(query, path, sizeof(path));
+  }
+
+  if (!validate_path(path)) {
+    return error_json(HTTP_STATUS_403_FORBIDDEN, "Forbidden path");
+  }
+
+  uint64_t disk_total = 0U;
+  uint64_t disk_used = 0U;
+  uint64_t disk_free = 0U;
+  const char *disk_path = NULL;
+  int disk_ok =
+      get_best_disk_stats(path, &disk_path, &disk_total, &disk_used, &disk_free);
+
+  uint32_t items = 0U;
+  int items_ok = count_dir_items(path, &items);
+
+  uint64_t boot_epoch = 0U;
+  int boot_ok = get_boot_epoch_seconds(&boot_epoch);
+
+  int32_t temp_c = 0;
+  int temp_ok = get_cpu_temp_c(&temp_c);
+
+  char body[1024];
+  size_t pos = 0U;
+  size_t cap = sizeof(body);
+
+  if (buf_append_cstr(body, cap, &pos, "{\"path\":\"") != 0) {
+    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+  }
+  if (json_escape_append(body, cap, &pos, path) != 0) {
+    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+  }
+  if (buf_append_cstr(body, cap, &pos, "\"") != 0) {
+    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+  }
+
+  if (disk_ok == 0) {
+    if (buf_append_cstr(body, cap, &pos, ",\"disk_used\":") != 0 ||
+        buf_append_u64(body, cap, &pos, disk_used) != 0 ||
+        buf_append_cstr(body, cap, &pos, ",\"disk_total\":") != 0 ||
+        buf_append_u64(body, cap, &pos, disk_total) != 0 ||
+        buf_append_cstr(body, cap, &pos, ",\"disk_free\":") != 0 ||
+        buf_append_u64(body, cap, &pos, disk_free) != 0 ||
+        buf_append_cstr(body, cap, &pos, ",\"disk_path\":\"") != 0 ||
+        json_escape_append(body, cap, &pos, (disk_path != NULL) ? disk_path
+                                                                : "") != 0 ||
+        buf_append_cstr(body, cap, &pos, "\"") != 0) {
+      return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+    }
+  } else {
+    if (buf_append_cstr(body, cap, &pos,
+                        ",\"disk_used\":null,\"disk_total\":null,"
+                        "\"disk_free\":null,\"disk_path\":null") != 0) {
+      return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+    }
+  }
+
+  if (temp_ok == 0) {
+    if (buf_append_cstr(body, cap, &pos, ",\"cpu_temp\":") != 0 ||
+        buf_append_i32(body, cap, &pos, temp_c) != 0) {
+      return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+    }
+  } else {
+    if (buf_append_cstr(body, cap, &pos, ",\"cpu_temp\":null") != 0) {
+      return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+    }
+  }
+
+  if (boot_ok == 0) {
+    if (buf_append_cstr(body, cap, &pos, ",\"uptime\":") != 0 ||
+        buf_append_u64(body, cap, &pos, boot_epoch) != 0) {
+      return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+    }
+  } else {
+    if (buf_append_cstr(body, cap, &pos, ",\"uptime\":null") != 0) {
+      return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+    }
+  }
+
+  if (items_ok == 0) {
+    if (buf_append_cstr(body, cap, &pos, ",\"items_in_dir\":") != 0 ||
+        buf_append_u32(body, cap, &pos, items) != 0) {
+      return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+    }
+  } else {
+    if (buf_append_cstr(body, cap, &pos, ",\"items_in_dir\":null") != 0) {
+      return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+    }
+  }
+
+  if (buf_append_cstr(body, cap, &pos, "}") != 0) {
+    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+  }
+
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  http_response_add_header(resp, "Content-Type", "application/json");
+  http_response_add_header(resp, "Access-Control-Allow-Origin", "*");
+  http_response_set_body(resp, body, pos);
+  return resp;
+}
+
 #if ENABLE_WEB_UPLOAD
 static http_response_t *api_create_file(const http_request_t *request) {
   if (request->method != HTTP_METHOD_POST) {
@@ -683,27 +1100,12 @@ static http_response_t *serve_static(const http_request_t *request) {
       if (found != NULL) {
         size_t prefix_len = (size_t)(found - content);
         size_t suffix_len = size - prefix_len - strlen(placeholder);
-        size_t new_size = prefix_len + strlen(meta_tag) + suffix_len;
-
-        char len_str[32];
-        snprintf(len_str, sizeof(len_str), "%zu", new_size);
-        if (http_response_add_header(resp, "Content-Length", len_str) != 0) {
+        if (http_response_set_body_splice(resp, content, prefix_len, meta_tag,
+                                          strlen(meta_tag),
+                                          found + strlen(placeholder),
+                                          suffix_len) == 0) {
           return resp;
         }
-        if (http_response_finalize(resp) != 0) {
-          return resp;
-        }
-        if (http_response_append_raw(resp, content, prefix_len) != 0) {
-          return resp;
-        }
-        if (http_response_append_raw(resp, meta_tag, strlen(meta_tag)) != 0) {
-          return resp;
-        }
-        if (http_response_append_raw(resp, found + strlen(placeholder),
-                                     suffix_len) != 0) {
-          return resp;
-        }
-        return resp;
       }
     }
 #endif
@@ -712,11 +1114,15 @@ static http_response_t *serve_static(const http_request_t *request) {
   } else if (strstr(path, ".js") != NULL) {
     http_response_add_header(resp, "Content-Type",
                              "application/javascript; charset=utf-8");
+  } else if (strstr(path, ".png") != NULL) {
+    http_response_add_header(resp, "Content-Type", "image/png");
   } else {
     http_response_add_header(resp, "Content-Type", "application/octet-stream");
   }
 
-  http_response_set_body(resp, content, size);
+  if (http_response_set_body(resp, content, size) != 0) {
+    (void)http_response_set_body_ref(resp, content, size);
+  }
   return resp;
 }
 

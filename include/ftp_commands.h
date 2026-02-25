@@ -293,6 +293,46 @@ ftp_error_t cmd_PORT(ftp_session_t *session, const char *args);
  */
 ftp_error_t cmd_PASV(ftp_session_t *session, const char *args);
 
+/**
+ * @brief EPSV command - Extended passive mode (RFC 2428)
+ *
+ * @param session Client session
+ * @param args    (unused or "ALL")
+ *
+ * @return FTP_OK on success, negative error code on failure
+ */
+ftp_error_t cmd_EPSV(ftp_session_t *session, const char *args);
+
+/**
+ * @brief OPTS command - Feature negotiation (RFC 2389)
+ *
+ * @param session Client session
+ * @param args    Feature + option (e.g. "UTF8 ON")
+ *
+ * @return FTP_OK on success
+ */
+ftp_error_t cmd_OPTS(ftp_session_t *session, const char *args);
+
+/**
+ * @brief SITE command - Site-specific commands
+ *
+ * @param session Client session
+ * @param args    Site command (e.g. "CHMOD 755 file")
+ *
+ * @return FTP_OK (accepts CHMOD as no-op)
+ */
+ftp_error_t cmd_SITE(ftp_session_t *session, const char *args);
+
+/**
+ * @brief CLNT command - Client identification
+ *
+ * @param session Client session
+ * @param args    Client name string
+ *
+ * @return FTP_OK (always accepted)
+ */
+ftp_error_t cmd_CLNT(ftp_session_t *session, const char *args);
+
 /*===========================================================================*
  * INFORMATION
  *===========================================================================*/

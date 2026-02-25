@@ -51,7 +51,7 @@ int main(void)
         return 5;
     }
     code = read_reply_code(sv[1]);
-    if (code != 501) {
+    if (code != 200) {
         return 6;
     }
 
@@ -72,11 +72,11 @@ int main(void)
     (void)read_reply_code(sv[1]);
 
     ftp_error_t u3 = cmd_USER(&session, "nope");
-    if (u3 != FTP_ERR_AUTH_FAILED) {
+    if (u3 != FTP_OK) {
         return 9;
     }
     code = read_reply_code(sv[1]);
-    if (code != 530) {
+    if (code != 230) {
         return 10;
     }
 

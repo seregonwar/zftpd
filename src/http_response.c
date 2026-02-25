@@ -91,6 +91,12 @@ http_response_t *http_response_create(http_status_t status) {
   memset(resp, 0, sizeof(*resp));
   resp->sendfile_fd = -1;
   resp->stream_dir = NULL;
+  resp->mem_body = NULL;
+  resp->mem_length = 0U;
+  resp->mem_sent = 0U;
+  resp->mem_seg_count = 0U;
+  resp->mem_seg_index = 0U;
+  resp->mem_seg_sent = 0U;
 
   resp->used = (size_t)snprintf(resp->data, sizeof(resp->data),
                                 "HTTP/1.1 %d %s\r\n", (int)status,
@@ -106,9 +112,14 @@ http_response_t *http_response_create(http_status_t status) {
       http_response_add_header(resp, "Referrer-Policy", "no-referrer") != 0 ||
       http_response_add_header(resp, "Cache-Control", "no-store") != 0 ||
       http_response_add_header(resp, "Content-Security-Policy",
-                               "default-src 'self'; connect-src 'self'; "
-                               "img-src 'self' data:; object-src 'none'; "
-                               "base-uri 'none'; frame-ancestors 'none'") !=
+                               "default-src 'self'; "
+                               "connect-src 'self'; "
+                               "img-src 'self' data:; "
+                               "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+                               "style-src-elem 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+                               "font-src 'self' data: https://fonts.gstatic.com; "
+                               "script-src 'self' 'unsafe-inline'; "
+                               "object-src 'none'; base-uri 'none'; frame-ancestors 'none'") !=
           0) {
     http_response_destroy(resp);
     return NULL;
@@ -190,14 +201,26 @@ int http_response_set_body(http_response_t *resp, const void *body,
     return -1;
   }
 
-  /* Content-Length header */
   char len_str[32];
-  snprintf(len_str, sizeof(len_str), "%zu", length);
-  http_response_add_header(resp, "Content-Length", len_str);
+  int len_n = snprintf(len_str, sizeof(len_str), "%zu", length);
+  if (len_n < 0) {
+    return -1;
+  }
+  if ((size_t)len_n >= sizeof(len_str)) {
+    return -1;
+  }
 
-  /* Blank line + body */
-  size_t needed = 2 + length;
+  int hdr_needed = snprintf(NULL, 0, "Content-Length: %s\r\n", len_str);
+  if (hdr_needed < 0) {
+    return -1;
+  }
+
+  size_t needed = (size_t)hdr_needed + 2U + length;
   if (ensure_space(resp, needed) < 0) {
+    return -1;
+  }
+
+  if (http_response_add_header(resp, "Content-Length", len_str) != 0) {
     return -1;
   }
 
@@ -207,6 +230,128 @@ int http_response_set_body(http_response_t *resp, const void *body,
   memcpy(resp->data + resp->used, body, length);
   resp->used += length;
 
+  return 0;
+}
+
+int http_response_set_body_ref(http_response_t *resp, const void *body,
+                               size_t length) {
+  if (resp == NULL || body == NULL) {
+    return -1;
+  }
+  if (resp->mem_body != NULL) {
+    return -1;
+  }
+  if (length == 0U) {
+    return -1;
+  }
+
+  char len_str[32];
+  int len_n = snprintf(len_str, sizeof(len_str), "%zu", length);
+  if (len_n < 0) {
+    return -1;
+  }
+  if ((size_t)len_n >= sizeof(len_str)) {
+    return -1;
+  }
+
+  int hdr_needed = snprintf(NULL, 0, "Content-Length: %s\r\n", len_str);
+  if (hdr_needed < 0) {
+    return -1;
+  }
+
+  if (ensure_space(resp, (size_t)hdr_needed + 2U) < 0) {
+    return -1;
+  }
+  if (http_response_add_header(resp, "Content-Length", len_str) != 0) {
+    return -1;
+  }
+  if (http_response_finalize(resp) != 0) {
+    return -1;
+  }
+
+  resp->mem_body = body;
+  resp->mem_length = length;
+  resp->mem_sent = 0U;
+  return 0;
+}
+
+static int size_add_checked(size_t a, size_t b, size_t *out) {
+  if (out == NULL) {
+    return -1;
+  }
+  if (a > (SIZE_MAX - b)) {
+    return -1;
+  }
+  *out = a + b;
+  return 0;
+}
+
+int http_response_set_body_splice(http_response_t *resp, const void *prefix,
+                                  size_t prefix_len, const void *insert,
+                                  size_t insert_len, const void *suffix,
+                                  size_t suffix_len) {
+  if ((resp == NULL) || (prefix == NULL) || (suffix == NULL)) {
+    return -1;
+  }
+  if (resp->mem_seg_count != 0U) {
+    return -1;
+  }
+  if ((insert_len > 0U) && (insert == NULL)) {
+    return -1;
+  }
+  if (insert_len >= sizeof(resp->mem_inline)) {
+    return -1;
+  }
+
+  size_t total = 0U;
+  if (size_add_checked(prefix_len, insert_len, &total) != 0) {
+    return -1;
+  }
+  if (size_add_checked(total, suffix_len, &total) != 0) {
+    return -1;
+  }
+  if (total == 0U) {
+    return -1;
+  }
+
+  if (insert_len > 0U) {
+    memcpy(resp->mem_inline, insert, insert_len);
+  }
+  resp->mem_inline[insert_len] = '\0';
+
+  char len_str[32];
+  int len_n = snprintf(len_str, sizeof(len_str), "%zu", total);
+  if (len_n < 0) {
+    return -1;
+  }
+  if ((size_t)len_n >= sizeof(len_str)) {
+    return -1;
+  }
+
+  int hdr_needed = snprintf(NULL, 0, "Content-Length: %s\r\n", len_str);
+  if (hdr_needed < 0) {
+    return -1;
+  }
+
+  if (ensure_space(resp, (size_t)hdr_needed + 2U) < 0) {
+    return -1;
+  }
+  if (http_response_add_header(resp, "Content-Length", len_str) != 0) {
+    return -1;
+  }
+  if (http_response_finalize(resp) != 0) {
+    return -1;
+  }
+
+  resp->mem_segs[0] = prefix;
+  resp->mem_lens[0] = prefix_len;
+  resp->mem_segs[1] = (insert_len > 0U) ? (const void *)resp->mem_inline : NULL;
+  resp->mem_lens[1] = insert_len;
+  resp->mem_segs[2] = suffix;
+  resp->mem_lens[2] = suffix_len;
+  resp->mem_seg_count = 3U;
+  resp->mem_seg_index = 0U;
+  resp->mem_seg_sent = 0U;
   return 0;
 }
 
