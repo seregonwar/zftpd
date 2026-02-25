@@ -183,6 +183,11 @@ If you find `zftpd` useful and would like to support its ongoing development, co
 [![Support Ko-fi](https://img.shields.io/badge/Support-Ko--fi-F16061?style=flat-square&logo=ko-fi&logoColor=white)](https://ko-fi.com/seregon)
 [![Sponsor GitHub](https://img.shields.io/badge/Sponsor-GitHub-EA4AAA?style=flat-square&logo=github&logoColor=white)](https://github.com/sponsors/seregonwar)
 
+## Acknowledgements and credits
+- hippie68 (PS4 FTP reference implementation)
+- John Törnblom (PS5 payload framework)
+- PlayStation homebrew community
+  
 ## License
 
 MIT — see [LICENSE](LICENSE).
