@@ -1,7 +1,7 @@
 # zftpd
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/7261881d-8ae0-488b-9636-4ba6f9be8e5d" 
+  <img src="assets/zftpd-logo.png" 
        alt="zftpd banner" 
        width="100%" />
 </p>

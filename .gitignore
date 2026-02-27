@@ -70,7 +70,6 @@ ftpd.log
 test_mc_ping.py
 *.txt
 /backup
-/ShadowMountPlus-1.5beta5
 
 docs/ps4_ps5_syscall_report.md
 /ffi/rust/target
