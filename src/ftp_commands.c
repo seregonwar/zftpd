@@ -1116,8 +1116,19 @@ ftp_error_t cmd_MKD(ftp_session_t *session, const char *args) {
   err = pal_dir_create(resolved, DIR_PERM);
 
   if (err != FTP_OK) {
-    return ftp_session_send_reply(session, FTP_REPLY_550_FILE_ERROR,
-                                  "Cannot create directory.");
+    if ((err == FTP_ERR_DIR_EXISTS) && (pal_path_is_directory(resolved) == 1)) {
+      /*
+       * +---------------------------------------------------------+
+       * | CONCURRENCY HANDLING                                    |
+       * | Directory was just created by another active thread.    |
+       * | We treat this EEXIST as a success to prevent FileZilla  |
+       * | from aborting the entire directory tree upload.         |
+       * +---------------------------------------------------------+
+       */
+    } else {
+      return ftp_session_send_reply(session, FTP_REPLY_550_FILE_ERROR,
+                                    "Cannot create directory.");
+    }
   }
 
   char reply[FTP_REPLY_BUFFER_SIZE];

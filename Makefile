@@ -229,9 +229,9 @@ SOURCES += src/main.c
 #============================================================================
 
 ifneq ($(filter $(TARGET),ps4 ps5),)
-    ENABLE_ZHTTPD ?= 1
-else
     ENABLE_ZHTTPD ?= 0
+else
+    ENABLE_ZHTTPD ?= 1
 endif
 
 ifeq ($(ENABLE_ZHTTPD),1)
