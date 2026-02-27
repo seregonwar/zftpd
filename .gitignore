@@ -73,7 +73,8 @@ test_mc_ping.py
 /ShadowMountPlus-1.5beta5
 
 docs/ps4_ps5_syscall_report.md
-/docs
 /ffi/rust/target
 *.log
 *.pyc
+
+docs/investigation_report.md
