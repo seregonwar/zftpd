@@ -1,0 +1,17 @@
+[package]
+name = "zftpd"
+version = "1.0.0"
+edition = "2021"
+description = "Safe Rust bindings for the ZFTPD C-Core FFI"
+authors = ["Seregon <seregon@example.com>"]
+
+[dependencies]
+libc = "0.2"
+
+[build-dependencies]
+cc = "1.0"
+bindgen = "0.69"
+
+[[bin]]
+name = "bench"
+path = "benches/bench.rs"

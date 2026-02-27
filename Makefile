@@ -22,9 +22,12 @@ ARTIFACT_BASE := $(ARTIFACT_PREFIX)-$(PLATFORM_TAG)-v$(VERSION)
 # Host OS detection (for toolchain/linker compatibility)
 HOST_OS := $(shell uname -s)
 
-# Target platform (default: linux)
-# Valid values: linux, macos, ps3, ps4, ps5
+# Target platform (default detection)
+ifeq ($(HOST_OS),Darwin)
+TARGET ?= macos
+else
 TARGET ?= linux
+endif
 # Normalize target to lowercase so TARGET=PS5/PS4 still matches rules
 TARGET := $(shell echo $(TARGET) | tr '[:upper:]' '[:lower:]')
 
@@ -249,7 +252,11 @@ endif
 # Object files
 OBJECTS := $(patsubst src/%.c,$(OBJ_DIR)/%.o,$(SOURCES))
 
-# Object files without main (for unit tests)
+# FFI Object files
+FFI_SOURCES := ffi/c_core/pal_ffi.c
+FFI_OBJECTS := $(patsubst ffi/%.c,$(OBJ_DIR)/ffi/%.o,$(FFI_SOURCES))
+
+# Object files without main (for unit tests and ffi library)
 LIB_OBJECTS := $(filter-out $(OBJ_DIR)/main.o,$(OBJECTS))
 
 # Dependency files
@@ -260,17 +267,26 @@ DEPENDS := $(patsubst $(OBJ_DIR)/%.o,$(DEP_DIR)/%.d,$(OBJECTS))
 #============================================================================
 
 .PHONY: all clean distclean install test help bin deploy deploy-i deploy-nc doctor-ps4
-.PHONY: all-platforms release-all debug-all
+.PHONY: all-platforms release-all debug-all ffi ffi-java ffi-rust ffi-python
 
 .DEFAULT_GOAL := all
 
-$(BIN_DIR) $(OBJ_DIR) $(DEP_DIR) $(BUILD_DIR)/tests:
+# FFI Shared Library output
+ifeq ($(TARGET),macos)
+FFI_OUTPUT := $(BIN_DIR)/libzftpd_ffi.dylib
+FFI_LDFLAGS := -dynamiclib
+else
+FFI_OUTPUT := $(BIN_DIR)/libzftpd_ffi.so
+FFI_LDFLAGS := -shared
+endif
+
+$(BIN_DIR) $(OBJ_DIR) $(DEP_DIR) $(BUILD_DIR)/tests $(OBJ_DIR)/ffi/c_core:
 	@mkdir -p $@
 
 ifeq ($(filter $(TARGET),ps4 ps5),)
-all: $(OUTPUT_ELF)
+all: $(OUTPUT_ELF) $(if $(ffi_langs),ffi)
 else
-all: $(OUTPUT_BIN)
+all: $(OUTPUT_BIN) $(if $(ffi_langs),ffi)
 endif
 
 $(PROJECT): all
@@ -283,6 +299,32 @@ $(OUTPUT_ELF): $(OBJECTS) | $(BIN_DIR)
 	@$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 	@echo "Build complete: $(PROJECT) ($(TARGET), $(BUILD_TYPE))"
 
+# FFI Build Targets
+.PHONY: ffi
+ffi: $(FFI_OUTPUT)
+ifneq ($(findstring java,$(ffi_langs)),)
+	@echo "  [FFI] Building Java bindings..."
+	@$(MAKE) ffi-java
+endif
+ifneq ($(findstring rust,$(ffi_langs)),)
+	@echo "  [FFI] Building Rust bindings..."
+	@$(MAKE) ffi-rust
+endif
+ifneq ($(findstring python,$(ffi_langs)),)
+	@echo "  [FFI] Building Python bindings..."
+	@$(MAKE) ffi-python
+endif
+ifneq ($(findstring go,$(ffi_langs)),)
+	@echo "  [FFI] Building Go bindings..."
+	@$(MAKE) ffi-go
+endif
+
+$(FFI_OUTPUT): $(LIB_OBJECTS) $(FFI_OBJECTS) | $(BIN_DIR)
+	@echo "  [LD]  $@ (Shared Library)"
+	@mkdir -p $(BIN_DIR)
+	@$(CC) $(LDFLAGS) $(FFI_LDFLAGS) -fPIC -o $@ $(LIB_OBJECTS) $(FFI_OBJECTS) $(LIBS)
+	@echo "FFI C-Core built: $@"
+
 # Build all supported platforms (best-effort: includes only toolchains found on the host).
 TARGETS_ALL ?= $(shell \
   echo macos; \
@@ -290,6 +332,61 @@ TARGETS_ALL ?= $(shell \
   command -v ppu-gcc >/dev/null 2>&1 && echo ps3 || true; \
   [ -d external/ps4-payload-sdk ] && echo ps4 || true; \
   [ -d external/ps5-payload-sdk ] && echo ps5 || true)
+
+JAVA_HOME_PATH ?= $(shell /usr/libexec/java_home)
+
+# Java FFI Target
+.PHONY: ffi-java
+ffi-java: $(FFI_OUTPUT)
+	@echo "  [JAVAC] Compiling Java FFI bindings..."
+	@mkdir -p $(BIN_DIR)/ffi/java
+	@javac -J-Xint -d $(BIN_DIR)/ffi/java ffi/java/src/main/java/org/zftpd/ffi/*.java
+	@echo "  [JAVAC] Compiling Java FFI tests..."
+	@javac -J-Xint -cp $(BIN_DIR)/ffi/java -d $(BIN_DIR)/ffi/java ffi/java/src/test/java/org/zftpd/ffi/*.java
+	@echo "  [CC]    Compiling JNI C wrapper..."
+	@$(CC) $(CFLAGS) $(FFI_LDFLAGS) -fPIC \
+	    -I"$(JAVA_HOME_PATH)/include" \
+	    -I"$(JAVA_HOME_PATH)/include/darwin" \
+	    -I"./include" -I"./ffi/c_core" \
+	    -o $(BIN_DIR)/libzftpd_ffi_java$(suffix $(FFI_OUTPUT)) \
+	    ffi/java/src/main/c/pal_ffi_jni.c \
+	    -L$(BIN_DIR) -lzftpd_ffi $(LIBS)
+	@echo "  [JAVA]  Running FFI tests..."
+	@java -Xint -Djava.library.path=$(BIN_DIR) -cp $(BIN_DIR)/ffi/java org.zftpd.ffi.FfiTests
+	@echo "Java FFI bindings built successfully."
+
+# Rust FFI Target
+.PHONY: ffi-rust
+ffi-rust: $(FFI_OUTPUT)
+	@echo "  [CARGO] Building Rust FFI bindings..."
+	@cd ffi/rust && cargo build --release
+	@echo "  [CARGO] Running Rust FFI tests..."
+ifeq ($(TARGET),macos)
+	@cd ffi/rust && DYLD_LIBRARY_PATH=../../build/macos/release cargo test
+else
+	@cd ffi/rust && LD_LIBRARY_PATH=../../build/linux/release cargo test
+endif
+	@echo "Rust FFI bindings built successfully."
+
+# Python FFI Target
+.PHONY: ffi-python
+ffi-python: $(FFI_OUTPUT)
+	@echo "  [PYTHON] Installing dependencies..."
+	@python3 -m pip install -q cffi pytest
+	@echo "  [PYTHON] Running Python FFI tests..."
+	@cd ffi/python && PYTHONPATH=. pytest tests/
+	@echo "Python FFI bindings tested successfully."
+
+# Go FFI Target
+.PHONY: ffi-go
+ffi-go: $(FFI_OUTPUT)
+	@echo "  [GO] Compiling and Testing Go FFI bindings..."
+ifeq ($(TARGET),macos)
+	@cd ffi/go/zftpd && DYLD_LIBRARY_PATH=../../../build/macos/release go test -v
+else
+	@cd ffi/go/zftpd && LD_LIBRARY_PATH=../../../build/linux/release go test -v
+endif
+	@echo "Go FFI bindings tested successfully."
 
 all-platforms: release-all
 
@@ -309,8 +406,14 @@ debug-all:
 # Compile C source files
 $(OBJ_DIR)/%.o: src/%.c | $(OBJ_DIR) $(DEP_DIR)
 	@echo "  [CC]  $<"
-	@mkdir -p $(OBJ_DIR) $(DEP_DIR)
+	@mkdir -p $(dir $@) $(dir $(DEP_DIR)/$*.d)
 	@$(CC) $(CFLAGS) -MMD -MP -MF $(DEP_DIR)/$*.d -MT $@ -c $< -o $@
+
+# Compile FFI C source files (with -fPIC for shared library)
+$(OBJ_DIR)/ffi/%.o: ffi/%.c | $(OBJ_DIR)/ffi/c_core
+	@echo "  [CC]  $< (FFI)"
+	@mkdir -p $(dir $@) $(dir $(DEP_DIR)/ffi/$*.d)
+	@$(CC) $(CFLAGS) -fPIC -MMD -MP -MF $(DEP_DIR)/ffi/$*.d -MT $@ -c $< -o $@
 
 # Include dependency files
 -include $(DEPENDS)

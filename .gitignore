@@ -74,3 +74,6 @@ test_mc_ping.py
 
 docs/ps4_ps5_syscall_report.md
 /docs
+/ffi/rust/target
+*.log
+*.pyc

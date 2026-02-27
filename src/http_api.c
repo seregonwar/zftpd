@@ -51,8 +51,9 @@ SOFTWARE.
 #if defined(PLATFORM_LINUX)
 #include <sys/sysinfo.h>
 #endif
-#if defined(PLATFORM_MACOS) || defined(PLATFORM_PS4) || defined(PLATFORM_PS5) || \
-    defined(PS4) || defined(PS5)
+#if defined(PLATFORM_MACOS) || defined(PLATFORM_PS4) ||                        \
+    defined(PLATFORM_PS5) || defined(PS4) || defined(PS5) ||                   \
+    defined(__APPLE__)
 #include <sys/sysctl.h>
 #endif
 #include <unistd.h>
@@ -224,8 +225,8 @@ static int u64_mul_checked(uint64_t a, uint64_t b, uint64_t *out) {
   return 0;
 }
 
-static int get_disk_stats_bytes(const char *path, uint64_t *total, uint64_t *used,
-                                uint64_t *free_b) {
+static int get_disk_stats_bytes(const char *path, uint64_t *total,
+                                uint64_t *used, uint64_t *free_b) {
   if ((path == NULL) || (total == NULL) || (used == NULL) || (free_b == NULL)) {
     return -1;
   }
@@ -246,8 +247,8 @@ static int get_disk_stats_bytes(const char *path, uint64_t *total, uint64_t *use
     return -1;
   }
 
-  uint64_t used_bytes = (total_bytes >= free_bytes) ? (total_bytes - free_bytes)
-                                                    : total_bytes;
+  uint64_t used_bytes =
+      (total_bytes >= free_bytes) ? (total_bytes - free_bytes) : total_bytes;
 
   *total = total_bytes;
   *free_b = free_bytes;
@@ -264,13 +265,7 @@ static int get_best_disk_stats(const char *hint_path, const char **out_path,
   }
 
   const char *candidates[] = {
-      "/user",
-      "/data",
-      "/system_data",
-      "/mnt/usb0",
-      "/mnt/usb1",
-      "/",
-      NULL,
+      "/user", "/data", "/system_data", "/mnt/usb0", "/mnt/usb1", "/", NULL,
   };
 
   const char *best = NULL;
@@ -366,8 +361,8 @@ static int get_boot_epoch_seconds(uint64_t *out_epoch) {
   uint64_t up_u = (uint64_t)info.uptime;
   *out_epoch = (now_u >= up_u) ? (now_u - up_u) : 0U;
   return 0;
-#elif defined(PLATFORM_MACOS) || defined(PLATFORM_PS4) || defined(PLATFORM_PS5) || \
-    defined(PS4) || defined(PS5)
+#elif defined(PLATFORM_MACOS) || defined(PLATFORM_PS4) ||                      \
+    defined(PLATFORM_PS5) || defined(PS4) || defined(PS5)
   struct timeval bt;
   size_t sz = sizeof(bt);
   if (sysctlbyname("kern.boottime", &bt, &sz, NULL, 0) != 0) {
@@ -393,7 +388,8 @@ static int get_cpu_temp_c(int32_t *out_c) {
   }
 
 #if defined(PLATFORM_PS4) || defined(PS4)
-  __attribute__((weak)) int32_t sceKernelGetCpuTemperature(uint64_t *temperature);
+  __attribute__((weak)) int32_t sceKernelGetCpuTemperature(
+      uint64_t *temperature);
   if (sceKernelGetCpuTemperature != NULL) {
     uint64_t raw = 0U;
     int32_t rc = sceKernelGetCpuTemperature(&raw);
@@ -406,8 +402,8 @@ static int get_cpu_temp_c(int32_t *out_c) {
   }
 #endif
 
-#if defined(PLATFORM_MACOS) || defined(PLATFORM_PS4) || defined(PLATFORM_PS5) || \
-    defined(PS4) || defined(PS5)
+#if defined(PLATFORM_MACOS) || defined(PLATFORM_PS4) ||                        \
+    defined(PLATFORM_PS5) || defined(PS4) || defined(PS5)
   const char *names[] = {
       "dev.cpu.0.temperature",
       "dev.cpu.0.coretemp.temperature",
@@ -900,8 +896,8 @@ static http_response_t *api_stats(const http_request_t *request) {
   uint64_t disk_used = 0U;
   uint64_t disk_free = 0U;
   const char *disk_path = NULL;
-  int disk_ok =
-      get_best_disk_stats(path, &disk_path, &disk_total, &disk_used, &disk_free);
+  int disk_ok = get_best_disk_stats(path, &disk_path, &disk_total, &disk_used,
+                                    &disk_free);
 
   uint32_t items = 0U;
   int items_ok = count_dir_items(path, &items);
@@ -934,8 +930,8 @@ static http_response_t *api_stats(const http_request_t *request) {
         buf_append_cstr(body, cap, &pos, ",\"disk_free\":") != 0 ||
         buf_append_u64(body, cap, &pos, disk_free) != 0 ||
         buf_append_cstr(body, cap, &pos, ",\"disk_path\":\"") != 0 ||
-        json_escape_append(body, cap, &pos, (disk_path != NULL) ? disk_path
-                                                                : "") != 0 ||
+        json_escape_append(body, cap, &pos,
+                           (disk_path != NULL) ? disk_path : "") != 0 ||
         buf_append_cstr(body, cap, &pos, "\"") != 0) {
       return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
     }
@@ -1048,9 +1044,9 @@ static http_response_t *api_create_file(const http_request_t *request) {
   http_response_add_header(resp, "Access-Control-Allow-Origin", "*");
 
   char body[512];
-  int len = snprintf(body, sizeof(body),
-                     "{\"ok\":true,\"path\":\"%s\",\"name\":\"%s\"}", full,
-                     name);
+  int len =
+      snprintf(body, sizeof(body),
+               "{\"ok\":true,\"path\":\"%s\",\"name\":\"%s\"}", full, name);
   http_response_set_body(resp, body, (size_t)len);
   return resp;
 }
@@ -1100,10 +1096,9 @@ static http_response_t *serve_static(const http_request_t *request) {
       if (found != NULL) {
         size_t prefix_len = (size_t)(found - content);
         size_t suffix_len = size - prefix_len - strlen(placeholder);
-        if (http_response_set_body_splice(resp, content, prefix_len, meta_tag,
-                                          strlen(meta_tag),
-                                          found + strlen(placeholder),
-                                          suffix_len) == 0) {
+        if (http_response_set_body_splice(
+                resp, content, prefix_len, meta_tag, strlen(meta_tag),
+                found + strlen(placeholder), suffix_len) == 0) {
           return resp;
         }
       }
