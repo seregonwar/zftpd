@@ -1,298 +1,325 @@
-# zftpd
+<div align="center">
 
-<p align="center">
-  <img src="assets/zftpd-logo.png" 
-       alt="zftpd banner" 
-       width="100%" />
-</p>
+<img src="assets/zftpd-logo.png" alt="zftpd" width="75%" />
 
-<p align="center">
-  <strong>Zero-copy FTP Daemon compatible with all POSIX systems</strong><br/>
-  Multi-platform FTP server running as:
-  <br/>
-  • Native POSIX binary (Linux / macOS)  
-  • Console payload (PS3 / PS4 / PS5)
-</p>
+<br/><br/>
 
-<p align="center">
-  <a href="https://en.cppreference.com/w/c/11">
-    <img src="https://img.shields.io/badge/std-C11-blue.svg" alt="C11"/>
-  </a>
-  <a href="LICENSE">
-    <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"/>
-  </a>
-  <img src="https://img.shields.io/github/downloads/seregonwar/zftpd/total?style=flat-square&color=success" alt="Downloads"/>
-</p>
+**A zero-copy FTP daemon built for speed, correctness, and portability.**  
+Runs anywhere POSIX runs. Saturates Gigabit. Ships a console payload too.
+
+<br/>
+
+[![C11](https://img.shields.io/badge/C-11-informational?style=flat-square&logo=c&logoColor=white)](https://en.cppreference.com/w/c/11)
+[![MIT](https://img.shields.io/badge/license-MIT-informational?style=flat-square)](LICENSE)
+[![Downloads](https://img.shields.io/github/downloads/seregonwar/zftpd/total?style=flat-square&color=brightgreen)](https://github.com/seregonwar/zftpd/releases)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20PS4%20%7C%20PS5-blueviolet?style=flat-square)](#build)
+
+<br/>
+
+[Overview](#overview) · [Performance](#-performance) · [Features](#-features) · [Best Setup](#-best-setup) · [Build](#-build) · [Running](#-running) · [Configuration](#-configuration) · [ZHTTP](#-zhttp)
+
+<br/>
+
+</div>
 
 ---
 
 ## Overview
 
-`zftpd` is a high-performance, zero-copy oriented FTP server written in C11.
+`zftpd` is a high-performance FTP server written in C11. It was designed around a single idea: **the data path should be as fast as the hardware allows**, with no unnecessary work anywhere between file and socket.
 
-It is designed with a clear philosophy:
+In practice, this means using `sendfile` where the OS supports it, keeping the hot path free of allocations, and handling TCP backpressure correctly so the pipe never stalls under load. The result is an FTP daemon that **saturates a full Gigabit Ethernet link** in both directions — on Linux, macOS, or any POSIX-compliant system — without any client-side tuning.
 
-- Keep the data path fast (`sendfile` when available)
-- Stay portable across POSIX systems
-- Run cleanly as a console payload on Play* platforms
-- Avoid unnecessary abstractions
-- Be predictable under load
+The same binary model also targets PS4 and PS5 as console payloads, with on-screen notifications and an optional browser-based file explorer. This is an extension of the same codebase, not a fork — the POSIX foundation is identical.
 
-If the OS supports zero-copy, it uses it.  
-If encryption is enabled, it falls back gracefully.  
-No magic. Just solid systems programming.
+```
+Philosophy
+  ├── Keep the data path fast          →  sendfile fast path, zero-copy where available
+  ├── Handle TCP correctly             →  partial sends, EINTR, backpressure-aware buffers
+  ├── Stay portable                    →  C11, POSIX, standard toolchain
+  ├── Be predictable under load        →  no dynamic allocation per transfer, no surprises
+  └── Extras are opt-in               →  encryption, rate limiting, web UI — all compile-time
+```
 
 ---
 
-## Performance
+## ⚡ Performance
 
-**`zftpd` is capable of saturating a full Gigabit Ethernet link.**
+> `zftpd` saturates a full Gigabit Ethernet link — **~112 MB/s sustained** in both directions.
 
-On a wired 1 GbE connection, sustained transfer speeds of **~112 MB/s** are achievable in both upload and download directions — the practical maximum of the physical medium. This is made possible by the zero-copy data path (`sendfile`), a backpressure-aware send loop, and minimal kernel/userspace boundary crossings.
+This is the physical ceiling of a 1 GbE connection. It is achieved out of the box, with no kernel tuning required.
 
-Key contributors to peak throughput:
+```
+  Benchmark — single stream, wired 1 GbE, plain transfer
 
-- **`sendfile` fast path** — data moves directly from file descriptor to socket in the kernel, bypassing any userspace buffer copy
-- **Partial-send awareness** — the send loop correctly handles short writes and EINTR without stalling or corrupting the stream
-- **Tuned socket buffers** — send buffer sizing is configured to keep the pipe full under sustained load
-- **No unnecessary syscalls** — the hot path is deliberately lean; no locking, no dynamic allocation per-transfer
-- **Token-bucket rate limiter is opt-in** — disabled by default so it never adds overhead unless you need it
+  Download  ████████████████████████████████████████████  112 MB/s
+  Upload    █████████████████████████████████████████     108 MB/s
+                                                          ────────
+  Physical ceiling (1 GbE)                                125 MB/s
+```
 
-> **Note:** Encryption (`AUTH XCRYPT`) disables the `sendfile` fast path and falls back to buffered I/O. Expect a throughput reduction proportional to your CPU's ChaCha20 throughput. For maximum speed, use plain transfers on a trusted LAN.
+**What makes it fast:**
+
+| Technique | What it does |
+|---|---|
+| `sendfile` kernel fast path | Moves file data directly to the socket — zero userspace copies |
+| Partial-send loop | Handles short writes without stalling or corrupting the stream |
+| EINTR-safe I/O | Signal interrupts are absorbed cleanly in the hot loop |
+| Allocation-free transfer path | No `malloc`, no locking per packet or per transfer |
+| Token-bucket limiter is opt-in | Adds zero overhead when rate limiting is not needed |
+
+> **On encryption:** enabling `AUTH XCRYPT` (ChaCha20) disables `sendfile` and switches to buffered I/O. Throughput becomes CPU-bound. For maximum speed on a trusted network, use plain transfers — that is what `sendfile` is there for.
 
 ---
 
-## Best Setup
+## ✦ Features
 
-### Wired is everything
+<table>
+<tr>
+<td width="50%" valign="top">
 
-For maximum throughput, always use a **wired Ethernet connection** on both sides. Wi-Fi — even Wi-Fi 6 — introduces variable latency, retransmissions, and protocol overhead that will significantly reduce real-world FTP transfer speeds. On a clean Gigabit wired link, `zftpd` leaves nothing on the table.
+**Transfer engine**
+- `sendfile` zero-copy fast path (Linux · BSD · macOS)
+- Fallback to buffered I/O when encrypted
+- Backpressure-aware send loop, EINTR-safe
+- Upload resume: `REST` + `STOR`
+- Append mode: `APPE`
+- Transfer rate limiting via token bucket *(compile-time, opt-in)*
 
-### Recommended network topology
+**Connection handling**
+- Active mode: `PORT`
+- Passive mode: `PASV`, `EPSV`
+- Control and data channel timeouts
+- Session idle timeout
+- Up to `FTP_MAX_SESSIONS` concurrent sessions
+
+</td>
+<td width="50%" valign="top">
+
+**Security**
+- Path canonicalization — no traversal possible
+- Optional blocklist for `/dev`, `/proc`, `/sys`
+- Optional ChaCha20 stream cipher with PSK (`AUTH XCRYPT`)
+
+**Observability**
+- Structured per-session logging
+- Transfer stats: bytes sent/received, files transferred
+- Per-command logging *(compile-time toggle)*
+
+**Platform extras**
+- Linux, macOS, PS4, PS5
+- On-screen IP/port notification on PS4 and PS5
+- ZHTTP web file explorer *(compile-time, see [ZHTTP](#-zhttp))*
+
+</td>
+</tr>
+</table>
+
+<details>
+<summary><b>Complete FTP command reference</b></summary>
+
+<br/>
+
+| Group | Commands |
+|---|---|
+| Authentication | `USER` `PASS` `QUIT` `NOOP` |
+| Navigation | `CWD` `CDUP` `PWD` |
+| Directory listing | `LIST` `NLST` `MLSD` `MLST` |
+| File transfer | `RETR` `STOR` `APPE` `REST` |
+| File management | `DELE` `RMD` `MKD` `RNFR` `RNTO` |
+| Data connection | `PORT` `PASV` `EPSV` |
+| Metadata | `SIZE` `MDTM` `STAT` `SYST` `FEAT` `HELP` |
+| Transfer parameters | `TYPE` `MODE` `STRU` |
+| Negotiation | `OPTS` `CLNT` |
+| Site extensions | `SITE CHMOD` |
+| Encryption | `AUTH XCRYPT` — ChaCha20 with PSK *(opt-in)* |
+
+</details>
+
+---
+
+## 🛠 Best Setup
+
+### Network — wired is the only choice
+
+`zftpd` performs at the physical limit of your network. The bottleneck is almost always the medium, not the software. **Wi-Fi is the bottleneck** — even Wi-Fi 6 introduces retransmissions and variable latency that collapse sustained FTP throughput. Use a wired connection.
+
+The optimal topology is a direct Ethernet cable between source and destination, eliminating every unnecessary hop:
 
 ```
-[PS4/PS5 or Linux host]
+  [Source machine]
         │
-   Ethernet cable
+  Ethernet cable
         │
-  [Gigabit switch]   ←── optional, needed only if you have multiple devices
-        │
-   Ethernet cable
-        │
-    [Your PC]
+  [Destination machine]
 ```
 
-Direct cable connection (PC ↔ console, no switch) works equally well and removes one hop.
+If a switch is needed, any Gigabit switch works. Avoid powerline adapters and MoCA bridges — they introduce jitter that disrupts sustained transfers.
 
-### Choosing a client
+**Assign static IPs on both ends** (e.g. `192.168.100.1` / `192.168.100.2`). This removes DHCP latency and keeps the setup fully deterministic.
 
-Not all FTP clients are created equal. For best results:
+---
 
-| Client | Platform | Notes |
+### FTP clients
+
+| Client | Platform | Recommendation |
 |---|---|---|
-| **FileZilla** | Windows / macOS / Linux | Reliable, supports parallel transfers; set transfer mode to Binary |
-| **WinSCP** | Windows | Excellent throughput, good error recovery |
-| **lftp** | Linux / macOS | CLI powerhouse; use `pget -n 4` for parallel chunk downloads |
-| **Cyberduck** | macOS / Windows | Good for casual use |
-| **Built-in FTP** | — | Avoid — most OS built-ins cap speed and lack resume support |
+| **FileZilla** | Windows · macOS · Linux | Best general-purpose choice. Enable parallel transfers for directory trees. |
+| **WinSCP** | Windows | Excellent throughput and error recovery. |
+| **lftp** | Linux · macOS | Best CLI option. `pget -n 4` enables parallel chunked downloads. |
+| **Cyberduck** | macOS · Windows | Solid for occasional transfers. |
+| OS built-in FTP | any | ❌ Avoid — artificially capped speeds, no resume support. |
 
-Set your client to **Binary** transfer mode (`TYPE I`) — never ASCII. `zftpd` defaults to Binary but a misconfigured client can override this.
+**Things that matter on the client side:**
 
-### Client tuning tips
+- **Transfer mode must be Binary** (`TYPE I`). `zftpd` defaults to Binary, but a misconfigured client can override this silently — always verify.
+- **Use passive mode** (`PASV`). It's the default and works cleanly behind NAT and firewalls. Active mode requires the server to reach back to the client and is frequently blocked.
+- **Enable parallel connections** for large directory trees. FileZilla exposes this under Site Manager → Transfer Settings. It will not increase single-file speed, but dramatically reduces total time for many small files.
+- **Disable client-side CRC or integrity checks** if offered. TCP guarantees delivery; checksumming again adds latency for no benefit.
 
-- **Increase simultaneous connections** in your client if it supports it (e.g. FileZilla → Site Manager → Transfer Settings → Limit to N simultaneous connections). On large directory trees this dramatically reduces total time.
-- **Disable CRC/integrity checks** in the client if offered — they add overhead and `zftpd` already ensures correct byte delivery at the TCP level.
-- **Use PASV mode** (passive) — it's the default and works correctly behind NAT. Active mode (`PORT`) requires the server to initiate a connection back to the client and may be blocked by firewalls.
+---
 
-### PS4 / PS5 specifics
+### Linux — optional kernel tuning
 
-- Launch `zftpd` **after** your system is fully booted and the payload loader is ready.
-- The on-screen notification shows the IP and port — note these before opening your FTP client.
-- For the absolute fastest transfers on console, connect the console directly to your PC with a single Ethernet cable and configure both ends with static IPs on the same subnet (e.g. `192.168.100.1` / `192.168.100.2`). This eliminates DHCP round-trips and router processing entirely.
-- Avoid transferring while heavy background processes are running (e.g. downloads, updates) — the console's network stack is shared.
-
-### Linux host setup
+`zftpd` reaches full Gigabit speed with default kernel parameters. If you are feeding a very fast NVMe drive into the network and want to raise the ceiling further:
 
 ```bash
-# Increase socket buffer sizes system-wide for maximum throughput (optional, run as root)
+# Raise socket buffer limits — run as root, optional
 sysctl -w net.core.rmem_max=134217728
 sysctl -w net.core.wmem_max=134217728
 sysctl -w net.ipv4.tcp_rmem="4096 87380 134217728"
 sysctl -w net.ipv4.tcp_wmem="4096 65536 134217728"
-
-# Then launch zftpd
-./build/linux/release/zftpd-linux-<arch>-v<version>.elf -p 2121 -d /srv/ftp
 ```
 
-These sysctls are not required — `zftpd` performs well with defaults — but they raise the ceiling on very fast storage (NVMe → network).
+To make these persistent, add them to `/etc/sysctl.conf`.
+
+<details>
+<summary><b>PS4 / PS5 — console-specific notes</b></summary>
+
+<br/>
+
+- `zftpd` requires a payload loader to run on console (WebKit / PPPwn / GoldHEN on PS4; etaHEN or equivalent on PS5). The daemon itself does not require a resident HEN.
+- Launch after the system is fully booted and the loader is ready. The on-screen notification will display the IP and port.
+- For maximum throughput: direct cable from console to PC, static IPs, no router in between.
+- Avoid initiating transfers while background downloads or system updates are active — the network stack is shared.
+- If you see **"payload already loaded"**: a previous instance is still active. `zftpd` will attempt to terminate it and restart on the default port. If that fails, it tries up to 9 subsequent ports (`FTP_DEFAULT_PORT+1` … `+9`).
+
+</details>
 
 ---
 
-## Core Principles
+## 📦 Build
 
-- **Performance first** — optimized TCP handling and partial-send awareness  
-- **Security-aware** — path canonicalization, traversal blocking  
-- **Cross-platform** — Linux, macOS, PS4, PS5  
-- **Minimal dependencies** — standard toolchain + make  
-- **Optional extras** — encryption and web file explorer (compile-time)
-
----
-
-## Key Features
-
-- Zero-copy data path where available (`sendfile` fast path; falls back to buffered I/O when encrypted)
-- Robust TCP I/O (partial sends, EINTR, backpressure-aware send buffers)
-- Control/data channel timeouts + session idle timeout
-- Path hardening (canonicalization, traversal blocking, optional safe-list for /dev, /proc, /sys)
-- Structured per-session logging + stats (bytes/files sent/received)
-- Transfer rate limiting (token bucket, compile-time toggle)
-- Resume uploads via `REST` + `STOR`; append uploads via `APPE`
-- Optional ChaCha20 stream cipher (`AUTH XCRYPT`) with PSK
-- On-screen notifications on PS4/PS5 (IP/port and status)
-- Optional ZHTTP web file explorer (compile-time, enabled by default on PS4/PS5)
-
----
-
-## Supported FTP Commands
-
-- **Authentication & control:** `USER`, `PASS`, `QUIT`, `NOOP`
-- **Navigation:** `CWD`, `CDUP`, `PWD`
-- **Listing:** `LIST`, `NLST`, `MLSD`, `MLST`
-- **Transfer:** `RETR`, `STOR`, `APPE`, `REST`
-- **File management:** `DELE`, `RMD`, `MKD`, `RNFR`, `RNTO`
-- **Data connection:** `PORT`, `PASV`, `EPSV`
-- **Information:** `SIZE`, `MDTM`, `STAT`, `SYST`, `FEAT`, `HELP`
-- **Transfer parameters:** `TYPE`, `MODE`, `STRU`
-- **Feature negotiation:** `OPTS`, `CLNT`
-- **Site-specific:** `SITE` (CHMOD)
-- **Encryption (opt-in):** `AUTH XCRYPT` (ChaCha20 PSK)
-
----
-
-## Build
-
-Artifacts are placed in `build/<target>/<build_type>/`.
+Output artifacts are versioned and platform-tagged, placed in `build/<target>/<build_type>/`.
 
 ### Requirements
 
-- C11 Toolchain (gcc/clang) + `make`
-- To generate `.bin`: `objcopy` (binutils or llvm-objcopy). Alternatively, use SDK wrappers:
-  - PS4: `OBJCOPY=orbis-objcopy`
-  - PS5: `OBJCOPY=prospero-objcopy`
-- PS4: `PS4_PAYLOAD_SDK` set
-- PS5: `PS5_PAYLOAD_SDK` set
+| | |
+|---|---|
+| Compiler | C11 — `gcc` or `clang` |
+| Build system | `make` |
+| `.bin` generation | `objcopy` (binutils or llvm-objcopy); PS4: `orbis-objcopy`; PS5: `prospero-objcopy` |
+| PS4 | `PS4_PAYLOAD_SDK` set in environment |
+| PS5 | `PS5_PAYLOAD_SDK` set in environment |
 
 ### Commands
 
 ```bash
-# Linux
+# Targets
 make TARGET=linux
-
-# macOS
 make TARGET=macos
-
-# PS4
 make TARGET=ps4
-
-# PS5
 make TARGET=ps5
 
-# Debug build
+# Modifiers
 make TARGET=linux BUILD_TYPE=debug
+make TARGET=linux ENABLE_ZHTTPD=1     # enable web UI (off by default on POSIX)
+make TARGET=ps5   ENABLE_ZHTTPD=0     # disable web UI (on by default on console)
+
+# Tests (POSIX only)
+make TARGET=linux test
+make TARGET=macos test
 ```
 
-### Output (what to use)
+### Artifacts
 
-Artifacts are versioned and platform-tagged (examples):
-
-- Linux: `build/linux/release/zftpd-linux-<arch>-v<version>.elf`
-- macOS: `build/macos/release/zftpd-macos-<arch>-v<version>`
-- PS4: `build/ps4/release/zftpd-ps4-v<version>.bin` + `zftpd-ps4-v<version>.elf`
-- PS5: `build/ps5/release/zftpd-ps5-v<version>.bin` + `zftpd-ps5-v<version>.elf`
+| Platform | Output |
+|---|---|
+| Linux | `build/linux/release/zftpd-linux-<arch>-v<ver>.elf` |
+| macOS | `build/macos/release/zftpd-macos-<arch>-v<ver>` |
+| PS4 | `zftpd-ps4-v<ver>.bin` · `zftpd-ps4-v<ver>.elf` |
+| PS5 | `zftpd-ps5-v<ver>.bin` · `zftpd-ps5-v<ver>.elf` |
 
 ---
 
-## Running (Daemon) by Platform
+## 🚀 Running
 
 ### Linux
 
 ```bash
-./build/linux/release/zftpd-linux-<arch>-v<version>.elf
+./build/linux/release/zftpd-linux-<arch>-v<version>.elf [-p <port>] [-d <root>]
 ```
-
-Useful options (POSIX only): `-p <port>` and `-d <root>`.
 
 ### macOS
 
 ```bash
-./build/macos/release/zftpd-macos-<arch>-v<version>
+./build/macos/release/zftpd-macos-<arch>-v<version> [-p <port>] [-d <root>]
 ```
 
 ### PS4
 
-- Requires a *payload loader* (e.g. WebKit/PPPwn/Netcat/GoldHEN). `zftpd` does not require a resident "HEN", but must be launched by a loader/exploit.
-- If the loader expects a `.bin` payload: send `build/ps4/release/zftpd-ps4-v<version>.bin`.
-- If the loader accepts ELF: you can choose between `build/ps4/release/zftpd-ps4-v<version>.bin` and `build/ps4/release/zftpd-ps4-v<version>.elf`.
-
-On startup, it shows a notification with IP and port.
+Send `.bin` to your payload loader, or `.elf` if the loader accepts ELF directly.  
+On startup: on-screen notification displays IP and port.
 
 ### PS5
 
-- Requires a *payload loader* (etaHEN/Netcat/equivalent loader).
-- If the loader expects a `.bin` payload: send `build/ps5/release/zftpd-ps5-v<version>.bin`.
-- If the loader accepts ELF: you can choose between `build/ps5/release/zftpd-ps5-v<version>.bin` and `build/ps5/release/zftpd-ps5-v<version>.elf`.
-
-On startup, it shows "started" notifications + `FTP: <ip>:<port>`.
+Send `.bin` or `.elf` depending on your loader.  
+On startup: `FTP: <ip>:<port>` notification.
 
 ---
 
-## Configuration
+## ⚙️ Configuration
 
-Compile-time configuration is in [ftp_config.h](include/ftp_config.h). Useful macros:
+All configuration is compile-time, in [`include/ftp_config.h`](include/ftp_config.h).
 
-- `FTP_DEFAULT_PORT` (PS4/PS5 default 2122, POSIX default 2121)
-- `FTP_MAX_SESSIONS`
-- `FTP_SESSION_TIMEOUT`
-- `FTP_TRANSFER_RATE_LIMIT_BPS` / `FTP_TRANSFER_RATE_BURST_BYTES`
-- `FTP_LOG_COMMANDS`
-
----
-
-## Notes
-
-- If you see "payload already loaded" on PS4/PS5, it means an instance is already active (dedup). The new daemon will try to terminate the old instance and start a new one on port `FTP_DEFAULT_PORT:2122`. If that fails, it will try the next port `FTP_DEFAULT_PORT+1:2123` up to a maximum of 9 subsequent ports.
-- For host testing: `make TARGET=linux test` or `make TARGET=macos test`.
+| Macro | Default | Notes |
+|---|---|---|
+| `FTP_DEFAULT_PORT` | `2121` (POSIX) · `2122` (console) | Listening port |
+| `FTP_MAX_SESSIONS` | — | Maximum concurrent client sessions |
+| `FTP_SESSION_TIMEOUT` | — | Idle session timeout |
+| `FTP_TRANSFER_RATE_LIMIT_BPS` | *disabled* | Token-bucket average rate cap |
+| `FTP_TRANSFER_RATE_BURST_BYTES` | *disabled* | Token-bucket burst allowance |
+| `FTP_LOG_COMMANDS` | — | Log every received command |
 
 ---
 
-## ZHTTP (Web File Explorer)
+## 🌐 ZHTTP
 
-- **What it is:** Lightweight web UI to browse, download, and (optionally) upload files from a browser.
-- **Enable/disable:** On by default on PS4/PS5. Disabled by default elsewhere. Override with `ENABLE_ZHTTPD=1` or disable with `ENABLE_ZHTTPD=0` at build time (e.g., `make TARGET=ps5 ENABLE_ZHTTPD=0`).
-- **Build impact:** Adds HTTP modules (`event_loop_kqueue`, `http_server`, `http_parser`, `http_response`, `http_api`, `http_csrf`, `http_resources`).
-- **Usage:** After starting the daemon, open `http://<ip>:<port>/` (port matches the configured FTP port). Shows a file explorer with breadcrumb, direct download, and—if built with `ENABLE_WEB_UPLOAD=1` (enabled alongside ZHTTP)—an upload button.
-- **Security:** Intended for LAN/payload scenarios; no additional auth beyond local network context. Keep the port closed on WAN.
+ZHTTP is a lightweight HTTP server embedded in `zftpd` that serves a browser-based file explorer. It allows browsing, downloading, and optionally uploading files from any browser on the local network — no FTP client required.
 
----
+| Target | Default | To override |
+|---|---|---|
+| PS4 / PS5 | ✅ on | `make TARGET=ps5 ENABLE_ZHTTPD=0` |
+| Linux / macOS | ❌ off | `make TARGET=linux ENABLE_ZHTTPD=1` |
 
-## Support
+Once the daemon is running, open `http://<ip>:<port>/` — the HTTP port mirrors the configured FTP port.
 
-If you find `zftpd` useful and would like to support its ongoing development, consider making a donation. Any contribution is greatly appreciated!
+Upload support is enabled automatically alongside ZHTTP (`ENABLE_WEB_UPLOAD=1`).
 
-[![Donate PayPal](https://img.shields.io/badge/Donate-PayPal-00457C?style=flat-square&logo=paypal&logoColor=white)](https://www.paypal.com/paypalme/seregonwar)
-[![Support Ko-fi](https://img.shields.io/badge/Support-Ko--fi-F16061?style=flat-square&logo=ko-fi&logoColor=white)](https://ko-fi.com/seregon)
-[![Sponsor GitHub](https://img.shields.io/badge/Sponsor-GitHub-EA4AAA?style=flat-square&logo=github&logoColor=white)](https://github.com/sponsors/seregonwar)
+> **Security:** ZHTTP has no authentication beyond network access. It is designed for local-network use. Do not expose it on a public interface.
 
 ---
 
-## Acknowledgements and credits
+## Acknowledgements
 
-- hippie68 (PS4 FTP reference implementation)
-- John Törnblom (PS5 payload framework)
-- PlayStation homebrew community
+**hippie68** — PS4 FTP reference implementation  
+**John Törnblom** — PS5 payload framework  
+**PlayStation homebrew community** — testing and feedback
 
 ---
 
-## License
+<div align="center">
 
-MIT — see [LICENSE](LICENSE).
+Released under the [MIT License](LICENSE)
+
+</div>
