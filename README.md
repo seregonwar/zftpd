@@ -44,6 +44,90 @@ No magic. Just solid systems programming.
 
 ---
 
+## Performance
+
+**`zftpd` is capable of saturating a full Gigabit Ethernet link.**
+
+On a wired 1 GbE connection, sustained transfer speeds of **~112 MB/s** are achievable in both upload and download directions — the practical maximum of the physical medium. This is made possible by the zero-copy data path (`sendfile`), a backpressure-aware send loop, and minimal kernel/userspace boundary crossings.
+
+Key contributors to peak throughput:
+
+- **`sendfile` fast path** — data moves directly from file descriptor to socket in the kernel, bypassing any userspace buffer copy
+- **Partial-send awareness** — the send loop correctly handles short writes and EINTR without stalling or corrupting the stream
+- **Tuned socket buffers** — send buffer sizing is configured to keep the pipe full under sustained load
+- **No unnecessary syscalls** — the hot path is deliberately lean; no locking, no dynamic allocation per-transfer
+- **Token-bucket rate limiter is opt-in** — disabled by default so it never adds overhead unless you need it
+
+> **Note:** Encryption (`AUTH XCRYPT`) disables the `sendfile` fast path and falls back to buffered I/O. Expect a throughput reduction proportional to your CPU's ChaCha20 throughput. For maximum speed, use plain transfers on a trusted LAN.
+
+---
+
+## Best Setup
+
+### Wired is everything
+
+For maximum throughput, always use a **wired Ethernet connection** on both sides. Wi-Fi — even Wi-Fi 6 — introduces variable latency, retransmissions, and protocol overhead that will significantly reduce real-world FTP transfer speeds. On a clean Gigabit wired link, `zftpd` leaves nothing on the table.
+
+### Recommended network topology
+
+```
+[PS4/PS5 or Linux host]
+        │
+   Ethernet cable
+        │
+  [Gigabit switch]   ←── optional, needed only if you have multiple devices
+        │
+   Ethernet cable
+        │
+    [Your PC]
+```
+
+Direct cable connection (PC ↔ console, no switch) works equally well and removes one hop.
+
+### Choosing a client
+
+Not all FTP clients are created equal. For best results:
+
+| Client | Platform | Notes |
+|---|---|---|
+| **FileZilla** | Windows / macOS / Linux | Reliable, supports parallel transfers; set transfer mode to Binary |
+| **WinSCP** | Windows | Excellent throughput, good error recovery |
+| **lftp** | Linux / macOS | CLI powerhouse; use `pget -n 4` for parallel chunk downloads |
+| **Cyberduck** | macOS / Windows | Good for casual use |
+| **Built-in FTP** | — | Avoid — most OS built-ins cap speed and lack resume support |
+
+Set your client to **Binary** transfer mode (`TYPE I`) — never ASCII. `zftpd` defaults to Binary but a misconfigured client can override this.
+
+### Client tuning tips
+
+- **Increase simultaneous connections** in your client if it supports it (e.g. FileZilla → Site Manager → Transfer Settings → Limit to N simultaneous connections). On large directory trees this dramatically reduces total time.
+- **Disable CRC/integrity checks** in the client if offered — they add overhead and `zftpd` already ensures correct byte delivery at the TCP level.
+- **Use PASV mode** (passive) — it's the default and works correctly behind NAT. Active mode (`PORT`) requires the server to initiate a connection back to the client and may be blocked by firewalls.
+
+### PS4 / PS5 specifics
+
+- Launch `zftpd` **after** your system is fully booted and the payload loader is ready.
+- The on-screen notification shows the IP and port — note these before opening your FTP client.
+- For the absolute fastest transfers on console, connect the console directly to your PC with a single Ethernet cable and configure both ends with static IPs on the same subnet (e.g. `192.168.100.1` / `192.168.100.2`). This eliminates DHCP round-trips and router processing entirely.
+- Avoid transferring while heavy background processes are running (e.g. downloads, updates) — the console's network stack is shared.
+
+### Linux host setup
+
+```bash
+# Increase socket buffer sizes system-wide for maximum throughput (optional, run as root)
+sysctl -w net.core.rmem_max=134217728
+sysctl -w net.core.wmem_max=134217728
+sysctl -w net.ipv4.tcp_rmem="4096 87380 134217728"
+sysctl -w net.ipv4.tcp_wmem="4096 65536 134217728"
+
+# Then launch zftpd
+./build/linux/release/zftpd-linux-<arch>-v<version>.elf -p 2121 -d /srv/ftp
+```
+
+These sysctls are not required — `zftpd` performs well with defaults — but they raise the ceiling on very fast storage (NVMe → network).
+
+---
+
 ## Core Principles
 
 - **Performance first** — optimized TCP handling and partial-send awareness  
@@ -67,6 +151,8 @@ No magic. Just solid systems programming.
 - On-screen notifications on PS4/PS5 (IP/port and status)
 - Optional ZHTTP web file explorer (compile-time, enabled by default on PS4/PS5)
 
+---
+
 ## Supported FTP Commands
 
 - **Authentication & control:** `USER`, `PASS`, `QUIT`, `NOOP`
@@ -80,6 +166,8 @@ No magic. Just solid systems programming.
 - **Feature negotiation:** `OPTS`, `CLNT`
 - **Site-specific:** `SITE` (CHMOD)
 - **Encryption (opt-in):** `AUTH XCRYPT` (ChaCha20 PSK)
+
+---
 
 ## Build
 
@@ -122,6 +210,8 @@ Artifacts are versioned and platform-tagged (examples):
 - PS4: `build/ps4/release/zftpd-ps4-v<version>.bin` + `zftpd-ps4-v<version>.elf`
 - PS5: `build/ps5/release/zftpd-ps5-v<version>.bin` + `zftpd-ps5-v<version>.elf`
 
+---
+
 ## Running (Daemon) by Platform
 
 ### Linux
@@ -154,6 +244,8 @@ On startup, it shows a notification with IP and port.
 
 On startup, it shows "started" notifications + `FTP: <ip>:<port>`.
 
+---
+
 ## Configuration
 
 Compile-time configuration is in [ftp_config.h](include/ftp_config.h). Useful macros:
@@ -164,10 +256,14 @@ Compile-time configuration is in [ftp_config.h](include/ftp_config.h). Useful ma
 - `FTP_TRANSFER_RATE_LIMIT_BPS` / `FTP_TRANSFER_RATE_BURST_BYTES`
 - `FTP_LOG_COMMANDS`
 
+---
+
 ## Notes
 
 - If you see "payload already loaded" on PS4/PS5, it means an instance is already active (dedup). The new daemon will try to terminate the old instance and start a new one on port `FTP_DEFAULT_PORT:2122`. If that fails, it will try the next port `FTP_DEFAULT_PORT+1:2123` up to a maximum of 9 subsequent ports.
 - For host testing: `make TARGET=linux test` or `make TARGET=macos test`.
+
+---
 
 ## ZHTTP (Web File Explorer)
 
@@ -177,6 +273,8 @@ Compile-time configuration is in [ftp_config.h](include/ftp_config.h). Useful ma
 - **Usage:** After starting the daemon, open `http://<ip>:<port>/` (port matches the configured FTP port). Shows a file explorer with breadcrumb, direct download, and—if built with `ENABLE_WEB_UPLOAD=1` (enabled alongside ZHTTP)—an upload button.
 - **Security:** Intended for LAN/payload scenarios; no additional auth beyond local network context. Keep the port closed on WAN.
 
+---
+
 ## Support
 
 If you find `zftpd` useful and would like to support its ongoing development, consider making a donation. Any contribution is greatly appreciated!
@@ -185,11 +283,16 @@ If you find `zftpd` useful and would like to support its ongoing development, co
 [![Support Ko-fi](https://img.shields.io/badge/Support-Ko--fi-F16061?style=flat-square&logo=ko-fi&logoColor=white)](https://ko-fi.com/seregon)
 [![Sponsor GitHub](https://img.shields.io/badge/Sponsor-GitHub-EA4AAA?style=flat-square&logo=github&logoColor=white)](https://github.com/sponsors/seregonwar)
 
+---
+
 ## Acknowledgements and credits
+
 - hippie68 (PS4 FTP reference implementation)
 - John Törnblom (PS5 payload framework)
 - PlayStation homebrew community
-  
+
+---
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
