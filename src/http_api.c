@@ -48,7 +48,8 @@ SOFTWARE.
 #include <sys/statvfs.h>
 #include <sys/time.h>
 #include <time.h>
-#if defined(PLATFORM_LINUX)
+#if defined(PLATFORM_LINUX) && __has_include(<sys/sysinfo.h>)
+#define HAS_SYSINFO 1
 #include <sys/sysinfo.h>
 #endif
 #if defined(PLATFORM_MACOS) || defined(PLATFORM_PS4) ||                        \
@@ -348,7 +349,7 @@ static int get_boot_epoch_seconds(uint64_t *out_epoch) {
     return -1;
   }
 
-#if defined(PLATFORM_LINUX)
+#if defined(HAS_SYSINFO)
   struct sysinfo info;
   if (sysinfo(&info) != 0) {
     return -1;

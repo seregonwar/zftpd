@@ -17,7 +17,6 @@ PLATFORM_TAG := linux-$(HOST_ARCH)
 else
 PLATFORM_TAG := $(TARGET)
 endif
-ARTIFACT_BASE := $(ARTIFACT_PREFIX)-$(PLATFORM_TAG)-v$(VERSION)
 
 # Host OS detection (for toolchain/linker compatibility)
 HOST_OS := $(shell uname -s)
@@ -191,23 +190,6 @@ LIBS := $(PLATFORM_LIBS)
 # SOURCE FILES
 #============================================================================
 
-# Build output directories
-BUILD_DIR := build/$(TARGET)/$(BUILD_TYPE)
-OBJ_DIR := $(BUILD_DIR)/obj
-DEP_DIR := $(BUILD_DIR)/dep
-BIN_DIR := $(BUILD_DIR)
-
-ifeq ($(TARGET),macos)
-OUTPUT_ELF := $(BIN_DIR)/$(ARTIFACT_BASE)
-else
-OUTPUT_ELF := $(BIN_DIR)/$(ARTIFACT_BASE).elf
-endif
-OUTPUT_BIN := $(BIN_DIR)/$(ARTIFACT_BASE).bin
-
-OBJCOPY ?= objcopy
-STRIP ?= strip
-
-
 # Source files
 SOURCES := src/pal_network.c
 SOURCES += src/pal_fileio.c
@@ -236,6 +218,29 @@ ifneq ($(filter $(TARGET),ps4 ps5),)
 else
     ENABLE_ZHTTPD ?= 1
 endif
+
+# Artifact/build variants (e.g., zhttp)
+ifeq ($(ENABLE_ZHTTPD),1)
+    VARIANT_TAG := zhttp
+endif
+
+# Build output directories (variant-aware)
+BUILD_DIR := build/$(TARGET)/$(BUILD_TYPE)$(if $(VARIANT_TAG),-$(VARIANT_TAG),)
+OBJ_DIR := $(BUILD_DIR)/obj
+DEP_DIR := $(BUILD_DIR)/dep
+BIN_DIR := $(BUILD_DIR)
+
+ARTIFACT_BASE := $(ARTIFACT_PREFIX)-$(PLATFORM_TAG)$(if $(VARIANT_TAG),-$(VARIANT_TAG),)-v$(VERSION)
+
+ifeq ($(TARGET),macos)
+OUTPUT_ELF := $(BIN_DIR)/$(ARTIFACT_BASE)
+else
+OUTPUT_ELF := $(BIN_DIR)/$(ARTIFACT_BASE).elf
+endif
+OUTPUT_BIN := $(BIN_DIR)/$(ARTIFACT_BASE).bin
+
+OBJCOPY ?= objcopy
+STRIP ?= strip
 
 ifeq ($(ENABLE_ZHTTPD),1)
     CFLAGS += -DENABLE_ZHTTPD=1
@@ -333,6 +338,9 @@ TARGETS_ALL ?= $(shell \
   [ -d external/ps4-payload-sdk ] && echo ps4 || true; \
   [ -d external/ps5-payload-sdk ] && echo ps5 || true)
 
+# Build matrix toggles for ZHTTPD variant
+ZHTTP_VARIANTS ?= 0 1
+
 JAVA_HOME_PATH ?= $(shell /usr/libexec/java_home)
 
 # Java FFI Target
@@ -395,6 +403,16 @@ release-all:
 	for t in $(TARGETS_ALL); do \
 		echo "==> Building $$t (release)"; \
 		$(MAKE) TARGET=$$t BUILD_TYPE=release clean all; \
+	done
+
+# Build all platforms in release with/without ZHTTPD (produces ELF and BIN where applicable)
+release-matrix:
+	@set -e; \
+	for t in $(TARGETS_ALL); do \
+		for z in $(ZHTTP_VARIANTS); do \
+			echo "==> Building $$t (release, ENABLE_ZHTTPD=$$z)"; \
+			$(MAKE) TARGET=$$t BUILD_TYPE=release ENABLE_ZHTTPD=$$z clean all; \
+		done; \
 	done
 
 debug-all:

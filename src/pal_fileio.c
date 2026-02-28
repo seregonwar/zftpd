@@ -106,8 +106,8 @@ ssize_t pal_sendfile(int sock_fd, int file_fd, off_t *offset, size_t count) {
   int ret = sendfile(file_fd, sock_fd, start_offset, count, NULL, &sbytes, 0);
 
   /*
-   * Update offset by bytes actually sent
-   * FreeBSD updates sbytes even on EAGAIN (partial send)
+   * Update offset by bytes actually sent.
+   * FreeBSD updates sbytes even on EAGAIN (partial send).
    */
   if (sbytes > 0) {
     *offset += sbytes;
@@ -117,10 +117,29 @@ ssize_t pal_sendfile(int sock_fd, int file_fd, off_t *offset, size_t count) {
     /* Success: all bytes sent */
     return sbytes;
   } else if ((ret == -1) && (errno == EAGAIN)) {
-    /* Non-blocking socket: partial send */
+    /* Non-blocking socket: partial send — caller retries */
     return sbytes;
+  } else if ((ret == -1) && ((errno == EIO) || (errno == ESTALE) ||
+                              (errno == EBADF) || (errno == EFAULT))) {
+    /*
+     * Storage-level error during transfer.
+     *
+     * EIO    : underlying device I/O error (USB read failure)
+     * ESTALE : stale vnode — filesystem unmounted under us
+     * EBADF  : fd invalidated (shouldn't happen, but guard anyway)
+     * EFAULT : kernel memory fault — should never reach userspace,
+     *          but if it does we must NOT retry with sendfile()
+     *
+     * These errors indicate the source filesystem is no longer
+     * accessible. Return whatever was sent so far; the caller
+     * will detect the short count and send reply 426.
+     *
+     * CRITICAL: do NOT retry sendfile() after any of these —
+     * retrying on a detached vnode can panic the kernel.
+     */
+    return (sbytes > 0) ? sbytes : -1;
   } else {
-    /* Error */
+    /* Other error (e.g. ENOTSOCK, EINVAL) */
     return -1;
   }
 
@@ -299,9 +318,31 @@ int pal_file_open(const char *path, int flags, mode_t mode) {
   }
 
 #if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+  /*
+   * F_NOCACHE / POSIX_FADV_SEQUENTIAL — PLATFORM NOTES
+   *
+   * F_NOCACHE (FreeBSD O_DIRECT equivalent):
+   *   Bypasses the kernel page cache for this fd. This is intentionally
+   *   NOT set on PS5 because sendfile(2) relies on the page cache to pin
+   *   source pages before DMA-ing them to the socket buffer. Setting
+   *   F_NOCACHE on an fd that is later passed to sendfile() produces
+   *   undefined behavior on FreeBSD; on PS5's modified kernel this
+   *   manifests as a kernel panic when the file resides on exFAT/USB.
+   *
+   *   PS4: F_NOCACHE is retained — PS4 does not use sendfile() for the
+   *   data transfer path (VFS_CAP_SENDFILE is not set by vfs_open on PS4
+   *   for USB-backed files via the fstatfs check added above).
+   *
+   * POSIX_FADV_SEQUENTIAL:
+   *   Safe on PS5 — does not affect sendfile() compatibility.
+   *   Retained for read-ahead hinting on sequential transfers.
+   */
+#if defined(PLATFORM_PS4)
 #ifdef F_NOCACHE
   (void)fcntl(fd, F_NOCACHE, 1);
 #endif
+#endif /* PLATFORM_PS4 only — explicitly excluded from PS5 */
+
 #if defined(PLATFORM_PS5) && defined(POSIX_FADV_SEQUENTIAL)
   (void)posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
 #endif

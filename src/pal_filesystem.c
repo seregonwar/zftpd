@@ -43,6 +43,17 @@ SOFTWARE.
 #include <sys/types.h>
 
 #if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+#include <sys/mount.h> /* fstatfs, struct statfs */
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+/* PS4/PS5 libkernel exports _fstatfs, not fstatfs */
+extern int _fstatfs(int, struct statfs *);
+#define pal_fstatfs _fstatfs
+#else
+#define pal_fstatfs fstatfs
+#endif
+#endif
+
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
 int psx_vfs_try_open_self(vfs_node_t *node, const char *path);
 ftp_error_t psx_vfs_stat(const char *path, vfs_stat_t *out);
 ssize_t psx_vfs_read(vfs_node_t *node, void *buffer, size_t length);
@@ -104,10 +115,66 @@ ftp_error_t vfs_open(vfs_node_t *node, const char *path)
     }
 
     node->fd = fd;
-    node->caps = VFS_CAP_SENDFILE;
     node->private_ctx = NULL;
     node->size = (uint64_t)st.st_size;
     node->offset = 0U;
+
+    /*
+     * SENDFILE SAFETY CHECK (PS4/PS5)
+     *
+     * DESIGN RATIONALE:
+     *   FreeBSD's sendfile(2) uses the kernel VM pager to DMA file pages
+     *   directly into the socket buffer (zero userspace copy). This requires
+     *   the source vnode's pager to implement the vm_pager_ops interface.
+     *
+     *   On PS5's modified FreeBSD kernel, the exFAT (exfatfs) and FAT32
+     *   (msdosfs) drivers used for USB storage do NOT implement this
+     *   interface correctly. Calling sendfile() on a vnode backed by these
+     *   filesystems dereferences a null/invalid pager function pointer,
+     *   causing an immediate kernel panic (KP).
+     *
+     *   nullfs mirrors the underlying vnode — if the origin is exFAT, the
+     *   nullfs vnode inherits the same broken pager ops.
+     *
+     *   Detection: fstatfs() on the open fd returns the filesystem type
+     *   name without any additional syscall cost. For USB-backed filesystems
+     *   we clear VFS_CAP_SENDFILE, forcing the buffered read/write path.
+     *
+     * @see pal_sendfile() in pal_fileio.c — callers must check this cap
+     * @see https://github.com/seregonwar/zftpd — KP report from USB download
+     */
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+    {
+        struct statfs sfs;
+        int sendfile_safe = 1; /* assume safe until proven otherwise */
+
+        if (pal_fstatfs(fd, &sfs) == 0) {
+            /*
+             * Filesystems known to cause KP with sendfile() on PS4/PS5:
+             *   - exfatfs : USB drives formatted as exFAT (most common)
+             *   - msdosfs : USB drives formatted as FAT32
+             *   - nullfs  : bind mount — inherits origin pager; unsafe if
+             *               origin is exFAT/msdosfs (/mnt/usb* game mounts)
+             *
+             * Add new entries here if additional filesystems are identified.
+             */
+            if ((strcmp(sfs.f_fstypename, "exfatfs") == 0) ||
+                (strcmp(sfs.f_fstypename, "msdosfs") == 0) ||
+                (strcmp(sfs.f_fstypename, "nullfs")  == 0)) {
+                sendfile_safe = 0;
+            }
+        }
+        /* fstatfs failure: assume unsafe — tolerate the performance hit */
+        else {
+            sendfile_safe = 0;
+        }
+
+        node->caps = sendfile_safe ? VFS_CAP_SENDFILE : 0U;
+    }
+#else
+    node->caps = VFS_CAP_SENDFILE;
+#endif
+
     return FTP_OK;
 }
 
