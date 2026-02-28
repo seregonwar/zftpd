@@ -33,7 +33,7 @@ public class FfiTests {
         // 3. HTTP Server and Event Loop
         try (EventLoop loop = new EventLoop()) {
             System.out.println("EventLoop created.");
-            try (HttpServer http = new HttpServer(loop, 8080)) {
+            try (HttpServer http = new HttpServer(loop, 8888)) {
                 System.out.println("HttpServer created.");
             } catch (Exception e) {
                 System.err.println("HttpServer error: " + e.getMessage());

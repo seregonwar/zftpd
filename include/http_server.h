@@ -26,7 +26,7 @@ SOFTWARE.
  * @brief HTTP server public API
  *
  * Usage:
- *   http_server_t *http = http_server_create(loop, 8080);
+ *   http_server_t *http = http_server_create(loop, 8888);
  *   // ... event loop runs ...
  *   http_server_destroy(http);
  */

@@ -30,5 +30,5 @@ def test_ftp_server():
 def test_http_server():
     # Loop and Server both implement Context Manager protocol
     with EventLoop() as loop:
-        with HttpServer(loop, 8080) as http:
+        with HttpServer(loop, 8888) as http:
             pass # Creating it implies it works; will auto-close on __exit__

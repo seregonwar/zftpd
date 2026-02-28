@@ -30,6 +30,6 @@ fn test_ftp_server() {
 fn test_http_server() {
     let _ = PalAlloc::init_default();
     let loop_ctx = EventLoop::new().expect("Failed to create EventLoop");
-    let _http = HttpServer::new(&loop_ctx, 8080).expect("Failed to create HttpServer");
+    let _http = HttpServer::new(&loop_ctx, 8888).expect("Failed to create HttpServer");
     // Handle dropped automatically.
 }

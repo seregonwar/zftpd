@@ -18,15 +18,15 @@ int main(void) {
         return 1;
     }
     
-    http_server_t *http = http_server_create(g_loop, 8080);
+    http_server_t *http = http_server_create(g_loop, 8888);
     if (!http) {
         fprintf(stderr, "Failed to create HTTP server\n");
         event_loop_destroy(g_loop);
         return 1;
     }
     
-    printf("zhttpd test server running on port 8080\n");
-    printf("Open: http://localhost:8080\n");
+    printf("zhttpd test server running on port 8888\n");
+    printf("Open: http://localhost:8888\n");
     printf("Press Ctrl+C to stop\n\n");
     
     signal(SIGINT, sighandler);

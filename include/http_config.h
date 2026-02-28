@@ -46,7 +46,7 @@ SOFTWARE.
 #endif
 
 /* Server configuration */
-#define HTTP_DEFAULT_PORT 8080
+#define HTTP_DEFAULT_PORT 8888
 #define HTTP_MAX_CONNECTIONS 100
 #define HTTP_REQUEST_TIMEOUT 30
 #define HTTP_KEEPALIVE_TIMEOUT 60
