@@ -640,13 +640,22 @@ function render(q){
   var qr=(typeof q==='string')?q.trim().toLowerCase():'';
   var en=S.entries||[];
   if(!en.length){fl.appendChild(stateCard('empty','Empty directory',false));updCount(0,0);return}
-  var vis=en.filter(function(x){return!qr||x.name.toLowerCase().indexOf(qr)>=0});
+  var vis=en.filter(function(x){
+    var nm=(typeof x.name==='string')?x.name:String(x.name==null?'':x.name);
+    return!qr||nm.toLowerCase().indexOf(qr)>=0
+  });
   if(!vis.length){fl.appendChild(stateCard('search','No results for "'+qr+'"',false));updCount(0,en.length);return}
   vis.sort(function(a,b){
     var ad=(a.type==='directory')?0:1,bd=(b.type==='directory')?0:1;
     if(ad!==bd)return ad-bd;
-    var av=a[S.sort]||'',bv=b[S.sort]||'';
-    if(typeof av==='string'){av=av.toLowerCase();bv=bv.toLowerCase()}
+    var av=a[S.sort],bv=b[S.sort];
+    var an=(typeof av==='number'),bn=(typeof bv==='number');
+    if(an&&bn){
+      var cn=av-bv;return S.sortAsc?cn:-cn;
+    }
+    av=(typeof av==='string')?av:String(av==null?'':av);
+    bv=(typeof bv==='string')?bv:String(bv==null?'':bv);
+    av=av.toLowerCase();bv=bv.toLowerCase();
     var c=(av<bv)?-1:(av>bv)?1:0;return S.sortAsc?c:-c;
   });
   updCount(vis.length,en.length);

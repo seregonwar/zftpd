@@ -208,7 +208,43 @@ To make these persistent, add them to `/etc/sysctl.conf`.
 
 ---
 
-## 📦 Build
+## 📦 Build & commands
+
+**Make targets (host auto-detection, best-effort toolchains):**
+
+- `make` — build default target (Linux on Linux host, macOS on macOS host) release.
+- `make release-all` — release build per platform detected (macos, linux, ps3, ps4, ps5).
+- `make debug-all` — debug build per platform detected.
+- `make release-matrix` — release build per platform *and* variant `ENABLE_ZHTTPD=0/1`, producing ELF/BIN dove applicabile.
+- `make TARGET=<platform> BUILD_TYPE=<release|debug> [ENABLE_ZHTTPD=0|1] clean all` — build singolo.
+
+**Variabili Makefile utili:**
+
+- `TARGET`: `linux`, `macos`, `ps3`, `ps4`, `ps5` (auto su host). Case-insensitive.
+- `BUILD_TYPE`: `release` (default), `debug`.
+- `ENABLE_ZHTTPD`: `1` abilita web UI zhttp (default 0 su console, 1 su PC). Influenza naming: es. `zftpd-ps5-zhttp-v1.3.0.bin`.
+- `ARTIFACT_PREFIX`: prefisso binari (default `zftpd`).
+- `ffi_langs`: opzionale, per build dei binding FFI.
+
+**Output naming (release):**
+- ELF: `build/<target>/release[/ -zhttp]/zftpd-<platform-tag>[-zhttp]-v<version>.elf`
+- BIN (console): `... .bin`
+
+**Esecuzione (binaries host):**
+
+```
+./build/macos/release/zftpd-macos-$(uname -m)-v1.3.0 -p <port> -d <root>
+./build/linux/release/zftpd-linux-$(uname -m)-v1.3.0.elf -p <port> -d <root>
+```
+
+Opzioni supportate:
+- `-p <PORT>`  (default 2121)
+- `-d <DIR>`   root FTP
+- `-h`         help
+
+---
+
+## �📦 Build
 
 Output artifacts are versioned and platform-tagged, placed in `build/<target>/<build_type>/`.
 

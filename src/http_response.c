@@ -118,7 +118,8 @@ http_response_t *http_response_create(http_status_t status) {
                                "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
                                "style-src-elem 'self' 'unsafe-inline' https://fonts.googleapis.com; "
                                "font-src 'self' data: https://fonts.gstatic.com; "
-                               "script-src 'self' 'unsafe-inline'; "
+                               "script-src 'self' 'unsafe-inline' blob:; "
+                               "script-src-elem 'self' 'unsafe-inline' blob:; "
                                "object-src 'none'; base-uri 'none'; frame-ancestors 'none'") !=
           0) {
     http_response_destroy(resp);
