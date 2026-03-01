@@ -230,21 +230,21 @@ To make these persistent, add them to `/etc/sysctl.conf`.
 - ELF: `build/<target>/release[/ -zhttp]/zftpd-<platform-tag>[-zhttp]-v<version>.elf`
 - BIN (console): `... .bin`
 
-**Esecuzione (binaries host):**
+** Execution (binaries host):**
 
 ```
 ./build/macos/release/zftpd-macos-$(uname -m)-v1.3.0 -p <port> -d <root>
 ./build/linux/release/zftpd-linux-$(uname -m)-v1.3.0.elf -p <port> -d <root>
 ```
 
-Opzioni supportate:
+Supported options:
 - `-p <PORT>`  (default 2121)
 - `-d <DIR>`   root FTP
 - `-h`         help
 
 ---
 
-## �📦 Build
+## 📦 Build
 
 Output artifacts are versioned and platform-tagged, placed in `build/<target>/<build_type>/`.
 
