@@ -33,6 +33,24 @@ SOFTWARE.
 #include "http_parser.h"
 #include "http_response.h"
 
-http_response_t* http_api_handle(const http_request_t *request);
+http_response_t *http_api_handle(const http_request_t *request);
+
+/**
+ * @brief Set the root directory for HTTP API path confinement
+ *
+ * All HTTP file operations (list, download, upload, stats) will be
+ * restricted to paths within this root.  Must be called before
+ * http_server_create().
+ *
+ *   FTP path confinement:  ftp_path_resolve() -> ftp_path_is_within_root()
+ *   HTTP path confinement: validate_path()    -> http_is_within_root()  [NEW]
+ */
+void http_api_set_root(const char *root);
+
+/**
+ * @brief Get the configured HTTP root directory
+ * @return Pointer to static root buffer (empty string if unset)
+ */
+const char *http_api_get_root(void);
 
 #endif /* HTTP_API_H */

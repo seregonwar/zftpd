@@ -57,6 +57,8 @@ SOFTWARE.
 
 #if ENABLE_ZHTTPD
 #include "event_loop.h"
+#include "ftp_log.h"
+#include "http_api.h"
 #include "http_config.h"
 #include "http_csrf.h"
 #include "http_server.h"
@@ -98,10 +100,10 @@ static int start_http_thread(pthread_t *thread, event_loop_t *loop) {
 #endif /* ENABLE_ZHTTPD */
 
 #if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+#include "pal_scratch.h"
 #include <stdint.h>
 #include <sys/syscall.h>
 #include <sys/sysctl.h>
-#include "pal_scratch.h"
 #endif
 
 /*===========================================================================*
@@ -313,10 +315,13 @@ int main(void) {
    * ZHTTPD — Start Web File Explorer
    *=========================================================================*/
 #if ENABLE_ZHTTPD
-  http_csrf_init();
+  if (http_csrf_init() != 0) {
+    ftp_log_line(FTP_LOG_WARN, "CSRF init failed: web upload disabled");
+  }
   g_event_loop = event_loop_create();
   if (g_event_loop != NULL) {
-    g_http_server = http_server_create(g_event_loop, HTTP_DEFAULT_PORT);
+    g_http_server =
+        http_server_create(g_event_loop, HTTP_DEFAULT_PORT, root_path);
     if (g_http_server != NULL) {
       pthread_t http_thread;
       int rc = start_http_thread(&http_thread, g_event_loop);
@@ -515,9 +520,12 @@ int main(void) {
    * ZHTTPD — Start Web File Explorer
    *=========================================================================*/
 #if ENABLE_ZHTTPD
+  if (http_csrf_init() != 0) {
+    ftp_log_line(FTP_LOG_WARN, "CSRF init failed: web upload disabled");
+  }
   g_event_loop = event_loop_create();
   if (g_event_loop != NULL) {
-    g_http_server = http_server_create(g_event_loop, HTTP_DEFAULT_PORT);
+    g_http_server = http_server_create(g_event_loop, HTTP_DEFAULT_PORT, "/");
     if (g_http_server != NULL) {
       pthread_t http_thread;
       int rc = start_http_thread(&http_thread, g_event_loop);
@@ -709,10 +717,12 @@ int main(int argc, char **argv) {
    * ZHTTPD — Start Web File Explorer
    *=========================================================================*/
 #if ENABLE_ZHTTPD
-  http_csrf_init();
+  if (http_csrf_init() != 0) {
+    ftp_log_line(FTP_LOG_WARN, "CSRF init failed: web upload disabled");
+  }
   g_event_loop = event_loop_create();
   if (g_event_loop != NULL) {
-    g_http_server = http_server_create(g_event_loop, http_port);
+    g_http_server = http_server_create(g_event_loop, http_port, root_path);
     if (g_http_server != NULL) {
       pthread_t http_thread;
       int rc = start_http_thread(&http_thread, g_event_loop);

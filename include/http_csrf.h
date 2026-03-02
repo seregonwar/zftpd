@@ -35,8 +35,10 @@ SOFTWARE.
 
 /**
  * @brief Initialize CSRF protection (generate random token)
+ *
+ * @return 0 on success, -1 if entropy unavailable (uploads disabled)
  */
-void http_csrf_init(void);
+int http_csrf_init(void);
 
 /**
  * @brief Get the current CSRF token

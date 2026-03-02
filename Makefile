@@ -487,11 +487,9 @@ test: $(OUTPUT_ELF) $(OUTPUT_BIN) $(TEST_BINS)
 	@for t in $(TEST_BINS); do ./$$t; done
 endif
 
-$(BUILD_DIR)/tests/test_http_query: tests/test_http_query.c src/http_api.c \
-    src/http_response.c src/http_parser.c src/http_csrf.c src/http_resources.c \
-    | $(BUILD_DIR)/tests
+$(BUILD_DIR)/tests/test_http_query: tests/test_http_query.c $(LIB_OBJECTS) | $(BUILD_DIR)/tests
 	@echo "  [CC]  $<"
-	@$(CC) $(CFLAGS) -DFTP_AUTH_DELAY=0 -o $@ $^ $(LDFLAGS) $(LIBS)
+	@$(CC) $(CFLAGS) -DFTP_AUTH_DELAY=0 -o $@ $< $(LIB_OBJECTS) $(LDFLAGS) $(LIBS)
 
 $(BUILD_DIR)/tests/%: tests/%.c $(LIB_OBJECTS) | $(BUILD_DIR)/tests
 	@echo "  [CC]  $<"

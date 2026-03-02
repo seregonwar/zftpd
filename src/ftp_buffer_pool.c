@@ -24,13 +24,13 @@ SOFTWARE.
 /**
  * @file ftp_buffer_pool.h
  * @brief FTP stream buffer pool
- * 
+ *
  * @author Seregon
  * @version 1.0.0
- * 
+ *
  * PLATFORMS: FreeBSD (PS4/PS5 kqueue), Linux (epoll)
  * DESIGN: Single-threaded, non-blocking I/O
- * 
+ *
  */
 #include "ftp_buffer_pool.h"
 
@@ -46,53 +46,65 @@ SOFTWARE.
 #define FTP_STREAM_BUFFER_COUNT FTP_MAX_SESSIONS
 #endif
 
-static _Alignas(64) uint8_t g_stream_buffers[FTP_STREAM_BUFFER_COUNT][FTP_STREAM_BUFFER_SIZE];
+static _Alignas(64) uint8_t
+    g_stream_buffers[FTP_STREAM_BUFFER_COUNT][FTP_STREAM_BUFFER_SIZE];
 static atomic_uint_fast32_t g_stream_buffer_mask = ATOMIC_VAR_INIT(0U);
 
-void *ftp_buffer_acquire(void)
-{
-    for (;;) {
-        uint_fast32_t mask = atomic_load(&g_stream_buffer_mask);
+/*
+ * VULN-06 fix: guard against 1U << i undefined behavior
+ *
+ *   FTP_MAX_SESSIONS up to 256 is allowed by ftp_config.h,
+ *   but the bitmask is uint_fast32_t (may be 32-bit on ARM).
+ *   If BUFFER_COUNT > bit width, slots beyond bit 31 are
+ *   invisible and those sessions can never acquire a buffer.
+ *
+ *   This assert fires at compile time if misconfigured.
+ */
+_Static_assert(FTP_STREAM_BUFFER_COUNT <= (sizeof(uint_fast32_t) * 8U),
+               "FTP_STREAM_BUFFER_COUNT exceeds atomic bitmask width "
+               "(reduce FTP_MAX_SESSIONS or widen the mask type)");
 
-        for (uint_fast32_t i = 0U; i < (uint_fast32_t)FTP_STREAM_BUFFER_COUNT; i++) {
-            uint_fast32_t bit = 1U << i;
-            if ((mask & bit) != 0U) {
-                continue;
-            }
+void *ftp_buffer_acquire(void) {
+  for (;;) {
+    uint_fast32_t mask = atomic_load(&g_stream_buffer_mask);
 
-            uint_fast32_t expected = mask;
-            uint_fast32_t desired = mask | bit;
-            if (atomic_compare_exchange_strong(&g_stream_buffer_mask, &expected, desired)) {
-                return (void *)g_stream_buffers[i];
-            }
-
-            goto retry;
-        }
-
-    retry:
-        if (mask == atomic_load(&g_stream_buffer_mask)) {
-            return NULL;
-        }
+    for (uint_fast32_t i = 0U; i < (uint_fast32_t)FTP_STREAM_BUFFER_COUNT;
+         i++) {
+      uint_fast32_t bit = 1U << i;
+      if ((mask & bit) != 0U) {
         continue;
+      }
+
+      uint_fast32_t expected = mask;
+      uint_fast32_t desired = mask | bit;
+      if (atomic_compare_exchange_strong(&g_stream_buffer_mask, &expected,
+                                         desired)) {
+        return (void *)g_stream_buffers[i];
+      }
+
+      goto retry;
     }
+
+  retry:
+    if (mask == atomic_load(&g_stream_buffer_mask)) {
+      return NULL;
+    }
+    continue;
+  }
 }
 
-void ftp_buffer_release(void *buffer)
-{
-    if (buffer == NULL) {
-        return;
-    }
+void ftp_buffer_release(void *buffer) {
+  if (buffer == NULL) {
+    return;
+  }
 
-    for (uint_fast32_t i = 0U; i < (uint_fast32_t)FTP_STREAM_BUFFER_COUNT; i++) {
-        if ((void *)g_stream_buffers[i] == buffer) {
-            uint_fast32_t bit = 1U << i;
-            (void)atomic_fetch_and(&g_stream_buffer_mask, ~bit);
-            return;
-        }
+  for (uint_fast32_t i = 0U; i < (uint_fast32_t)FTP_STREAM_BUFFER_COUNT; i++) {
+    if ((void *)g_stream_buffers[i] == buffer) {
+      uint_fast32_t bit = 1U << i;
+      (void)atomic_fetch_and(&g_stream_buffer_mask, ~bit);
+      return;
     }
+  }
 }
 
-size_t ftp_buffer_size(void)
-{
-    return (size_t)FTP_STREAM_BUFFER_SIZE;
-}
+size_t ftp_buffer_size(void) { return (size_t)FTP_STREAM_BUFFER_SIZE; }

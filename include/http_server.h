@@ -42,9 +42,16 @@ typedef struct http_server http_server_t;
 
 /**
  * @brief Create and start HTTP server on given port
+ *
+ * @param loop      Event loop to register with
+ * @param port      TCP port to listen on
+ * @param root_path Root directory for filesystem confinement
+ *                  (all HTTP file ops restricted to this subtree)
+ *
  * @return Server handle, or NULL on failure
  */
-http_server_t *http_server_create(event_loop_t *loop, uint16_t port);
+http_server_t *http_server_create(event_loop_t *loop, uint16_t port,
+                                  const char *root_path);
 
 /**
  * @brief Stop and destroy HTTP server

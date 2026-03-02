@@ -48,6 +48,7 @@ SOFTWARE.
  */
 
 #include "http_server.h"
+#include "ftp_config.h"
 #include "http_api.h"
 #include "http_config.h"
 #if ENABLE_WEB_UPLOAD
@@ -61,10 +62,11 @@ SOFTWARE.
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <strings.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -79,7 +81,8 @@ struct http_server {
   event_loop_t *loop;
   int listen_fd;
   uint16_t port;
-  int connection_count;
+  atomic_int connection_count;  /* Phase 4: thread-safe counter */
+  char root_path[FTP_PATH_MAX]; /* filesystem confinement root */
 };
 
 typedef struct {
@@ -95,7 +98,7 @@ typedef struct {
 } http_connection_t;
 
 static http_server_t g_http_server;
-static int g_http_server_in_use = 0;
+static atomic_int g_http_server_in_use = ATOMIC_VAR_INIT(0);
 static http_connection_t g_http_connections[HTTP_MAX_CONNECTIONS];
 
 static void http_connections_init(void) {
@@ -370,12 +373,13 @@ static int is_safe_filename_local(const char *name) {
  * CREATE / DESTROY
  *===========================================================================*/
 
-http_server_t *http_server_create(event_loop_t *loop, uint16_t port) {
-  if (loop == NULL) {
+http_server_t *http_server_create(event_loop_t *loop, uint16_t port,
+                                  const char *root_path) {
+  if ((loop == NULL) || (root_path == NULL)) {
     return NULL;
   }
 
-  if (g_http_server_in_use != 0) {
+  if (atomic_load(&g_http_server_in_use) != 0) {
     return NULL;
   }
 
@@ -383,7 +387,18 @@ http_server_t *http_server_create(event_loop_t *loop, uint16_t port) {
   g_http_server.listen_fd = -1;
   g_http_server.loop = loop;
   g_http_server.port = port;
-  g_http_server.connection_count = 0;
+  atomic_store(&g_http_server.connection_count, 0);
+
+  /* Store root path for filesystem confinement */
+  size_t rlen = strlen(root_path);
+  if (rlen >= sizeof(g_http_server.root_path)) {
+    return NULL;
+  }
+  memcpy(g_http_server.root_path, root_path, rlen + 1U);
+
+  /* Propagate root to API layer */
+  http_api_set_root(root_path);
+
   http_connections_init();
 
   /* Create TCP listen socket */
@@ -426,7 +441,7 @@ http_server_t *http_server_create(event_loop_t *loop, uint16_t port) {
     return NULL;
   }
 
-  g_http_server_in_use = 1;
+  atomic_store(&g_http_server_in_use, 1);
   return &g_http_server;
 }
 
@@ -443,7 +458,7 @@ void http_server_destroy(http_server_t *server) {
         close(server->listen_fd);
         server->listen_fd = -1;
       }
-      g_http_server_in_use = 0;
+      atomic_store(&g_http_server_in_use, 0);
     }
   }
 }
@@ -465,7 +480,7 @@ static int http_accept_callback(int fd, uint32_t events, void *data) {
   }
 
   /* Connection limit */
-  if (server->connection_count >= HTTP_MAX_CONNECTIONS) {
+  if (atomic_load(&server->connection_count) >= HTTP_MAX_CONNECTIONS) {
     close(client_fd);
     return 0;
   }
@@ -476,7 +491,7 @@ static int http_accept_callback(int fd, uint32_t events, void *data) {
     return 0;
   }
 
-  server->connection_count++;
+  (void)atomic_fetch_add(&server->connection_count, 1);
 
   /* Register for read events */
   event_loop_add(server->loop, client_fd, EVENT_READ, http_client_callback,
@@ -589,9 +604,11 @@ static int http_client_callback(int fd, uint32_t events, void *data) {
       }
 
 #if ENABLE_WEB_UPLOAD
-      if ((strcmp(method, "POST") == 0) && (strncmp(uri, "/api/upload", 11) == 0)) {
+      if ((strcmp(method, "POST") == 0) &&
+          (strncmp(uri, "/api/upload", 11) == 0)) {
         http_request_t up_req;
-        if ((http_parse_request(conn->buffer, conn->buffer_used, &up_req) < 0) ||
+        if ((http_parse_request(conn->buffer, conn->buffer_used, &up_req) <
+             0) ||
             (http_csrf_validate(&up_req) != 0)) {
           http_response_t *resp =
               http_response_create(HTTP_STATUS_403_FORBIDDEN);
@@ -631,7 +648,8 @@ static int http_client_callback(int fd, uint32_t events, void *data) {
           http_close_connection(conn);
           return -1;
         }
-        if (!is_safe_path_local(dir_path) || !is_safe_filename_local(file_name)) {
+        if (!is_safe_path_local(dir_path) ||
+            !is_safe_filename_local(file_name)) {
           http_close_connection(conn);
           return -1;
         }
@@ -645,6 +663,27 @@ static int http_client_callback(int fd, uint32_t events, void *data) {
         if (!is_safe_path_local(full)) {
           http_close_connection(conn);
           return -1;
+        }
+
+        /*
+         * VULN-02 fix: confine upload path to the HTTP root
+         *
+         *   is_safe_path_local()  blocks ".." and "//"
+         *   http_api_get_root()   confines to server root directory
+         */
+        {
+          const char *http_root = http_api_get_root();
+          if (http_root[0] != '\0') {
+            size_t rlen = strlen(http_root);
+            /* root "/" allows everything */
+            if (!(rlen == 1U && http_root[0] == '/')) {
+              if (strncmp(full, http_root, rlen) != 0 ||
+                  (full[rlen] != '/' && full[rlen] != '\0')) {
+                http_close_connection(conn);
+                return -1;
+              }
+            }
+          }
         }
 
         int out_fd = pal_file_open(full, O_WRONLY | O_CREAT | O_TRUNC, 0666);
@@ -664,7 +703,8 @@ static int http_client_callback(int fd, uint32_t events, void *data) {
         }
 
         if (in_buf > 0U) {
-          if (pal_file_write_all(out_fd, conn->buffer + header_len, in_buf) < 0) {
+          if (pal_file_write_all(out_fd, conn->buffer + header_len, in_buf) <
+              0) {
             http_close_connection(conn);
             return -1;
           }
@@ -760,7 +800,8 @@ static int http_handle_request(http_connection_t *conn) {
    *  │  MEMORY BODY PATH — stream embedded static assets   │
    *  └────────────────────────────────────────────────────┘
    */
-  if ((response->mem_seg_count > 0U) && (response->mem_seg_index < response->mem_seg_count)) {
+  if ((response->mem_seg_count > 0U) &&
+      (response->mem_seg_index < response->mem_seg_count)) {
     while (response->mem_seg_index < response->mem_seg_count) {
       const void *seg = response->mem_segs[response->mem_seg_index];
       size_t seg_len = response->mem_lens[response->mem_seg_index];
@@ -785,7 +826,8 @@ static int http_handle_request(http_connection_t *conn) {
     }
   }
 
-  if ((response->mem_body != NULL) && (response->mem_sent < response->mem_length)) {
+  if ((response->mem_body != NULL) &&
+      (response->mem_sent < response->mem_length)) {
     const unsigned char *p = (const unsigned char *)response->mem_body;
     const unsigned char *start = p + response->mem_sent;
     size_t remaining = response->mem_length - response->mem_sent;
@@ -941,8 +983,8 @@ static void http_close_connection(http_connection_t *conn) {
 
   if ((server != NULL) && (fd >= 0)) {
     event_loop_remove(server->loop, fd);
-    if (server->connection_count > 0) {
-      server->connection_count--;
+    if (atomic_load(&server->connection_count) > 0) {
+      (void)atomic_fetch_sub(&server->connection_count, 1);
     }
   }
 

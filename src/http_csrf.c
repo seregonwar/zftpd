@@ -38,24 +38,30 @@ SOFTWARE.
 
 /* Global CSRF token storage (32 hex chars + null) */
 static char g_csrf_token[HTTP_CSRF_TOKEN_LENGTH + 1];
+static int g_csrf_initialized = 0;
 
-void http_csrf_init(void) {
+int http_csrf_init(void) {
+  g_csrf_token[0] = '\0';
+  g_csrf_initialized = 0;
   int fd = open("/dev/urandom", O_RDONLY);
   if (fd < 0) {
-    /* Fallback if /dev/urandom fails (should shouldn't happen on supported OS)
+    /*
+     * VULN-03 fix: fail hard instead of falling back to a
+     * predictable token.  Empty token -> all uploads rejected.
+     *
+     *   BEFORE:  snprintf(g_csrf_token, ..., "0123456789abcdef...");
+     *   AFTER:   g_csrf_token[0] = '\0';   (all requests fail)
      */
-    snprintf(g_csrf_token, sizeof(g_csrf_token),
-             "0123456789abcdef0123456789abcdef");
-    return;
+    g_csrf_token[0] = '\0';
+    return -1;
   }
 
   unsigned char random_bytes[HTTP_CSRF_TOKEN_LENGTH / 2];
   if (read(fd, random_bytes, sizeof(random_bytes)) != sizeof(random_bytes)) {
-    /* Read failed, use fallback */
     close(fd);
-    snprintf(g_csrf_token, sizeof(g_csrf_token),
-             "0123456789abcdef0123456789abcdef");
-    return;
+    /* Partial read -> unusable entropy, fail hard */
+    g_csrf_token[0] = '\0';
+    return -1;
   }
   close(fd);
 
@@ -64,23 +70,33 @@ void http_csrf_init(void) {
     size_t offset = (size_t)i * 2U;
     size_t remaining = sizeof(g_csrf_token) - offset;
     if (remaining < 3U) {
-      snprintf(g_csrf_token, sizeof(g_csrf_token),
-               "0123456789abcdef0123456789abcdef");
-      return;
+      /* Buffer exhausted during conversion, fail hard */
+      g_csrf_token[0] = '\0';
+      return -1;
     }
     int n = snprintf(g_csrf_token + offset, remaining, "%02x", random_bytes[i]);
     if ((n < 0) || (n >= (int)remaining)) {
-      snprintf(g_csrf_token, sizeof(g_csrf_token),
-               "0123456789abcdef0123456789abcdef");
-      return;
+      g_csrf_token[0] = '\0';
+      return -1;
     }
   }
+
+  g_csrf_initialized = 1;
+  return 0;
 }
 
 const char *http_csrf_get_token(void) { return g_csrf_token; }
 
 int http_csrf_validate(const http_request_t *req) {
   if (req == NULL) {
+    return -1;
+  }
+
+  /*
+   * Phase 1.2: use explicit initialization flag instead of
+   * testing token emptiness.  More readable and unforgeable.
+   */
+  if (g_csrf_initialized == 0) {
     return -1;
   }
 
@@ -97,9 +113,6 @@ int http_csrf_validate(const http_request_t *req) {
     return -1;
   }
 
-  /* Constant-time comparison (not strictly necessary but good practice) */
-  /* Actually strictly speaking strcmp is fine here since token is random,
-     but let's do a simple check. */
   if (strcmp(token, g_csrf_token) != 0) {
     return -1;
   }

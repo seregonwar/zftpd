@@ -34,12 +34,14 @@ SOFTWARE.
  */
 
 #include "http_api.h"
+#include "ftp_path.h"
 #include "http_config.h"
 #include "pal_fileio.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -66,6 +68,104 @@ SOFTWARE.
 extern const char *http_get_resource(const char *path, size_t *size);
 
 /*===========================================================================*
+ * ROOT PATH CONFINEMENT
+ *
+ *   FTP side:   ftp_path_resolve() -> ftp_path_normalize() ->
+ *               realpath() -> ftp_path_is_within_root()
+ *   HTTP side:  http_validate_and_confine() reuses the same primitives.
+ *
+ *   Root is stored in http_server.root_path and propagated here via
+ *   http_api_set_root() during http_server_create().
+ *===========================================================================*/
+
+static char g_http_root[FTP_PATH_MAX] = "/";
+
+void http_api_set_root(const char *root) {
+  if ((root == NULL) || (root[0] == '\0')) {
+    g_http_root[0] = '/';
+    g_http_root[1] = '\0';
+    return;
+  }
+  size_t len = strlen(root);
+  if (len >= sizeof(g_http_root)) {
+    len = sizeof(g_http_root) - 1U;
+  }
+  memcpy(g_http_root, root, len);
+  g_http_root[len] = '\0';
+
+  /* Strip trailing slash (unless root is exactly "/") */
+  while (len > 1U && g_http_root[len - 1U] == '/') {
+    g_http_root[--len] = '\0';
+  }
+}
+
+const char *http_api_get_root(void) { return g_http_root; }
+
+/**
+ * @brief Validate and confine an HTTP path to the server root
+ *
+ * Reuses the same path security primitives as the FTP core:
+ *
+ *   Step 1: ftp_path_normalize()       - resolve .., ., //
+ *   Step 2: ftp_path_is_within_root()  - pre-realpath confinement
+ *   Step 3: realpath()                 - resolve symlinks
+ *   Step 4: ftp_path_is_within_root()  - post-realpath re-check
+ *
+ * @param[in]  input     Raw path from URL (already URL-decoded)
+ * @param[in]  root      Root directory (absolute)
+ * @param[out] out       Buffer for the canonical confined path
+ * @param[in]  out_size  Size of out (>= FTP_PATH_MAX)
+ *
+ * @return 0 on success, -1 if path escapes root
+ *
+ * @pre input != NULL, root != NULL, out != NULL
+ * @post On success, ftp_path_is_within_root(out, root) == 1
+ */
+static int http_validate_and_confine(const char *input, const char *root,
+                                     char *out, size_t out_size) {
+  if ((input == NULL) || (root == NULL) || (out == NULL)) {
+    return -1;
+  }
+
+  /* Step 1: normalize (resolve .., ., //) */
+  char normalized[FTP_PATH_MAX];
+  if (ftp_path_normalize(input, normalized, sizeof(normalized)) != FTP_OK) {
+    return -1;
+  }
+
+  /* Step 2: pre-realpath confinement check */
+  if (ftp_path_is_within_root(normalized, root) != 1) {
+    return -1;
+  }
+
+  /* Step 3: resolve symlinks */
+  char real[FTP_PATH_MAX];
+  if (realpath(normalized, real) != NULL) {
+    /* Step 4: post-realpath re-check (anti symlink traversal) */
+    if (ftp_path_is_within_root(real, root) != 1) {
+      return -1;
+    }
+    size_t n = strlen(real);
+    if ((n + 1U) > out_size) {
+      return -1;
+    }
+    memcpy(out, real, n + 1U);
+  } else {
+    /*
+     * Path doesn't exist yet (upload target, new directory).
+     * Pre-realpath check already passed — use normalized.
+     */
+    size_t n = strlen(normalized);
+    if ((n + 1U) > out_size) {
+      return -1;
+    }
+    memcpy(out, normalized, n + 1U);
+  }
+
+  return 0;
+}
+
+/*===========================================================================*
  * FORWARD DECLARATIONS
  *===========================================================================*/
 
@@ -86,6 +186,7 @@ static http_response_t *error_json(http_status_t code, const char *message);
  *   │  ../                         traversal           │
  *   │  //                          double-slash trick  │
  *   │  /dev /proc /sys /kern       PS kernel crash     │
+ *   │  outside g_http_root         VULN-01/02 fix      │
  *   └──────────────────────────────────────────────────┘
  *===========================================================================*/
 
@@ -145,8 +246,17 @@ static int is_ps_safe_path(const char *path) {
 
 /**
  * @brief Combined path validation
+ *
+ *   1. Reject traversal patterns ("..")
+ *   2. Reject PS kernel-crash paths (/dev, /proc, ...)
+ *   3. Confine to g_http_root via http_validate_and_confine()
+ *
+ * @param[in]  path  Raw input path
+ * @param[out] safe  Canonical path confined to root (FTP_PATH_MAX)
+ *
+ * @return 1 if safe, 0 if rejected
  */
-static int validate_path(const char *path) {
+static int validate_path(const char *path, char *safe, size_t safe_size) {
   if (!is_safe_path(path)) {
     return 0;
   }
@@ -157,6 +267,11 @@ static int validate_path(const char *path) {
     return 0;
   }
 #endif
+
+  /* Root confinement via ftp_path_normalize + ftp_path_is_within_root */
+  if (http_validate_and_confine(path, g_http_root, safe, safe_size) != 0) {
+    return 0;
+  }
 
   return 1;
 }
@@ -759,13 +874,13 @@ static http_response_t *api_list(const http_request_t *request) {
     (void)parse_path_param(query, path, sizeof(path));
   }
 
-  /* Security check */
-  if (!validate_path(path)) {
+  char safe[FTP_PATH_MAX];
+  if (!validate_path(path, safe, sizeof(safe))) {
     return error_json(HTTP_STATUS_403_FORBIDDEN,
                       "Path traversal attempt detected");
   }
 
-  DIR *dir = opendir(path);
+  DIR *dir = opendir(safe);
   if (dir == NULL) {
     return error_json(HTTP_STATUS_404_NOT_FOUND, "Directory not found");
   }
@@ -835,13 +950,14 @@ static http_response_t *api_download(const http_request_t *request) {
     return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing path parameter");
   }
 
-  if (!validate_path(path)) {
+  char safe[FTP_PATH_MAX];
+  if (!validate_path(path, safe, sizeof(safe))) {
     return error_json(HTTP_STATUS_403_FORBIDDEN,
                       "Path traversal attempt detected");
   }
 
   /* Open file */
-  int fd = open(path, O_RDONLY);
+  int fd = open(safe, O_RDONLY);
   if (fd < 0) {
     return error_json(HTTP_STATUS_404_NOT_FOUND, "File not found");
   }
@@ -889,7 +1005,8 @@ static http_response_t *api_stats(const http_request_t *request) {
     (void)parse_path_param(query, path, sizeof(path));
   }
 
-  if (!validate_path(path)) {
+  char safe[FTP_PATH_MAX];
+  if (!validate_path(path, safe, sizeof(safe))) {
     return error_json(HTTP_STATUS_403_FORBIDDEN, "Forbidden path");
   }
 
@@ -1012,21 +1129,24 @@ static http_response_t *api_create_file(const http_request_t *request) {
   if (!is_safe_filename(name)) {
     return error_json(HTTP_STATUS_400_BAD_REQUEST, "Invalid file name");
   }
-  if (!validate_path(dir_path)) {
+  char safe_dir[FTP_PATH_MAX];
+  if (!validate_path(dir_path, safe_dir, sizeof(safe_dir))) {
     return error_json(HTTP_STATUS_403_FORBIDDEN, "Forbidden path");
   }
 
-  char full[1024];
-  if (strcmp(dir_path, "/") == 0) {
+  char full[FTP_PATH_MAX];
+  if (strcmp(safe_dir, "/") == 0) {
     (void)snprintf(full, sizeof(full), "/%s", name);
   } else {
-    (void)snprintf(full, sizeof(full), "%s/%s", dir_path, name);
+    (void)snprintf(full, sizeof(full), "%s/%s", safe_dir, name);
   }
-  if (!validate_path(full)) {
+
+  char safe_full[FTP_PATH_MAX];
+  if (!validate_path(full, safe_full, sizeof(safe_full))) {
     return error_json(HTTP_STATUS_403_FORBIDDEN, "Forbidden path");
   }
 
-  int fd = pal_file_open(full, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+  int fd = pal_file_open(safe_full, O_WRONLY | O_CREAT | O_TRUNC, 0666);
   if (fd < 0) {
     return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Failed to create file");
   }

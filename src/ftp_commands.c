@@ -1132,7 +1132,13 @@ ftp_error_t cmd_MKD(ftp_session_t *session, const char *args) {
   }
 
   char reply[FTP_REPLY_BUFFER_SIZE];
-  snprintf(reply, sizeof(reply), "\"%s\" created.", resolved);
+  int n = snprintf(reply, sizeof(reply), "\"%s\" created.", resolved);
+
+  /* VULN-05 fix: check for truncation (same as cmd_PWD) */
+  if ((n < 0) || ((size_t)n >= sizeof(reply))) {
+    return ftp_session_send_reply(session, FTP_REPLY_257_PATH_CREATED,
+                                  "Directory created.");
+  }
 
   return ftp_session_send_reply(session, FTP_REPLY_257_PATH_CREATED, reply);
 }
@@ -1296,10 +1302,35 @@ ftp_error_t cmd_PORT(ftp_session_t *session, const char *args) {
                                   "Invalid address.");
   }
 
-  /* GoldHEN/ftpsrv does not validate the PORT IP.
-   * NAT environments (Android emulators) send PORT with
-   * an IP that differs from the control connection.
+  /*
+   * VULN-04 fix: validate PORT IP against control connection
+   *
+   *   RFC 2577 (FTP Security Considerations) recommends that
+   *   servers verify the PORT IP matches the client's control
+   *   connection IP to prevent SSRF (bounce attacks).
+   *
+   *   Compile with -DFTP_PORT_ALLOW_FOREIGN_IP=1 to disable
+   *   this check for NAT environments (Android emulators).
+   *
+   *   control IP:  session->client_ip  (e.g. "192.168.1.50")
+   *   PORT IP:     ip                  (e.g. "192.168.1.1")
+   *   mismatch  -> 501 rejected
    */
+#ifndef FTP_PORT_ALLOW_FOREIGN_IP
+#define FTP_PORT_ALLOW_FOREIGN_IP 0
+#endif
+
+#if !FTP_PORT_ALLOW_FOREIGN_IP
+  if (strcmp(ip, session->client_ip) != 0) {
+    char dbg[128];
+    snprintf(dbg, sizeof(dbg),
+             "[SEC] PORT IP mismatch: client=%s port=%s (rejected)",
+             session->client_ip, ip);
+    ftp_log_line(FTP_LOG_INFO, dbg);
+    return ftp_session_send_reply(session, FTP_REPLY_501_SYNTAX_ARGS,
+                                  "PORT address mismatch.");
+  }
+#endif
 
   /* Set mode to active */
   session->data_mode = FTP_DATA_MODE_ACTIVE;
