@@ -1202,8 +1202,47 @@ ftp_error_t cmd_RNTO(ftp_session_t *session, const char *args) {
   session->rename_from[0] = '\0';
 
   if (err != FTP_OK) {
-    return ftp_session_send_reply(session, FTP_REPLY_550_FILE_ERROR,
-                                  "Rename failed.");
+    /*
+     * Map ftp_error_t to a human-readable detail so the FTP client
+     * (FileZilla, WinSCP, etc.) shows something actionable instead
+     * of the opaque "Rename failed.".
+     *
+     *   550 Permission denied.
+     *   550 Source not found.
+     *   550 Path too long.
+     *   ...
+     */
+    const char *detail;
+    switch (err) {
+    case FTP_ERR_NOT_FOUND:
+      detail = "Source not found.";
+      break;
+    case FTP_ERR_PERMISSION:
+      detail = "Permission denied.";
+      break;
+    case FTP_ERR_PATH_TOO_LONG:
+      detail = "Path too long.";
+      break;
+    case FTP_ERR_OUT_OF_MEMORY:
+      detail = "Out of memory.";
+      break;
+    case FTP_ERR_DIR_OPEN:
+      detail = "Cannot open directory.";
+      break;
+    case FTP_ERR_FILE_OPEN:
+      detail = "Cannot open file.";
+      break;
+    case FTP_ERR_FILE_READ:
+      detail = "Read error during copy.";
+      break;
+    default: {
+      static _Thread_local char buf[64];
+      snprintf(buf, sizeof(buf), "Rename failed (err=%d).", (int)err);
+      detail = buf;
+      break;
+    }
+    }
+    return ftp_session_send_reply(session, FTP_REPLY_550_FILE_ERROR, detail);
   }
 
   return ftp_session_send_reply(session, FTP_REPLY_250_FILE_ACTION_OK,

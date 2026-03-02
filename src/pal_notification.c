@@ -30,7 +30,8 @@ SOFTWARE.
  * @version 1.0.0
  * @date 2026-02-13
  * 
- */#include "pal_notification.h"
+ */
+#include "pal_notification.h"
 
 #if defined(PLATFORM_PS4)
 
