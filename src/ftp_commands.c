@@ -615,11 +615,10 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
   uint64_t bytes_sent = 0U;
 
   /*
-   * sendfile fast path: kernel-to-kernel transfer
+   * sendfile eligibility: kernel-to-kernel transfer
    *
-   *   Disabled when encryption is active because XOR must happen
-   *   in userspace. Falls through to the buffered read-encrypt-send
-   *   path below, which still saturates gigabit links with ChaCha20.
+   *   Disabled when encryption is active (XOR must happen in userspace)
+   *   or when rate limiting is on (sendfile can't be throttled).
    */
   int use_sendfile = ((vfs_get_caps(&node) & VFS_CAP_SENDFILE) != 0U) &&
                      (FTP_TRANSFER_RATE_LIMIT_BPS == 0U);
@@ -628,56 +627,158 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
     use_sendfile = 0;
   }
 #endif
-  if (use_sendfile != 0) {
-    pal_socket_cork(session->data_fd);
-    while (remaining > 0U) {
-      ssize_t sent =
-          pal_sendfile(session->data_fd, node.fd, &offset, remaining);
 
-      if (sent <= 0) {
-        if ((sent < 0) && (errno == EINTR)) {
-          continue;
-        }
-        break;
-      }
+  /*=========================================================================*
+   *  Transfer loop: sendfile with read() cooldown retry
+   *
+   *  PS4/PS5 exFAT driver stalls sendfile() after ~28 MB of continuous
+   *  kernel-to-kernel transfer (page cache pressure). Instead of falling
+   *  back to slow read() permanently, we alternate:
+   *
+   *     sendfile burst (kernel speed, ~28 MB)
+   *       -> stall detected
+   *       -> read() cooldown (1 MB, releases page pressure)
+   *       -> retry sendfile (if it works, another 28 MB burst)
+   *       -> repeat until file complete
+   *
+   *  If sendfile fails immediately on retry (0 bytes), the driver truly
+   *  cannot recover and we finish the rest via read().
+   *
+   *    ┌──────────┐    stall    ┌──────────────┐   1 MB done  ┌──────────┐
+   *    │ sendfile  │──────────►│ read cooldown │────────────►│ sendfile  │
+   *    │  burst    │           │   (1 MB)      │             │  retry    │
+   *    └─────┬────┘           └──────────────┘             └─────┬────┘
+   *     done │                                          0 bytes │ ok
+   *          ▼                                                  ▼
+   *        [226]                                    ┌───────────────┐
+   *                                                 │ read() finish │
+   *                                                 └───────┬──────┘
+   *                                                    done │
+   *                                                         ▼
+   *                                                       [226]
+   *=========================================================================*/
 
-      remaining -= (size_t)sent;
-      bytes_sent += (uint64_t)sent;
-      session->last_activity = time(NULL);
-      atomic_fetch_add(&session->stats.bytes_sent, (uint64_t)sent);
-    }
-    pal_socket_uncork(session->data_fd);
-  } else {
-    void *buf = ftp_buffer_acquire();
-    size_t buf_sz = ftp_buffer_size();
-    if (buf == NULL) {
-      remaining = 1U;
-    } else {
+/* Cooldown: bytes of read() between sendfile retries */
+#define SENDFILE_COOLDOWN_BYTES (1U << 20) /* 1 MB */
+
+  void *buf = NULL;
+  size_t buf_sz = 0U;
+
+  while (remaining > 0U) {
+
+    /*-- sendfile burst --*/
+    if (use_sendfile != 0) {
       pal_socket_cork(session->data_fd);
+      int sf_sent_any = 0;
+
       while (remaining > 0U) {
-        size_t chunk = (remaining < buf_sz) ? remaining : buf_sz;
-        ssize_t n = vfs_read(&node, buf, chunk);
-        if (n <= 0) {
-          if ((n < 0) && (errno == EINTR)) {
+        ssize_t sent =
+            pal_sendfile(session->data_fd, node.fd, &offset, remaining);
+
+        if (sent <= 0) {
+          if ((sent < 0) && (errno == EINTR)) {
             continue;
+          }
+          /* Stalled: sync offset and switch to read() cooldown */
+          vfs_set_offset(&node, (uint64_t)offset);
+
+          if (sf_sent_any == 0) {
+            /* sendfile failed immediately on retry -> give up */
+            use_sendfile = 0;
           }
           break;
         }
 
-        ssize_t sent = ftp_session_send_data(session, buf, (size_t)n);
-        if (sent != n) {
-          remaining = 1U;
-          break;
-        }
-
+        sf_sent_any = 1;
+        remaining -= (size_t)sent;
         bytes_sent += (uint64_t)sent;
-        remaining -= (size_t)n;
         session->last_activity = time(NULL);
+        atomic_fetch_add(&session->stats.bytes_sent, (uint64_t)sent);
       }
       pal_socket_uncork(session->data_fd);
+
+      if (remaining == 0U) {
+        break; /* transfer complete */
+      }
+      if (use_sendfile != 0) {
+        /* Stalled but sent some data: run cooldown then retry */
+        continue;
+      }
+      /* use_sendfile == 0: permanent fallback, drop through */
     }
-    ftp_buffer_release(buf);
+
+    /*-- read() path: cooldown (limited) or finish (unlimited) --*/
+    if (buf == NULL) {
+      buf = ftp_buffer_acquire();
+      buf_sz = ftp_buffer_size();
+    }
+    if (buf == NULL) {
+      remaining = 1U; /* can't allocate buffer, force 426 */
+      break;
+    }
+
+    /*
+     * If sendfile is still eligible, run cooldown for SENDFILE_COOLDOWN_BYTES
+     * then break back to the outer loop to retry sendfile.
+     * If sendfile is permanently disabled, run until transfer complete.
+     */
+    int can_retry_sf = ((vfs_get_caps(&node) & VFS_CAP_SENDFILE) != 0U) &&
+                       (use_sendfile == 0) &&
+                       (remaining > SENDFILE_COOLDOWN_BYTES);
+    /* Only retry if sendfile actually worked at least once this transfer */
+    if ((can_retry_sf != 0) && (bytes_sent > 0U)) {
+      can_retry_sf = 1;
+    } else {
+      can_retry_sf = 0;
+    }
+
+    size_t cooldown_left = can_retry_sf ? SENDFILE_COOLDOWN_BYTES : remaining;
+    int read_error = 0;
+
+    pal_socket_cork(session->data_fd);
+    while ((remaining > 0U) && (cooldown_left > 0U)) {
+      size_t want = (remaining < buf_sz) ? remaining : buf_sz;
+      if (want > cooldown_left) {
+        want = cooldown_left;
+      }
+      ssize_t n = vfs_read(&node, buf, want);
+      if (n <= 0) {
+        if ((n < 0) && (errno == EINTR)) {
+          continue;
+        }
+        read_error = 1;
+        break;
+      }
+
+      ssize_t sent = ftp_session_send_data(session, buf, (size_t)n);
+      if (sent != n) {
+        remaining = 1U;
+        read_error = 1;
+        break;
+      }
+
+      bytes_sent += (uint64_t)sent;
+      remaining -= (size_t)n;
+      cooldown_left -= (size_t)n;
+      session->last_activity = time(NULL);
+    }
+    pal_socket_uncork(session->data_fd);
+
+    if (read_error != 0) {
+      break;
+    }
+
+    /* After cooldown, re-enable sendfile for retry */
+    if ((can_retry_sf != 0) && (remaining > 0U)) {
+      use_sendfile = 1;
+      /* Sync offset for sendfile: vfs_read already advanced the
+         internal file position, read it back for sendfile's &offset */
+      offset = (off_t)(file_size - (uint64_t)remaining);
+    }
   }
+
+  ftp_buffer_release(buf);
+#undef SENDFILE_COOLDOWN_BYTES
 
   /* Cleanup */
   vfs_close(&node);

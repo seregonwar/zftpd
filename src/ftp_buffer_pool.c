@@ -68,6 +68,7 @@ void *ftp_buffer_acquire(void) {
   for (;;) {
     uint_fast32_t mask = atomic_load(&g_stream_buffer_mask);
 
+    uint_fast32_t found = 0U;
     for (uint_fast32_t i = 0U; i < (uint_fast32_t)FTP_STREAM_BUFFER_COUNT;
          i++) {
       uint_fast32_t bit = 1U << i;
@@ -82,14 +83,18 @@ void *ftp_buffer_acquire(void) {
         return (void *)g_stream_buffers[i];
       }
 
-      goto retry;
+      found = 1U;
+      break; /* CAS failed, re-read mask from outer loop */
     }
 
-  retry:
-    if (mask == atomic_load(&g_stream_buffer_mask)) {
+    /*
+     * If CAS failed (found==1), the outer loop retries with a fresh mask.
+     * If no free slot was found (found==0), check if mask changed
+     * since we read it; if unchanged, all buffers are truly occupied.
+     */
+    if ((found == 0U) && (mask == atomic_load(&g_stream_buffer_mask))) {
       return NULL;
     }
-    continue;
   }
 }
 

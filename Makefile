@@ -477,6 +477,7 @@ TEST_BINS += $(BUILD_DIR)/tests/test_buffer_pool
 TEST_BINS += $(BUILD_DIR)/tests/test_scratch
 TEST_BINS += $(BUILD_DIR)/tests/test_alloc
 TEST_BINS += $(BUILD_DIR)/tests/test_http_query
+TEST_BINS += $(BUILD_DIR)/tests/test_http_confinement
 
 ifeq ($(filter $(TARGET),linux macos),)
 test: $(OUTPUT_BIN)
