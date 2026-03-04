@@ -56,8 +56,17 @@ SOFTWARE.
     (defined(__FreeBSD__) && !defined(PLATFORM_PS4) && !defined(PLATFORM_PS5))
 #include <sys/mount.h>
 #endif
+#include <pthread.h>
 #include <time.h>
 #include <unistd.h>
+
+/*===========================================================================*
+ * FORWARD DECLARATIONS
+ *===========================================================================*/
+
+static ftp_error_t start_async_copy(ftp_session_t *session,
+                                    const char *src_ftp_path,
+                                    const char *dst_ftp_path, int is_move);
 
 /*===========================================================================*
  * AUTHENTICATION AND CONTROL
@@ -797,6 +806,75 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
                                 "Transfer failed.");
 }
 
+/*===========================================================================*
+ *  DOUBLE-BUFFERED WRITER — overlaps recv() and write()
+ *
+ *   ┌────────────┐  mutex+cond  ┌────────────┐
+ *   │ FTP thread │ ──► swap ──► │ Writer thr │
+ *   │  recv()    │              │  write()   │
+ *   │  buf[0]    │              │  buf[1]    │
+ *   └────────────┘              └────────────┘
+ *
+ *  The FTP thread fills the active buffer via recv(), then swaps
+ *  buffers with the writer thread which drains the filled buffer
+ *  to disk.  This overlaps network I/O with PFS crypto writes.
+ *===========================================================================*/
+
+typedef struct {
+  void *buf[2];     /* two buffers (from pool or malloc)     */
+  size_t len[2];    /* bytes stored in each buffer           */
+  int active;       /* index currently being filled by recv  */
+  int fd;           /* destination file descriptor           */
+  int error;        /* writer error errno (0 = ok)           */
+  int done;         /* set by recv thread on EOF/error       */
+  uint64_t written; /* total bytes flushed to disk           */
+  pthread_mutex_t mtx;
+  pthread_cond_t cv_ready; /* writer waits: "data ready to write" */
+  pthread_cond_t cv_free;  /* recv waits:  "buffer free to fill"  */
+} stor_pipe_t;
+
+static void *stor_writer_thread(void *arg) {
+  stor_pipe_t *p = (stor_pipe_t *)arg;
+
+  pthread_mutex_lock(&p->mtx);
+  for (;;) {
+    /* Wait for data or done signal */
+    while ((p->len[1 - p->active] == 0U) && (p->done == 0)) {
+      pthread_cond_wait(&p->cv_ready, &p->mtx);
+    }
+
+    int drain = 1 - p->active;
+    size_t nbytes = p->len[drain];
+
+    if ((nbytes == 0U) && (p->done != 0)) {
+      break; /* recv finished, nothing left to write */
+    }
+
+    /* Unlock while writing (slow PFS crypto path) */
+    pthread_mutex_unlock(&p->mtx);
+
+    ssize_t w = pal_file_write_all(p->fd, p->buf[drain], nbytes);
+    int write_ok = (w == (ssize_t)nbytes) ? 1 : 0;
+
+    pthread_mutex_lock(&p->mtx);
+    if (write_ok != 0) {
+      p->written += (uint64_t)nbytes;
+    } else {
+      p->error = errno;
+    }
+    p->len[drain] = 0U;
+
+    /* Signal recv thread that buffer is free */
+    pthread_cond_signal(&p->cv_free);
+
+    if (write_ok == 0) {
+      break; /* write error */
+    }
+  }
+  pthread_mutex_unlock(&p->mtx);
+  return NULL;
+}
+
 /**
  * @brief STOR command - Store (upload) file
  *
@@ -837,7 +915,12 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
    *     write directly to the original file (need to lseek)
    */
   char tmp_path[FTP_PATH_MAX];
+#if defined(PLATFORM_PS5)
+  /* PS5 /data/: no ShadowMount watching, skip atomic temp→rename overhead */
+  int use_atomic = 0;
+#else
   int use_atomic = (session->restart_offset == 0) ? 1 : 0;
+#endif
 
   if (use_atomic != 0) {
     /* Build temp name: /dir/.zftpd.tmp.basename */
@@ -888,55 +971,208 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
     return ftp_session_send_reply(session, FTP_REPLY_425_CANT_OPEN_DATA, NULL);
   }
 
-  /* Receive file data */
-  void *buffer = ftp_buffer_acquire();
+  /*=========================================================================*
+   *  Double-buffered receive/write
+   *
+   *  Two 1 MB buffers: while the writer thread drains buf[j] through
+   *  PFS crypto, the FTP thread fills buf[i] from the network.
+   *  This overlaps ~9ms of recv with ~40ms of write per cycle.
+   *=========================================================================*/
+
+  void *buf0 = ftp_buffer_acquire();
+  void *buf1 = ftp_buffer_acquire();
   size_t buf_sz = ftp_buffer_size();
   uint64_t total_received = 0U;
   int ok = 1;
   int fail_stage = 0; /* 1 = no buffer, 2 = recv error, 3 = write error */
   int saved_errno = 0;
 
-  while (1) {
-    if (buffer == NULL) {
-      fail_stage = 1;
-      ok = 0;
-      break;
-    }
-    ssize_t n = ftp_session_recv_data(session, buffer, buf_sz);
+  if ((buf0 == NULL) || (buf1 == NULL)) {
+    /*
+     * Fallback: if we can't get two buffers, use single-buffer mode.
+     * This happens when the pool is exhausted under heavy load.
+     */
+    void *buffer = (buf0 != NULL) ? buf0 : buf1;
+    ftp_buffer_release((buf0 != NULL) ? buf1 : buf0);
 
-    if (n < 0) {
-      if (errno == EINTR) {
-        continue;
+    while (1) {
+      if (buffer == NULL) {
+        fail_stage = 1;
+        ok = 0;
+        break;
       }
-      saved_errno = errno;
-      fail_stage = 2;
-      ok = 0;
-      break;
+      ssize_t n = ftp_session_recv_data(session, buffer, buf_sz);
+      if (n < 0) {
+        if (errno == EINTR) {
+          continue;
+        }
+        saved_errno = errno;
+        fail_stage = 2;
+        ok = 0;
+        break;
+      }
+      if (n == 0) {
+        break;
+      }
+      ssize_t written = pal_file_write_all(fd, buffer, (size_t)n);
+      if (written != n) {
+        saved_errno = errno;
+        fail_stage = 3;
+        ok = 0;
+        break;
+      }
+      total_received += (uint64_t)n;
+      session->last_activity = time(NULL);
     }
 
-    if (n == 0) {
-      break; /* EOF */
+    ftp_buffer_release(buffer);
+  } else {
+    /*
+     * Double-buffered path: spawn a writer thread.
+     */
+    stor_pipe_t pipe;
+    pipe.buf[0] = buf0;
+    pipe.buf[1] = buf1;
+    pipe.len[0] = 0U;
+    pipe.len[1] = 0U;
+    pipe.active = 0;
+    pipe.fd = fd;
+    pipe.error = 0;
+    pipe.done = 0;
+    pipe.written = 0U;
+    pthread_mutex_init(&pipe.mtx, NULL);
+    pthread_cond_init(&pipe.cv_ready, NULL);
+    pthread_cond_init(&pipe.cv_free, NULL);
+
+    pthread_t writer;
+    int thread_ok =
+        (pthread_create(&writer, NULL, stor_writer_thread, &pipe) == 0) ? 1 : 0;
+    if (thread_ok == 0) {
+      /* Thread creation failed — fall back to single-buffer */
+      while (1) {
+        ssize_t n = ftp_session_recv_data(session, buf0, buf_sz);
+        if (n < 0) {
+          if (errno == EINTR) {
+            continue;
+          }
+          saved_errno = errno;
+          fail_stage = 2;
+          ok = 0;
+          break;
+        }
+        if (n == 0) {
+          break;
+        }
+        ssize_t written = pal_file_write_all(fd, buf0, (size_t)n);
+        if (written != n) {
+          saved_errno = errno;
+          fail_stage = 3;
+          ok = 0;
+          break;
+        }
+        total_received += (uint64_t)n;
+        session->last_activity = time(NULL);
+      }
+    } else {
+      /*
+       * Producer loop: fill buf[active], then hand off to writer.
+       */
+      while (1) {
+        pthread_mutex_lock(&pipe.mtx);
+
+        /* Wait for our active buffer to be free */
+        while (pipe.len[pipe.active] != 0U) {
+          if (pipe.error != 0) {
+            pthread_mutex_unlock(&pipe.mtx);
+            goto recv_done;
+          }
+          pthread_cond_wait(&pipe.cv_free, &pipe.mtx);
+        }
+
+        /* Check if writer hit an error */
+        if (pipe.error != 0) {
+          pthread_mutex_unlock(&pipe.mtx);
+          break;
+        }
+
+        int fill_idx = pipe.active;
+        pthread_mutex_unlock(&pipe.mtx);
+
+        /* Receive into the free buffer (slow, don't hold lock) */
+        ssize_t n = ftp_session_recv_data(session, pipe.buf[fill_idx], buf_sz);
+        if (n < 0) {
+          if (errno == EINTR) {
+            continue;
+          }
+          saved_errno = errno;
+          fail_stage = 2;
+          ok = 0;
+          break;
+        }
+        if (n == 0) {
+          break; /* EOF */
+        }
+
+        total_received += (uint64_t)n;
+        session->last_activity = time(NULL);
+
+        /* Hand the filled buffer to the writer */
+        pthread_mutex_lock(&pipe.mtx);
+        pipe.len[fill_idx] = (size_t)n;
+        pipe.active = 1 - fill_idx; /* swap to other buffer */
+        pthread_cond_signal(&pipe.cv_ready);
+        pthread_mutex_unlock(&pipe.mtx);
+      }
+
+    recv_done:
+      /* Signal writer that recv is done */
+      pthread_mutex_lock(&pipe.mtx);
+      pipe.done = 1;
+      pthread_cond_signal(&pipe.cv_ready);
+      pthread_mutex_unlock(&pipe.mtx);
+
+      (void)pthread_join(writer, NULL);
+
+      /* Collect writer result */
+      if (pipe.error != 0) {
+        saved_errno = pipe.error;
+        fail_stage = 3;
+        ok = 0;
+      }
+      total_received = pipe.written + (total_received - pipe.written);
     }
 
-    /* Write to file */
-    ssize_t written = pal_file_write_all(fd, buffer, (size_t)n);
-    if (written != n) {
-      saved_errno = errno;
-      fail_stage = 3;
-      ok = 0;
-      break;
-    }
-
-    total_received += (uint64_t)n;
-    session->last_activity = time(NULL);
+    pthread_mutex_destroy(&pipe.mtx);
+    pthread_cond_destroy(&pipe.cv_ready);
+    pthread_cond_destroy(&pipe.cv_free);
+    ftp_buffer_release(buf0);
+    ftp_buffer_release(buf1);
   }
 
-  /* Cleanup */
+  /*
+   * Flush strategy — platform-specific
+   *
+   *   OrbisOS:  close() already flushes dirty pages to NVMe.
+   *             An explicit fsync() forces a full controller barrier
+   *             through PFS crypto — adds 5-15ms of pure overhead.
+   *
+   *   Linux:    fdatasync() flushes data only (skips metadata).
+   *
+   *   Other:    fsync() as safety default.
+   */
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+  /* OrbisOS: close() flushes; skip explicit sync */
+  (void)0;
+#elif defined(__linux__)
+  if (ok != 0) {
+    (void)fdatasync(fd);
+  }
+#else
   if (ok != 0) {
     (void)fsync(fd);
   }
+#endif
   pal_file_close(fd);
-  ftp_buffer_release(buffer);
   ftp_session_close_data_connection(session);
   session->restart_offset = 0;
 
@@ -1085,10 +1321,20 @@ ftp_error_t cmd_APPE(ftp_session_t *session, const char *args) {
     session->last_activity = time(NULL);
   }
 
-  /* Flush to persistent storage before closing */
+  /*
+   * Flush strategy — see cmd_STOR comment for rationale.
+   */
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+  (void)0;
+#elif defined(__linux__)
+  if (ok != 0) {
+    (void)fdatasync(fd);
+  }
+#else
   if (ok != 0) {
     (void)fsync(fd);
   }
+#endif
   pal_file_close(fd);
   ftp_buffer_release(buffer);
   ftp_session_close_data_connection(session);
@@ -1304,6 +1550,14 @@ ftp_error_t cmd_RNTO(ftp_session_t *session, const char *args) {
 
   /* Perform rename */
   err = pal_file_rename(session->rename_from, resolved);
+
+  if (err == FTP_ERR_CROSS_DEVICE) {
+    ftp_error_t async_err =
+        start_async_copy(session, session->rename_from, args, 1);
+    /* Clear rename_from state */
+    session->rename_from[0] = '\0';
+    return async_err;
+  }
 
   /* Clear rename_from */
   session->rename_from[0] = '\0';
@@ -1860,6 +2114,9 @@ ftp_error_t cmd_FEAT(ftp_session_t *session, const char *args) {
 #if FTP_ENABLE_CRYPTO
                             " XCRYPT",
 #endif
+                            " CPFR",
+                            " CPTO",
+                            " COPY",
                             "End"};
 
   return ftp_session_send_multiline_reply(
@@ -1888,6 +2145,200 @@ ftp_error_t cmd_HELP(ftp_session_t *session, const char *args) {
 
   return ftp_session_send_multiline_reply(session, FTP_REPLY_214_HELP, lines,
                                           sizeof(lines) / sizeof(lines[0]));
+}
+
+/*===========================================================================*
+ * ASYNC BACKGROUND COPY
+ *===========================================================================*/
+
+typedef struct {
+  ftp_session_t *session;
+  char src_path[FTP_PATH_MAX];
+  char dst_path[FTP_PATH_MAX];
+  int is_move;
+} ftp_copy_task_t;
+
+static void *ftp_copy_thread_func(void *arg) {
+  ftp_copy_task_t *task = (ftp_copy_task_t *)arg;
+  ftp_session_t *session = task->session;
+
+  ftp_log_line(FTP_LOG_INFO, "[COPY] Background task started");
+
+  ftp_error_t err =
+      pal_file_copy_recursive(task->src_path, task->dst_path, !task->is_move);
+
+  pthread_mutex_lock(&session->copy_mutex);
+  session->copy_in_progress = 0;
+  pthread_mutex_unlock(&session->copy_mutex);
+
+  if (err == FTP_OK) {
+    ftp_log_line(FTP_LOG_INFO, "[COPY] Background task completed successfully");
+  } else {
+    char msg[256];
+    snprintf(msg, sizeof(msg), "[COPY] Background task failed: err=%d",
+             (int)err);
+    ftp_log_line(FTP_LOG_WARN, msg);
+  }
+
+  free(task);
+  return NULL;
+}
+
+static ftp_error_t start_async_copy(ftp_session_t *session,
+                                    const char *src_ftp_path,
+                                    const char *dst_ftp_path, int is_move) {
+  pthread_mutex_lock(&session->copy_mutex);
+  if (session->copy_in_progress) {
+    pthread_mutex_unlock(&session->copy_mutex);
+    return ftp_session_send_reply(session, FTP_REPLY_450_FILE_UNAVAILABLE,
+                                  "Operation already in progress.");
+  }
+
+  /* Validate paths */
+  char src_resolved[FTP_PATH_MAX];
+  char dst_resolved[FTP_PATH_MAX];
+  if (ftp_path_resolve(session, src_ftp_path, src_resolved,
+                       sizeof(src_resolved)) != FTP_OK ||
+      ftp_path_resolve(session, dst_ftp_path, dst_resolved,
+                       sizeof(dst_resolved)) != FTP_OK) {
+    pthread_mutex_unlock(&session->copy_mutex);
+    return ftp_session_send_reply(session, FTP_REPLY_550_FILE_ERROR,
+                                  "Invalid path.");
+  }
+
+  if (strcmp(src_resolved, dst_resolved) == 0) {
+    pthread_mutex_unlock(&session->copy_mutex);
+    return ftp_session_send_reply(session, FTP_REPLY_553_FILENAME_INVALID,
+                                  "Source and destination are the same.");
+  }
+
+  ftp_copy_task_t *task = malloc(sizeof(ftp_copy_task_t));
+  if (task == NULL) {
+    pthread_mutex_unlock(&session->copy_mutex);
+    return ftp_session_send_reply(session, FTP_REPLY_451_LOCAL_ERROR,
+                                  "Memory allocation failed.");
+  }
+
+  task->session = session;
+  strncpy(task->src_path, src_resolved, sizeof(task->src_path) - 1);
+  task->src_path[sizeof(task->src_path) - 1] = '\0';
+  strncpy(task->dst_path, dst_resolved, sizeof(task->dst_path) - 1);
+  task->dst_path[sizeof(task->dst_path) - 1] = '\0';
+  task->is_move = is_move;
+
+  session->copy_in_progress = 1;
+
+  if (session->copy_thread_valid) {
+    pthread_join(session->copy_thread, NULL);
+  }
+
+  if (pthread_create(&session->copy_thread, NULL, ftp_copy_thread_func, task) !=
+      0) {
+    session->copy_in_progress = 0;
+    session->copy_thread_valid = 0;
+    pthread_mutex_unlock(&session->copy_mutex);
+    free(task);
+    return ftp_session_send_reply(session, FTP_REPLY_451_LOCAL_ERROR,
+                                  "Failed to create background thread.");
+  }
+
+  session->copy_thread_valid = 1;
+  pthread_mutex_unlock(&session->copy_mutex);
+
+  return ftp_session_send_reply(session, FTP_REPLY_250_FILE_ACTION_OK,
+                                is_move ? "Move started in background."
+                                        : "Copy started in background.");
+}
+
+ftp_error_t cmd_CPFR(ftp_session_t *session, const char *args) {
+  if ((session == NULL) || (args == NULL)) {
+    return FTP_ERR_INVALID_PARAM;
+  }
+
+  if (args[0] == '\0') {
+    return ftp_session_send_reply(session, FTP_REPLY_501_SYNTAX_ARGS,
+                                  "Syntax: CPFR <path>");
+  }
+
+  char resolved[FTP_PATH_MAX];
+  ftp_error_t err = ftp_path_resolve(session, args, resolved, sizeof(resolved));
+
+  if (err != FTP_OK) {
+    return ftp_session_send_reply(session, FTP_REPLY_550_FILE_ERROR,
+                                  "Invalid source path.");
+  }
+
+  if (!pal_path_exists(resolved)) {
+    return ftp_session_send_reply(session, FTP_REPLY_550_FILE_ERROR,
+                                  "Source does not exist.");
+  }
+
+  strncpy(session->copy_from, args, sizeof(session->copy_from) - 1);
+  session->copy_from[sizeof(session->copy_from) - 1] = '\0';
+
+  return ftp_session_send_reply(session, FTP_REPLY_350_PENDING,
+                                "File exists, ready for destination name.");
+}
+
+ftp_error_t cmd_CPTO(ftp_session_t *session, const char *args) {
+  if ((session == NULL) || (args == NULL)) {
+    return FTP_ERR_INVALID_PARAM;
+  }
+
+  if (args[0] == '\0') {
+    return ftp_session_send_reply(session, FTP_REPLY_501_SYNTAX_ARGS,
+                                  "Syntax: CPTO <path>");
+  }
+
+  if (session->copy_from[0] == '\0') {
+    return ftp_session_send_reply(session, FTP_REPLY_503_BAD_SEQUENCE,
+                                  "Bad sequence of commands (use CPFR first).");
+  }
+
+  ftp_error_t result = start_async_copy(session, session->copy_from, args, 0);
+
+  /* Clear the copy_from state regardless of success to prevent reuse */
+  session->copy_from[0] = '\0';
+
+  return result;
+}
+
+ftp_error_t cmd_COPY(ftp_session_t *session, const char *args) {
+  if ((session == NULL) || (args == NULL)) {
+    return FTP_ERR_INVALID_PARAM;
+  }
+
+  char src_arg[FTP_PATH_MAX];
+  char dst_arg[FTP_PATH_MAX];
+
+  const char *space = strchr(args, ' ');
+  if (space == NULL) {
+    return ftp_session_send_reply(session, FTP_REPLY_501_SYNTAX_ARGS,
+                                  "Syntax: COPY <src> <dst>");
+  }
+
+  size_t src_len = (size_t)(space - args);
+  if (src_len >= sizeof(src_arg)) {
+    return ftp_session_send_reply(session, FTP_REPLY_501_SYNTAX_ARGS,
+                                  "Paths too long.");
+  }
+
+  strncpy(src_arg, args, src_len);
+  src_arg[src_len] = '\0';
+
+  const char *dst_start = space + 1;
+  while (*dst_start == ' ')
+    dst_start++; /* skip extra spaces */
+
+  if (*dst_start == '\0') {
+    return ftp_session_send_reply(session, FTP_REPLY_501_SYNTAX_ARGS,
+                                  "Syntax: COPY <src> <dst>");
+  }
+
+  strncpy(dst_arg, dst_start, sizeof(dst_arg) - 1);
+  dst_arg[sizeof(dst_arg) - 1] = '\0';
+
+  return start_async_copy(session, src_arg, dst_arg, 0);
 }
 
 /*===========================================================================*

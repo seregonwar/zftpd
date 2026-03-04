@@ -47,7 +47,23 @@ SOFTWARE.
 
 /* Fallback buffer size for non-sendfile platforms */
 #define FALLBACK_BUFFER_SIZE FTP_BUFFER_SIZE
-#define PAL_FILE_WRITE_CHUNK_MAX 262144U
+/*
+ * Write chunk ceiling for pal_file_write_all().
+ *
+ *   PS4/PS5: /data/ lives on a PFS-encrypted NVMe partition.
+ *            Every write() triggers per-block AES in the kernel VFS.
+ *            Larger chunks (1 MB) cut the number of crypto context
+ *            switches by 4x vs. the old 256 KB default.
+ *
+ *   POSIX:   256 KB is a safe, portable default.
+ */
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+#define PAL_FILE_WRITE_CHUNK_MAX                                               \
+  1048576U /* 1 MB — match FTP_STREAM_BUFFER_SIZE */
+#else
+#define PAL_FILE_WRITE_CHUNK_MAX                                               \
+  262144U /* 256 KB — safe POSIX default         */
+#endif
 
 /* Max recursion depth for cross-device directory move */
 #define PAL_MOVE_MAX_DEPTH 64U
@@ -781,8 +797,8 @@ static ftp_error_t pal_dir_remove_recursive(const char *path, unsigned depth) {
  * On failure the partial destination is cleaned up and the
  * source is left intact so the user can retry.
  */
-static ftp_error_t pal_move_cross_device_r(const char *src, const char *dst,
-                                           unsigned depth) {
+static ftp_error_t pal_copy_cross_device_r(const char *src, const char *dst,
+                                           unsigned depth, int keep_src) {
   if ((src == NULL) || (dst == NULL)) {
     return FTP_ERR_INVALID_PARAM;
   }
@@ -829,16 +845,18 @@ static ftp_error_t pal_move_cross_device_r(const char *src, const char *dst,
       }
       return err;
     }
-    if (unlink(src) < 0) {
-      {
-        char msg[256];
-        snprintf(msg, sizeof(msg),
-                 "[XDEV] unlink(src) failed: errno=%d path=%s", errno, src);
-        ftp_log_line(FTP_LOG_WARN, msg);
+    if (keep_src == 0) {
+      if (unlink(src) < 0) {
+        {
+          char msg[256];
+          snprintf(msg, sizeof(msg),
+                   "[XDEV] unlink(src) failed: errno=%d path=%s", errno, src);
+          ftp_log_line(FTP_LOG_WARN, msg);
+        }
+        /* Copy succeeded but source delete failed — not fatal,
+           caller gets an error but data is safe at dst.        */
+        return FTP_ERR_FILE_WRITE;
       }
-      /* Copy succeeded but source delete failed — not fatal,
-         caller gets an error but data is safe at dst.        */
-      return FTP_ERR_FILE_WRITE;
     }
     return FTP_OK;
   }
@@ -917,7 +935,7 @@ static ftp_error_t pal_move_cross_device_r(const char *src, const char *dst,
       break;
     }
 
-    err = pal_move_cross_device_r(src_child, dst_child, depth + 1U);
+    err = pal_copy_cross_device_r(src_child, dst_child, depth + 1U, keep_src);
     if (err != FTP_OK) {
       break;
     }
@@ -937,19 +955,21 @@ static ftp_error_t pal_move_cross_device_r(const char *src, const char *dst,
     return err;
   }
 
-  /* Source directory should now be empty — remove it */
-  if (rmdir(src) < 0) {
-    {
-      char msg[256];
-      snprintf(msg, sizeof(msg), "[XDEV] rmdir(src) failed: errno=%d path=%s",
-               errno, src);
-      ftp_log_line(FTP_LOG_WARN, msg);
+  if (keep_src == 0) {
+    /* Source directory should now be empty — remove it */
+    if (rmdir(src) < 0) {
+      {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "[XDEV] rmdir(src) failed: errno=%d path=%s",
+                 errno, src);
+        ftp_log_line(FTP_LOG_WARN, msg);
+      }
+      return FTP_ERR_FILE_WRITE;
     }
-    return FTP_ERR_FILE_WRITE;
   }
 
   if (depth == 0U) {
-    ftp_log_line(FTP_LOG_INFO, "[XDEV] cross-device move completed OK");
+    ftp_log_line(FTP_LOG_INFO, "[XDEV] cross-device operation completed OK");
   }
 
   return FTP_OK;
@@ -974,13 +994,21 @@ ftp_error_t pal_file_rename(const char *old_path, const char *new_path) {
     case EPERM:
       return FTP_ERR_PERMISSION;
     case EXDEV:
-      return pal_move_cross_device_r(old_path, new_path, 0U);
+      return FTP_ERR_CROSS_DEVICE;
     default:
       return FTP_ERR_FILE_WRITE;
     }
   }
 
   return FTP_OK;
+}
+
+/**
+ * @brief Recursively copy file or directory
+ */
+ftp_error_t pal_file_copy_recursive(const char *src, const char *dst,
+                                    int keep_src) {
+  return pal_copy_cross_device_r(src, dst, 0U, keep_src);
 }
 
 /*===========================================================================*

@@ -119,6 +119,10 @@ ftp_error_t ftp_session_init(ftp_session_t *session, int ctrl_fd,
   }
 
   session->rename_from[0] = '\0';
+  session->copy_from[0] = '\0';
+  pthread_mutex_init(&session->copy_mutex, NULL);
+  session->copy_in_progress = 0;
+  session->copy_thread_valid = 0;
 
   /* Authentication */
   session->auth_attempts = 0U;
@@ -175,6 +179,12 @@ void ftp_session_cleanup(ftp_session_t *session) {
 
   /* Set state to terminating */
   atomic_store(&session->state, FTP_STATE_TERMINATING);
+
+  /* Wait for active copy to finish and destroy mutex */
+  if (session->copy_thread_valid) {
+    pthread_join(session->copy_thread, NULL);
+  }
+  pthread_mutex_destroy(&session->copy_mutex);
 
   /* Close data connection */
   ftp_session_close_data_connection(session);

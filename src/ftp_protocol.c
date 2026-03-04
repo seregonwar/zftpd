@@ -84,6 +84,11 @@ static const ftp_command_entry_t command_table[] = {
     {"RNFR", cmd_RNFR, FTP_ARGS_REQUIRED},
     {"RNTO", cmd_RNTO, FTP_ARGS_REQUIRED},
 
+    /* Async Copy */
+    {"CPFR", cmd_CPFR, FTP_ARGS_REQUIRED},
+    {"CPTO", cmd_CPTO, FTP_ARGS_REQUIRED},
+    {"COPY", cmd_COPY, FTP_ARGS_REQUIRED},
+
     /* Data connection */
     {"PORT", cmd_PORT, FTP_ARGS_REQUIRED},
     {"PASV", cmd_PASV, FTP_ARGS_NONE},

@@ -77,6 +77,7 @@ typedef enum {
   FTP_ERR_AUTH_FAILED = -21,   /**< Authentication failed */
   FTP_ERR_PROTOCOL = -22,      /**< Protocol violation */
   FTP_ERR_DIR_EXISTS = -23,    /**< Directory already exists */
+  FTP_ERR_CROSS_DEVICE = -24,  /**< Cross-device link (EXDEV) */
   FTP_ERR_UNKNOWN = -99,       /**< Unknown error */
 } ftp_error_t;
 
@@ -241,6 +242,17 @@ typedef struct ftp_session {
   char root_path[FTP_PATH_MAX];   /**< Server root directory */
   char cwd[FTP_PATH_MAX];         /**< Current working directory */
   char rename_from[FTP_PATH_MAX]; /**< RNFR source path */
+
+  /* Async Copy State */
+  char copy_from[FTP_PATH_MAX]; /**< CPFR source path */
+  pthread_t copy_thread;        /**< Background copy thread */
+  pthread_mutex_t copy_mutex;   /**< Mutex for copy thread state */
+  atomic_int copy_in_progress;  /**< Flag indicating active background copy */
+  uint8_t
+      copy_thread_valid; /**< Flag indicating if thread handle is joinable */
+  uint8_t copy_is_move;  /**< Flag indicating if copy should delete source (RNTO
+                            fallback) */
+  uint8_t _padding_copy[2]; /**< Alignment padding */
 
   /* Authentication */
   uint8_t auth_attempts; /**< Failed auth attempts */

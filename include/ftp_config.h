@@ -342,9 +342,18 @@ SOFTWARE.
 
 /**
  * TCP receive buffer size in bytes
+ *
+ *   PS5: PFS-encrypted writes take ~40ms per 1MB chunk.
+ *        During each write() the sender fills SO_RCVBUF.
+ *        At 112 MB/s, 1 MB fills in ~9ms → TCP zero window.
+ *        4 MB gives 36ms of runway → no window stalls.
  */
 #ifndef FTP_TCP_RCVBUF
-#define FTP_TCP_RCVBUF 1048576U
+#if defined(PS5) || defined(PLATFORM_PS5)
+#define FTP_TCP_RCVBUF 4194304U /* 4 MB — absorb PFS write latency */
+#else
+#define FTP_TCP_RCVBUF 1048576U /* 1 MB — generic default          */
+#endif
 #endif
 
 /**

@@ -272,6 +272,36 @@ ftp_error_t cmd_RNTO(ftp_session_t *session, const char *args);
  *===========================================================================*/
 
 /**
+ * @brief CPFR command - Copy from
+ *
+ * @param session Client session
+ * @param args    Source path
+ *
+ * @return FTP_OK on success, negative error code on failure
+ */
+ftp_error_t cmd_CPFR(ftp_session_t *session, const char *args);
+
+/**
+ * @brief CPTO command - Copy to
+ *
+ * @param session Client session
+ * @param args    Destination path
+ *
+ * @return FTP_OK on success, negative error code on failure
+ */
+ftp_error_t cmd_CPTO(ftp_session_t *session, const char *args);
+
+/**
+ * @brief COPY command - Copy file
+ *
+ * @param session Client session
+ * @param args    Source and Destination path
+ *
+ * @return FTP_OK on success, negative error code on failure
+ */
+ftp_error_t cmd_COPY(ftp_session_t *session, const char *args);
+
+/**
  * @brief PORT command - Active mode data connection
  *
  * Format: PORT h1,h2,h3,h4,p1,p2
