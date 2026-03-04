@@ -84,6 +84,8 @@ This is the physical ceiling of a 1 GbE connection. It is achieved out of the bo
 - Backpressure-aware send loop, EINTR-safe
 - Upload resume: `REST` + `STOR`
 - Append mode: `APPE`
+- Server-side copy: `CPFR`/`CPTO`, `COPY` *(async background thread)*
+- Cross-device move: `RNTO` fallback with async copy
 - Transfer rate limiting via token bucket *(compile-time, opt-in)*
 
 **Connection handling**
@@ -127,6 +129,7 @@ This is the physical ceiling of a 1 GbE connection. It is achieved out of the bo
 | Directory listing | `LIST` `NLST` `MLSD` `MLST` |
 | File transfer | `RETR` `STOR` `APPE` `REST` |
 | File management | `DELE` `RMD` `MKD` `RNFR` `RNTO` |
+| Server-side copy | `CPFR` `CPTO` `COPY` — async background thread |
 | Data connection | `PORT` `PASV` `EPSV` |
 | Metadata | `SIZE` `MDTM` `STAT` `SYST` `FEAT` `HELP` |
 | Transfer parameters | `TYPE` `MODE` `STRU` |
@@ -206,6 +209,40 @@ To make these persistent, add them to `/etc/sysctl.conf`.
 
 </details>
 
+</details>
+
+<details>
+<summary><b>PS5 — firmware-dependent transfer speed</b></summary>
+
+<br/>
+
+Transfer speed to the **internal storage** (`/data/...`) varies significantly across PS5 firmware versions. This is **not** a `zftpd` limitation — it is caused by Sony's kernel-level I/O driver improvements across firmware updates.
+
+```
+  Upload speed to internal storage (wired 1 GbE, measured across multiple consoles)
+
+  FW  4.03   ████████                                      ~20 MB/s
+  FW  8.60   ████████████████████                           ~50 MB/s
+  FW  9.00   ██████████████████████████████████              ~85 MB/s
+  FW 10.00   ████████████████████████████████████████████   ~113 MB/s
+                                                             ────────
+  Physical ceiling (1 GbE)                                   125 MB/s
+```
+
+**Why it happens:**
+- The PS5 internal storage uses the PFS (PlayStation File System) with mandatory block-level encryption. Every `write()` syscall goes through the kernel's crypto + NVMe pipeline.
+- Sony has incrementally improved this pipeline (write scheduling, page cache, NVMe queue depth) across firmware releases. On FW 10.00 the kernel saturates Gigabit.
+- This is **not** related to PFS crypto cost alone — if it were, speeds would be constant across all firmware. The scaling pattern proves the bottleneck is kernel I/O scheduling, not encryption.
+
+**External USB storage** (`/mnt/usb0/...`, typically exFAT) bypasses PFS entirely and consistently reaches **~113 MB/s** regardless of firmware version.
+
+**What this means for users:**
+- On older firmware (< 9.00), internal storage writes are kernel-limited. No FTP server (zftpd, ftpsrv, GoldHEN) can exceed these speeds — the limit is in the OS.
+- For maximum speed on older firmware, transfer to **external USB-C storage** instead.
+- On FW 9.00+ the internal storage speed approaches Gigabit saturation.
+
+</details>
+
 ---
 
 ## 📦 Build & commands
@@ -218,7 +255,7 @@ To make these persistent, add them to `/etc/sysctl.conf`.
 - `make release-matrix` — release build per platform *and* variant `ENABLE_ZHTTPD=0/1`, producing ELF/BIN dove applicabile.
 - `make TARGET=<platform> BUILD_TYPE=<release|debug> [ENABLE_ZHTTPD=0|1] clean all` — build singolo.
 
-**Variabili Makefile utili:**
+**Useful Makefile variables:**
 
 - `TARGET`: `linux`, `macos`, `ps3`, `ps4`, `ps5` (auto su host). Case-insensitive.
 - `BUILD_TYPE`: `release` (default), `debug`.
@@ -241,6 +278,7 @@ Supported options:
 - `-p <PORT>`  (default 2121)
 - `-d <DIR>`   root FTP
 - `-h`         help
+
 
 ---
 
