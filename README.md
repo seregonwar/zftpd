@@ -351,7 +351,7 @@ Upload support is enabled automatically alongside ZHTTP (`ENABLE_WEB_UPLOAD=1`).
 **hippie68** — PS4 FTP reference implementation  
 **John Törnblom** — PS5 payload framework  
 **PlayStation homebrew community** — testing and feedback
-
+**Drakmor** —  PFR/CPTO/COPY 
 ---
 
 <div align="center">
