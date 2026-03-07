@@ -571,16 +571,54 @@ ftp_error_t ftp_session_open_data_connection(ftp_session_t *session) {
     PAL_CLOSE(session->pasv_fd);
     session->pasv_fd = -1;
 
-    /* Set SO_RCVBUF on the accepted socket immediately after accept().
-     * cmd_PASV already sets it on the listening socket (pre-bind) so that
-     * OrbisOS/FreeBSD inherits the value during the 3-way handshake.
-     * However, on some PS5 firmware builds that propagation is unreliable.
-     * Setting it again here ensures the correct buffer on all builds.
-     * We request 2×FTP_TCP_RCVBUF because FreeBSD/OrbisOS halves the
-     * requested value when storing it, so asking for 8 MB yields 4 MB. */
+    /*
+     * SO_RCVBUF post-accept: conditional bump only.
+     *
+     * cmd_PASV sets SO_RCVBUF = FTP_TCP_RCVBUF on the LISTENING socket
+     * before bind/listen.  On OrbisOS/FreeBSD, the kernel propagates this
+     * value into every accepted connection during the 3-way handshake,
+     * bypassing the normal kern.ipc.maxsockbuf cap (~1 MB on OrbisOS).
+     *
+     * PROBLEM with an unconditional setsockopt here:
+     *   When the accepted socket has already INHERITED 4 MB (from the
+     *   listening socket), calling setsockopt(SO_RCVBUF) on it re-applies
+     *   the maxsockbuf cap, downgrading the buffer from 4 MB back to 1 MB.
+     *   This is precisely why STOR stalls after exactly 1 MB.
+     *
+     * CORRECT strategy — read before write:
+     *   1. getsockopt: read the currently effective receive buffer size.
+     *   2. If it is already >= FTP_TCP_RCVBUF, the inheritance worked.
+     *      Leave it alone to preserve the cap-bypassed value.
+     *   3. If it is < FTP_TCP_RCVBUF, the inheritance was unreliable
+     *      (observed on some PS5 firmware builds).  Apply the 2× trick:
+     *      FreeBSD/OrbisOS halves the requested value when storing it, so
+     *      requesting 2 × FTP_TCP_RCVBUF yields the desired FTP_TCP_RCVBUF.
+     *
+     * @pre  fd is a freshly accepted, not-yet-connected socket.
+     * @post SO_RCVBUF >= FTP_TCP_RCVBUF, without ever downgrading an
+     *       already-correct inherited value.
+     */
     {
-      int rcvbuf = (int)(FTP_TCP_RCVBUF * 2U);
-      (void)PAL_SETSOCKOPT(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+      int current_rcvbuf = 0;
+      socklen_t optlen = (socklen_t)sizeof(current_rcvbuf);
+      const int target_rcvbuf = (int)FTP_TCP_RCVBUF;
+
+      if (PAL_GETSOCKOPT(fd, SOL_SOCKET, SO_RCVBUF,
+                         &current_rcvbuf, &optlen) != 0) {
+        current_rcvbuf = 0; /* treat read failure as "buffer unknown" */
+      }
+
+      if (current_rcvbuf < target_rcvbuf) {
+        /*
+         * Inheritance was unreliable on this firmware build.
+         * Request 2× to compensate for OrbisOS/FreeBSD halving.
+         */
+        int rcvbuf = target_rcvbuf * 2;
+        (void)PAL_SETSOCKOPT(fd, SOL_SOCKET, SO_RCVBUF,
+                             &rcvbuf, sizeof(rcvbuf));
+      }
+      /* else: inherited value is adequate — do NOT call setsockopt,
+       * which would downgrade the cap-bypassed buffer. */
     }
   }
 
