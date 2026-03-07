@@ -57,9 +57,16 @@ SOFTWARE.
  *
  *   POSIX:   256 KB is a safe, portable default.
  */
-#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+#if defined(PLATFORM_PS5) || defined(PS5)
 #define PAL_FILE_WRITE_CHUNK_MAX                                               \
-  1048576U /* 1 MB — match FTP_STREAM_BUFFER_SIZE */
+  131072U  /* 128 KB — keeps writer latency <5ms per chunk so the             \
+              double-buffer producer never stalls long enough to drain the     \
+              kernel recv buffer and trigger the client 20s inactivity timer   */
+#elif defined(PLATFORM_PS4) || defined(PS4)
+#define PAL_FILE_WRITE_CHUNK_MAX                                               \
+  65536U   /* 64 KB — PS4 PFS crypto is slow (~2ms/chunk); keep writes short
+              so the double-buffer producer is never stalled long enough for
+              the FileZilla 20-second client idle timeout to fire            */
 #else
 #define PAL_FILE_WRITE_CHUNK_MAX                                               \
   262144U /* 256 KB — safe POSIX default         */
@@ -207,8 +214,11 @@ ssize_t pal_sendfile(int sock_fd, int file_fd, off_t *offset, size_t count) {
  * FILE OPERATIONS
  *===========================================================================*/
 
-static ftp_error_t pal_file_copy_atomic(const char *src_path,
-                                        const char *dst_path) {
+static ftp_error_t pal_file_copy_atomic_ex(const char *src_path,
+                                           const char *dst_path,
+                                           pal_copy_progress_cb_t cb,
+                                           void *user_data,
+                                           uint64_t *cumulative) {
   if ((src_path == NULL) || (dst_path == NULL)) {
     return FTP_ERR_INVALID_PARAM;
   }
@@ -269,6 +279,13 @@ static ftp_error_t pal_file_copy_atomic(const char *src_path,
   }
 
   src_fd = open(src_path, O_RDONLY);
+
+  /* Sequential read-ahead hint — Linux only (PS4/PS5 lack posix_fadvise) */
+#if defined(POSIX_FADV_SEQUENTIAL) && defined(PLATFORM_LINUX)
+  if (src_fd >= 0) {
+    (void)posix_fadvise(src_fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+  }
+#endif
   if (src_fd < 0) {
     int e = errno;
     {
@@ -344,6 +361,14 @@ static ftp_error_t pal_file_copy_atomic(const char *src_path,
         }
         out_err = FTP_ERR_FILE_WRITE;
         goto cleanup;
+      }
+      /* Report progress to caller; check for cancellation */
+      if ((cb != NULL) && (cumulative != NULL)) {
+        *cumulative += (uint64_t)r;
+        if (cb(*cumulative, user_data) < 0) {
+          out_err = FTP_ERR_UNKNOWN; /* cancelled */
+          goto cleanup;
+        }
       }
       continue;
     }
@@ -450,7 +475,13 @@ int pal_file_open(const char *path, int flags, mode_t mode) {
    */
 #if defined(PLATFORM_PS4)
 #ifdef F_NOCACHE
-  (void)fcntl(fd, F_NOCACHE, 1);
+  /* F_NOCACHE is only safe for read-only fds on PFS-encrypted partitions.
+   * For write fds, OrbisOS PFS enforces alignment constraints that cause
+   * write() to fail with EINVAL after ~512 KB on /data/pkg/ and similar
+   * encrypted mounts.  GoldHEN/ftpsrv never set F_NOCACHE; skip it. */
+  if ((flags & O_WRONLY) == 0 && (flags & O_RDWR) == 0) {
+    (void)fcntl(fd, F_NOCACHE, 1);
+  }
 #endif
 #endif /* PLATFORM_PS4 only — explicitly excluded from PS5 */
 
@@ -797,8 +828,11 @@ static ftp_error_t pal_dir_remove_recursive(const char *path, unsigned depth) {
  * On failure the partial destination is cleaned up and the
  * source is left intact so the user can retry.
  */
-static ftp_error_t pal_copy_cross_device_r(const char *src, const char *dst,
-                                           unsigned depth, int keep_src) {
+static ftp_error_t pal_copy_cross_device_r_ex(const char *src, const char *dst,
+                                              unsigned depth, int keep_src,
+                                              pal_copy_progress_cb_t cb,
+                                              void *user_data,
+                                              uint64_t *cumulative) {
   if ((src == NULL) || (dst == NULL)) {
     return FTP_ERR_INVALID_PARAM;
   }
@@ -835,7 +869,8 @@ static ftp_error_t pal_copy_cross_device_r(const char *src, const char *dst,
    * Leaf: regular file -> atomic copy + delete source     *
    *-------------------------------------------------------*/
   if (S_ISREG(src_st.st_mode)) {
-    ftp_error_t err = pal_file_copy_atomic(src, dst);
+    ftp_error_t err =
+        pal_file_copy_atomic_ex(src, dst, cb, user_data, cumulative);
     if (err != FTP_OK) {
       {
         char msg[256];
@@ -935,7 +970,8 @@ static ftp_error_t pal_copy_cross_device_r(const char *src, const char *dst,
       break;
     }
 
-    err = pal_copy_cross_device_r(src_child, dst_child, depth + 1U, keep_src);
+    err = pal_copy_cross_device_r_ex(src_child, dst_child, depth + 1U, keep_src,
+                                     cb, user_data, cumulative);
     if (err != FTP_OK) {
       break;
     }
@@ -1008,7 +1044,16 @@ ftp_error_t pal_file_rename(const char *old_path, const char *new_path) {
  */
 ftp_error_t pal_file_copy_recursive(const char *src, const char *dst,
                                     int keep_src) {
-  return pal_copy_cross_device_r(src, dst, 0U, keep_src);
+  uint64_t cum = 0U;
+  return pal_copy_cross_device_r_ex(src, dst, 0U, keep_src, NULL, NULL, &cum);
+}
+
+ftp_error_t pal_file_copy_recursive_ex(const char *src, const char *dst,
+                                       int keep_src, pal_copy_progress_cb_t cb,
+                                       void *user_data) {
+  uint64_t cum = 0U;
+  return pal_copy_cross_device_r_ex(src, dst, 0U, keep_src, cb, user_data,
+                                    &cum);
 }
 
 /*===========================================================================*

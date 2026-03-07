@@ -57,7 +57,7 @@ SOFTWARE.
  * @note Using 2122 as default on PS4/PS5 because 2121 may be occupied
  */
 #ifndef FTP_DEFAULT_PORT
-#if defined(PS4) || defined(PS5)
+#if defined(PS4) || defined(PS5) || defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
 #define FTP_DEFAULT_PORT 2122U
 #else
 #define FTP_DEFAULT_PORT 2121U
@@ -65,9 +65,9 @@ SOFTWARE.
 #endif
 
 #ifndef FTP_STREAM_BUFFER_SIZE
-#if defined(PS5)
+#if defined(PS5) || defined(PLATFORM_PS5)
 #define FTP_STREAM_BUFFER_SIZE 1048576U /* 1 MB  — PS5 has plenty of RAM  */
-#elif defined(PS4)
+#elif defined(PS4) || defined(PLATFORM_PS4)
 #define FTP_STREAM_BUFFER_SIZE 262144U /* 256 KB                         */
 #else
 #define FTP_STREAM_BUFFER_SIZE 524288U /* 512 KB — saturates GbE links   */
@@ -92,7 +92,7 @@ SOFTWARE.
  * @note Client disconnected after this period of inactivity
  */
 #ifndef FTP_SESSION_TIMEOUT
-#if defined(PS5) || defined(PS4)
+#if defined(PS5) || defined(PS4) || defined(PLATFORM_PS5) || defined(PLATFORM_PS4)
 #define FTP_SESSION_TIMEOUT 7200U
 #else
 #define FTP_SESSION_TIMEOUT 300U
@@ -147,9 +147,9 @@ SOFTWARE.
  * @note Larger buffers provide diminishing returns
  */
 #ifndef FTP_BUFFER_SIZE
-#if defined(PS5)
+#if defined(PS5) || defined(PLATFORM_PS5)
 #define FTP_BUFFER_SIZE 1048576U /* 1 MB    */
-#elif defined(PS4)
+#elif defined(PS4) || defined(PLATFORM_PS4)
 #define FTP_BUFFER_SIZE 262144U /* 256 KB  */
 #else
 #define FTP_BUFFER_SIZE 524288U /* 512 KB  */
@@ -184,7 +184,7 @@ SOFTWARE.
  * PATH LIMITS (Platform-dependent)
  *===========================================================================*/
 
-#if defined(PS4) || defined(PS5)
+#if defined(PS4) || defined(PS5) || defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
 /**
  * PlayStation maximum path length
  * @note PS4/PS5 use custom BSD with 1024-byte limit
@@ -343,14 +343,17 @@ SOFTWARE.
 /**
  * TCP receive buffer size in bytes
  *
- *   PS5: PFS-encrypted writes take ~40ms per 1MB chunk.
- *        During each write() the sender fills SO_RCVBUF.
- *        At 112 MB/s, 1 MB fills in ~9ms → TCP zero window.
- *        4 MB gives 36ms of runway → no window stalls.
+ *   PS4/PS5: PFS-encrypted writes stall the recv thread while the
+ *        double-buffer writer drains each chunk through PFS crypto.
+ *        At typical LAN speeds, 1 MB of recv buffer fills in ~10ms
+ *        → TCP zero window → sender stalls → FileZilla 20s timeout.
+ *        4 MB gives enough runway to cover the write latency.
  */
 #ifndef FTP_TCP_RCVBUF
 #if defined(PS5) || defined(PLATFORM_PS5)
 #define FTP_TCP_RCVBUF 4194304U /* 4 MB — absorb PFS write latency */
+#elif defined(PS4) || defined(PLATFORM_PS4)
+#define FTP_TCP_RCVBUF 4194304U /* 4 MB — same reason: PFS crypto stalls recv */
 #else
 #define FTP_TCP_RCVBUF 1048576U /* 1 MB — generic default          */
 #endif

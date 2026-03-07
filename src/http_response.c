@@ -30,6 +30,7 @@ SOFTWARE.
 #include "http_config.h"
 #include <dirent.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -142,6 +143,13 @@ void http_response_destroy(http_response_t *resp) {
     closedir((DIR *)resp->stream_dir);
     resp->stream_dir = NULL;
   }
+  if (resp->mem_body_owned && resp->mem_body != NULL) {
+    void *tmp;
+    memcpy(&tmp, &resp->mem_body, sizeof(tmp));
+    free(tmp);
+    resp->mem_body = NULL;
+    resp->mem_body_owned = 0;
+  }
 
   if ((resp >= &g_response_pool[0]) &&
       (resp < &g_response_pool[HTTP_MAX_CONNECTIONS])) {
@@ -231,6 +239,42 @@ int http_response_set_body(http_response_t *resp, const void *body,
   memcpy(resp->data + resp->used, body, length);
   resp->used += length;
 
+  return 0;
+}
+
+int http_response_set_body_owned(http_response_t *resp, void *body,
+                                 size_t length) {
+  if (resp == NULL || body == NULL || length == 0U) {
+    return -1;
+  }
+  if (resp->mem_body != NULL) {
+    return -1;
+  }
+
+  char len_str[32];
+  int len_n = snprintf(len_str, sizeof(len_str), "%zu", length);
+  if (len_n < 0 || (size_t)len_n >= sizeof(len_str)) {
+    return -1;
+  }
+
+  int hdr_needed = snprintf(NULL, 0, "Content-Length: %s\r\n", len_str);
+  if (hdr_needed < 0) {
+    return -1;
+  }
+  if (ensure_space(resp, (size_t)hdr_needed + 2U) < 0) {
+    return -1;
+  }
+  if (http_response_add_header(resp, "Content-Length", len_str) != 0) {
+    return -1;
+  }
+  /* Blank line terminating headers */
+  resp->data[resp->used++] = '\r';
+  resp->data[resp->used++] = '\n';
+
+  resp->mem_body   = body;
+  resp->mem_length = length;
+  resp->mem_sent   = 0U;
+  resp->mem_body_owned = 1;
   return 0;
 }
 

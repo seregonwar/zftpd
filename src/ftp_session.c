@@ -365,22 +365,29 @@ static int wait_fd_ready(int fd, int for_write, uint32_t timeout_ms) {
     return -1;
   }
 
-  struct timeval tv;
-  tv.tv_sec = (time_t)(timeout_ms / 1000U);
-  tv.tv_usec = (suseconds_t)((timeout_ms % 1000U) * 1000U);
-
   fd_set rfds;
   fd_set wfds;
-  FD_ZERO(&rfds);
-  FD_ZERO(&wfds);
-
-  if (for_write != 0) {
-    FD_SET(fd, &wfds);
-  } else {
-    FD_SET(fd, &rfds);
-  }
 
   while (1) {
+    /* Re-initialize fd_set and tv on every iteration.
+     * POSIX select() modifies both: fd_sets are undefined after return,
+     * and on Linux tv is decremented in place.  Failing to reinitialize
+     * them on EINTR retry causes select() to see an empty set and return
+     * 0 immediately, which is misinterpreted as a timeout — closing the
+     * passive listener before the client's TCP SYN arrives. */
+    struct timeval tv;
+    tv.tv_sec = (time_t)(timeout_ms / 1000U);
+    tv.tv_usec = (suseconds_t)((timeout_ms % 1000U) * 1000U);
+
+    FD_ZERO(&rfds);
+    FD_ZERO(&wfds);
+
+    if (for_write != 0) {
+      FD_SET(fd, &wfds);
+    } else {
+      FD_SET(fd, &rfds);
+    }
+
     int rc = select(fd + 1, (for_write != 0) ? NULL : &rfds,
                     (for_write != 0) ? &wfds : NULL, NULL, &tv);
     if (rc == 0) {
@@ -507,6 +514,14 @@ ftp_error_t ftp_session_open_data_connection(ftp_session_t *session) {
     tv.tv_usec = 0;
     (void)PAL_SETSOCKOPT(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
+    /* Set SO_RCVBUF before connect() — pre-connect avoids the
+     * post-connect kern.ipc.maxsockbuf cap on OrbisOS/FreeBSD.
+     * (Passive mode handles this on the listening socket in cmd_PASV.) */
+    {
+      int rcvbuf = (int)FTP_TCP_RCVBUF;
+      (void)PAL_SETSOCKOPT(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+    }
+
     {
       char dbg[128];
       snprintf(dbg, sizeof(dbg), "[DBG] ACTIVE connect to %s:%u ...",
@@ -555,6 +570,18 @@ ftp_error_t ftp_session_open_data_connection(ftp_session_t *session) {
     /* Close passive listener (one connection only) */
     PAL_CLOSE(session->pasv_fd);
     session->pasv_fd = -1;
+
+    /* Set SO_RCVBUF on the accepted socket immediately after accept().
+     * cmd_PASV already sets it on the listening socket (pre-bind) so that
+     * OrbisOS/FreeBSD inherits the value during the 3-way handshake.
+     * However, on some PS5 firmware builds that propagation is unreliable.
+     * Setting it again here ensures the correct buffer on all builds.
+     * We request 2×FTP_TCP_RCVBUF because FreeBSD/OrbisOS halves the
+     * requested value when storing it, so asking for 8 MB yields 4 MB. */
+    {
+      int rcvbuf = (int)(FTP_TCP_RCVBUF * 2U);
+      (void)PAL_SETSOCKOPT(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+    }
   }
 
   /* Configure data socket for bulk transfer

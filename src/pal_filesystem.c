@@ -155,12 +155,17 @@ ftp_error_t vfs_open(vfs_node_t *node, const char *path)
              *   - msdosfs : USB drives formatted as FAT32
              *   - nullfs  : bind mount — inherits origin pager; unsafe if
              *               origin is exFAT/msdosfs (/mnt/usb* game mounts)
+             *   - pfsmnt  : PlayStation FS mount (/user/av_contents, etc.)
+             *               sendfile() on pfsmnt vnodes sends corrupt data
+             *   - pfs     : raw PFS — same broken pager ops as pfsmnt
              *
              * Add new entries here if additional filesystems are identified.
              */
             if ((strcmp(sfs.f_fstypename, "exfatfs") == 0) ||
                 (strcmp(sfs.f_fstypename, "msdosfs") == 0) ||
-                (strcmp(sfs.f_fstypename, "nullfs")  == 0)) {
+                (strcmp(sfs.f_fstypename,  "nullfs") == 0) ||
+                (strcmp(sfs.f_fstypename, "pfsmnt")  == 0) ||
+                (strcmp(sfs.f_fstypename,    "pfs")  == 0)) {
                 sendfile_safe = 0;
             }
         }

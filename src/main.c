@@ -225,8 +225,8 @@ static void install_signal_handlers(void) {
 #ifdef PLATFORM_PS4
 
 int main(void) {
-  printf("[PS4 FTP] Version " RELEASE_VERSION "\n");
-  printf("[PS4 FTP] Initializing...\n");
+  printf("[zftpd - ps4] Version " RELEASE_VERSION "\n");
+  printf("[zftpd - ps4] Initializing...\n");
 
   (void)pal_notification_init();
 
@@ -264,10 +264,10 @@ int main(void) {
                                               root_path, &selected_port);
 
   if (err != FTP_OK) {
-    printf("[PS4 FTP] Initialization failed: %d\n", (int)err);
+    printf("[zftpd - ps4] Initialization failed: %d\n", (int)err);
     if (err == FTP_ERR_SOCKET_BIND) {
-      printf("[PS4 FTP] Bind failed: %s\n", strerror(errno));
-      printf("[PS4 FTP] Hint: port busy or invalid bind_ip.\n");
+      printf("[zftpd - ps4] Bind failed: %s\n", strerror(errno));
+      printf("[zftpd - ps4] Hint: port busy or invalid bind_ip.\n");
     }
     {
       char msg[160];
@@ -286,19 +286,19 @@ int main(void) {
     pal_notification_send(msg);
   }
 
-  printf("[PS4 FTP] Listening on %s:%u\n", display_ip, selected_port);
-  printf("[PS4 FTP] Root: %s\n", root_path);
+  printf("[zftpd - ps4] Listening on %s:%u\n", display_ip, selected_port);
+  printf("[zftpd - ps4] Root: %s\n", root_path);
 
   /* Start server */
   err = ftp_server_start(&g_server_ctx);
 
   if (err != FTP_OK) {
-    printf("[PS4 FTP] Failed to start: %d\n", (int)err);
+    printf("[zftpd - ps4] Failed to start: %d\n", (int)err);
     ftp_server_cleanup(&g_server_ctx);
     return -1;
   }
 
-  printf("[PS4 FTP] Server started successfully\n");
+  printf("[zftpd - ps4] Server started successfully\n");
 
   {
     char notify_msg[128];
@@ -349,7 +349,7 @@ int main(void) {
   }
 
   /* Shutdown */
-  printf("[PS4 FTP] Shutting down...\n");
+  printf("[zftpd - ps4] Shutting down...\n");
 
 #if ENABLE_ZHTTPD
   if (g_event_loop != NULL) {
@@ -370,7 +370,7 @@ int main(void) {
   ftp_server_cleanup(&g_server_ctx);
   pal_notification_shutdown();
 
-  printf("[PS4 FTP] Stopped\n");
+  printf("[zftpd - ps4] Stopped\n");
 
   return 0;
 }
@@ -435,8 +435,8 @@ static void ps5_jailbreak(void) {
  * @brief PlayStation 5 entry point
  */
 int main(void) {
-  printf("[PS5 FTP] Version " RELEASE_VERSION "\n");
-  printf("[PS5 FTP] Initializing...\n");
+  printf("[zftpd - ps5] Version " RELEASE_VERSION "\n");
+  printf("[zftpd - ps5] Initializing...\n");
 
   (void)syscall(SYS_thr_set_name, -1, "zftpd.elf");
   signal(SIGPIPE, SIG_IGN);
@@ -475,7 +475,7 @@ int main(void) {
                                               &selected_port);
 
   if (err != FTP_OK) {
-    fprintf(stderr, "[PS5 FTP] Init failed: %d\n", (int)err);
+    fprintf(stderr, "[zftpd - ps5] Init failed: %d\n", (int)err);
     {
       char msg[160];
       (void)snprintf(msg, sizeof(msg), "zftpd v%s: init failed (%d)",
@@ -493,17 +493,17 @@ int main(void) {
     pal_notification_send(msg);
   }
 
-  printf("[PS5 FTP] Listening on %s:%u\n", ip_address, selected_port);
+  printf("[zftpd - ps5] Listening on %s:%u\n", ip_address, selected_port);
 
   err = ftp_server_start(&g_server_ctx);
 
   if (err != FTP_OK) {
-    fprintf(stderr, "[PS5 FTP] Start failed: %d\n", (int)err);
+    fprintf(stderr, "[zftpd - ps5] Start failed: %d\n", (int)err);
     ftp_server_cleanup(&g_server_ctx);
     return EXIT_FAILURE;
   }
 
-  printf("[PS5 FTP] Server running. Press Ctrl+C to stop.\n");
+  printf("[zftpd - ps5] Server running. Press Ctrl+C to stop.\n");
 
   {
     char notify_msg[128];
@@ -555,12 +555,12 @@ int main(void) {
     if ((counter++ % 60) == 0) { /* Every 60 seconds */
       uint32_t active = ftp_server_get_active_sessions(&g_server_ctx);
       if (active > 0U) {
-        printf("[PS5 FTP] Active sessions: %u\n", active);
+        printf("[zftpd - ps5] Active sessions: %u\n", active);
       }
     }
   }
 
-  printf("\n[PS5 FTP] Shutting down...\n");
+  printf("\n[zftpd - ps5] Shutting down...\n");
 
 #if ENABLE_ZHTTPD
   if (g_event_loop != NULL) {
@@ -581,7 +581,7 @@ int main(void) {
   ftp_server_cleanup(&g_server_ctx);
   pal_notification_shutdown();
 
-  printf("[PS5 FTP] Goodbye!\n");
+  printf("[zftpd - ps5] Goodbye!\n");
 
   return EXIT_SUCCESS;
 }

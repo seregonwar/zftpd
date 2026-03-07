@@ -58,8 +58,8 @@ SOFTWARE.
 #define HTTP_HEADER_MAX_COUNT 32
 #define HTTP_HEADER_LINE_MAX 1024
 
-/* File transfer */
-#define HTTP_SENDFILE_CHUNK_SIZE 65536
+/* File transfer — 1 MB chunks reduce syscall overhead for large downloads */
+#define HTTP_SENDFILE_CHUNK_SIZE (1024 * 1024)
 
 /* Thread stack size (bytes) */
 #ifndef HTTP_THREAD_STACK_SIZE

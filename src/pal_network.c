@@ -277,15 +277,27 @@ ftp_error_t pal_socket_configure_data(socket_t fd) {
     (void)ret;
   }
 
-  /*----------- Send / Receive buffers ---------------------*/
+  /*----------- Send buffer --------------------------------*/
+  /*
+   * SO_SNDBUF: safe to set post-connect (only affects outbound data).
+   *
+   * SO_RCVBUF is intentionally NOT set here.
+   *
+   * Passive mode (PASV): SO_RCVBUF=FTP_TCP_RCVBUF is set on the listening
+   * socket before bind/listen in cmd_PASV.  On OrbisOS/FreeBSD the kernel
+   * propagates that value into every accepted connection during the 3-way
+   * handshake.  Calling setsockopt(SO_RCVBUF) on the already-accepted socket
+   * here would cap the buffer to kern.ipc.maxsockbuf (~1 MB on OrbisOS),
+   * DOWNGRADING the 4 MB that was correctly inherited — which is exactly
+   * why STOR transfers stall after exactly 1 MB.
+   *
+   * Active mode (PORT): SO_RCVBUF is set before connect() in
+   * ftp_session_open_data_connection(), where the pre-connect path
+   * is not subject to the post-connect cap.
+   */
   {
     int sndbuf = (int)FTP_TCP_SNDBUF;
     ret = PAL_SETSOCKOPT(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
-    (void)ret;
-  }
-  {
-    int rcvbuf = (int)FTP_TCP_RCVBUF;
-    ret = PAL_SETSOCKOPT(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
     (void)ret;
   }
 

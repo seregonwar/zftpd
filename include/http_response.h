@@ -75,6 +75,7 @@ typedef struct {
   const void *mem_body;   /**< Pointer to body bytes (NULL = not used) */
   size_t mem_length;      /**< Total bytes to send                    */
   size_t mem_sent;        /**< Bytes already sent                     */
+  int mem_body_owned;     /**< 1 = malloc'd, destroy() must free it   */
 
   /* In-memory segmented body streaming (for injected HTML) */
   const void *mem_segs[3]; /**< Segment pointers                       */
@@ -103,6 +104,8 @@ int http_response_add_header(http_response_t *resp, const char *name,
                              const char *value);
 int http_response_set_body(http_response_t *resp, const void *body,
                            size_t length);
+int http_response_set_body_owned(http_response_t *resp, void *body,
+                                 size_t length);
 int http_response_set_body_ref(http_response_t *resp, const void *body,
                                size_t length);
 int http_response_set_body_splice(http_response_t *resp, const void *prefix,

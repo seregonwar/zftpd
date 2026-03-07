@@ -42,6 +42,7 @@ SOFTWARE.
 #include <fcntl.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,6 +59,10 @@ SOFTWARE.
     defined(PLATFORM_PS5) || defined(PS4) || defined(PS5) ||                   \
     defined(__APPLE__)
 #include <sys/sysctl.h>
+#endif
+#if defined(PLATFORM_MACOS) || defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/vm_statistics.h>
 #endif
 #include <unistd.h>
 
@@ -172,9 +177,20 @@ static int http_validate_and_confine(const char *input, const char *root,
 static http_response_t *api_list(const http_request_t *request);
 static http_response_t *api_download(const http_request_t *request);
 static http_response_t *api_stats(const http_request_t *request);
+static http_response_t *api_stats_ram(const http_request_t *request);
+static http_response_t *api_stats_system(const http_request_t *request);
+static http_response_t *api_disk_info(const http_request_t *request);
+static http_response_t *api_disk_tree(const http_request_t *request);
+static http_response_t *api_processes(const http_request_t *request);
+static http_response_t *api_process_kill(const http_request_t *request);
 static http_response_t *serve_static(const http_request_t *request);
 #if ENABLE_WEB_UPLOAD
 static http_response_t *api_create_file(const http_request_t *request);
+static http_response_t *api_delete(const http_request_t *request);
+static http_response_t *api_rename(const http_request_t *request);
+static http_response_t *api_copy(const http_request_t *request);
+static http_response_t *api_copy_progress(const http_request_t *request);
+static http_response_t *api_copy_cancel(const http_request_t *request);
 #endif
 static http_response_t *error_json(http_status_t code, const char *message);
 
@@ -380,8 +396,17 @@ static int get_best_disk_stats(const char *hint_path, const char **out_path,
     return -1;
   }
 
+  /* Ordered: real user data mounts first, then root fallback.
+   * macOS home and /Volumes entries come before PS4/PS5 paths. */
   const char *candidates[] = {
-      "/user", "/data", "/system_data", "/mnt/usb0", "/mnt/usb1", "/", NULL,
+#if defined(PLATFORM_MACOS) || defined(__APPLE__)
+      "/Users", "/",
+#elif defined(PLATFORM_PS4) || defined(PLATFORM_PS5) || defined(PS4) || defined(PS5)
+      "/user", "/data", "/system_data", "/mnt/usb0", "/mnt/usb1", "/",
+#else
+      "/home", "/",
+#endif
+      NULL,
   };
 
   const char *best = NULL;
@@ -477,8 +502,8 @@ static int get_boot_epoch_seconds(uint64_t *out_epoch) {
   uint64_t up_u = (uint64_t)info.uptime;
   *out_epoch = (now_u >= up_u) ? (now_u - up_u) : 0U;
   return 0;
-#elif defined(PLATFORM_MACOS) || defined(PLATFORM_PS4) ||                      \
-    defined(PLATFORM_PS5) || defined(PS4) || defined(PS5)
+#elif defined(PLATFORM_MACOS) || defined(__APPLE__) || defined(PLATFORM_PS4) \
+    || defined(PLATFORM_PS5) || defined(PS4) || defined(PS5)
   struct timeval bt;
   size_t sz = sizeof(bt);
   if (sysctlbyname("kern.boottime", &bt, &sz, NULL, 0) != 0) {
@@ -836,15 +861,66 @@ http_response_t *http_api_handle(const http_request_t *request) {
     return api_download(request);
   }
 
-  /*  /api/stats?path=...  */
+  /*  /api/stats/ram  */
+  if (strncmp(request->uri, "/api/stats/ram", 14) == 0) {
+    return api_stats_ram(request);
+  }
+
+  /*  /api/stats/system  */
+  if (strncmp(request->uri, "/api/stats/system", 17) == 0) {
+    return api_stats_system(request);
+  }
+
+  /*  /api/stats?path=... (legacy widget)  */
   if (strncmp(request->uri, "/api/stats", 10) == 0) {
     return api_stats(request);
+  }
+
+  /*  /api/disk/info  */
+  if (strncmp(request->uri, "/api/disk/info", 14) == 0) {
+    return api_disk_info(request);
+  }
+
+  /*  /api/disk/tree?path=...  */
+  if (strncmp(request->uri, "/api/disk/tree", 14) == 0) {
+    return api_disk_tree(request);
+  }
+
+  /*  POST /api/process/kill  */
+  if (strncmp(request->uri, "/api/process/kill", 17) == 0) {
+    return api_process_kill(request);
+  }
+
+  /*  GET /api/processes  */
+  if (strncmp(request->uri, "/api/processes", 14) == 0) {
+    return api_processes(request);
   }
 
 #if ENABLE_WEB_UPLOAD
   /*  POST /api/create_file?path=...&name=...  */
   if (strncmp(request->uri, "/api/create_file", 16) == 0) {
     return api_create_file(request);
+  }
+
+  /*  POST /api/delete?path=...  */
+  if (strncmp(request->uri, "/api/delete", 11) == 0) {
+    return api_delete(request);
+  }
+
+  /*  POST /api/rename?path=...&name=...  */
+  if (strncmp(request->uri, "/api/rename", 11) == 0) {
+    return api_rename(request);
+  }
+
+  /*  POST /api/copy?src=...&dst=...  */
+  if (strncmp(request->uri, "/api/copy_progress", 18) == 0) {
+    return api_copy_progress(request);
+  }
+  if (strncmp(request->uri, "/api/copy_cancel", 16) == 0) {
+    return api_copy_cancel(request);
+  }
+  if (strncmp(request->uri, "/api/copy", 9) == 0) {
+    return api_copy(request);
   }
 #endif
 
@@ -1171,7 +1247,1038 @@ static http_response_t *api_create_file(const http_request_t *request) {
   http_response_set_body(resp, body, (size_t)len);
   return resp;
 }
+
+/*===========================================================================*
+ * POST /api/delete — Delete file or empty directory
+ *
+ *   ┌─────────────────────────────────────────────┐
+ *   │  POST /api/delete?path=/some/file.txt       │
+ *   │                                             │
+ *   │  file   -> pal_file_delete(path)            │
+ *   │  dir    -> pal_dir_remove(path)  (empty)    │
+ *   │  result -> {"ok":true}                      │
+ *   └─────────────────────────────────────────────┘
+ *===========================================================================*/
+
+static http_response_t *api_delete(const http_request_t *request) {
+  if (request->method != HTTP_METHOD_POST) {
+    return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED,
+                      "Use POST for this endpoint");
+  }
+
+  const char *query = strchr(request->uri, '?');
+  if (query == NULL) {
+    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing query string");
+  }
+
+  char path[1024] = "";
+  if (parse_path_param(query, path, sizeof(path)) != 0) {
+    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing or invalid path");
+  }
+
+  char safe[FTP_PATH_MAX];
+  if (!validate_path(path, safe, sizeof(safe))) {
+    return error_json(HTTP_STATUS_403_FORBIDDEN, "Forbidden path");
+  }
+
+  /* Refuse to delete the root itself */
+  if (strcmp(safe, g_http_root) == 0) {
+    return error_json(HTTP_STATUS_403_FORBIDDEN, "Cannot delete root");
+  }
+
+  struct stat st;
+  if (stat(safe, &st) != 0) {
+    return error_json(HTTP_STATUS_404_NOT_FOUND, "Path not found");
+  }
+
+  ftp_error_t rc;
+  if (S_ISDIR(st.st_mode)) {
+    rc = pal_dir_remove(safe);
+  } else {
+    rc = pal_file_delete(safe);
+  }
+
+  if (rc != FTP_OK) {
+    return error_json(HTTP_STATUS_500_INTERNAL_ERROR,
+                      S_ISDIR(st.st_mode)
+                          ? "Failed to remove directory (not empty?)"
+                          : "Failed to delete file");
+  }
+
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  http_response_add_header(resp, "Content-Type", "application/json");
+  http_response_add_header(resp, "Access-Control-Allow-Origin", "*");
+  const char *body = "{\"ok\":true}";
+  http_response_set_body(resp, body, strlen(body));
+  return resp;
+}
+
+/*===========================================================================*
+ * POST /api/rename — Rename file or directory in-place
+ *
+ *   ┌─────────────────────────────────────────────────┐
+ *   │  POST /api/rename?path=/dir/old.txt&name=new    │
+ *   │                                                 │
+ *   │  old  = validate_path(path)                     │
+ *   │  new  = parent(old) + '/' + name                │
+ *   │  pal_file_rename(old, new)                      │
+ *   │  result -> {"ok":true,"path":"/dir/new"}        │
+ *   └─────────────────────────────────────────────────┘
+ *===========================================================================*/
+
+static http_response_t *api_rename(const http_request_t *request) {
+  if (request->method != HTTP_METHOD_POST) {
+    return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED,
+                      "Use POST for this endpoint");
+  }
+
+  const char *query = strchr(request->uri, '?');
+  if (query == NULL) {
+    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing query string");
+  }
+
+  char path[1024] = "";
+  char name[256];
+  if (parse_path_param(query, path, sizeof(path)) != 0) {
+    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing or invalid path");
+  }
+  if (parse_name_param(query, name, sizeof(name)) != 0) {
+    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing or invalid name");
+  }
+  if (!is_safe_filename(name)) {
+    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Invalid file name");
+  }
+
+  /* Validate old path */
+  char safe_old[FTP_PATH_MAX];
+  if (!validate_path(path, safe_old, sizeof(safe_old))) {
+    return error_json(HTTP_STATUS_403_FORBIDDEN, "Forbidden path");
+  }
+
+  /* Check old exists */
+  if (pal_path_exists(safe_old) != 1) {
+    return error_json(HTTP_STATUS_404_NOT_FOUND, "Path not found");
+  }
+
+  /*
+   * Build new path:  parent(safe_old) + '/' + name
+   *
+   *   /data/files/old.txt  ->  /data/files/  (parent)
+   *   parent + "new.txt"   ->  /data/files/new.txt
+   */
+  char new_path[FTP_PATH_MAX];
+  const char *last_slash = strrchr(safe_old, '/');
+  if (last_slash == NULL) {
+    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Internal path error");
+  }
+  size_t parent_len = (size_t)(last_slash - safe_old);
+  if (parent_len == 0U) {
+    /* file is directly under root "/" */
+    (void)snprintf(new_path, sizeof(new_path), "/%s", name);
+  } else {
+    (void)snprintf(new_path, sizeof(new_path), "%.*s/%s", (int)parent_len,
+                   safe_old, name);
+  }
+
+  /* Validate new path stays within root */
+  char safe_new[FTP_PATH_MAX];
+  if (!validate_path(new_path, safe_new, sizeof(safe_new))) {
+    return error_json(HTTP_STATUS_403_FORBIDDEN, "Destination forbidden");
+  }
+
+  ftp_error_t rc = pal_file_rename(safe_old, safe_new);
+  if (rc != FTP_OK) {
+    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Rename failed");
+  }
+
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  http_response_add_header(resp, "Content-Type", "application/json");
+  http_response_add_header(resp, "Access-Control-Allow-Origin", "*");
+
+  char body[512];
+  int len =
+      snprintf(body, sizeof(body), "{\"ok\":true,\"path\":\"%s\"}", new_path);
+  http_response_set_body(resp, body, (size_t)len);
+  return resp;
+}
+
+/*===========================================================================*
+ * COPY PROGRESS TRACKING  (background pthread)
+ *
+ *   ┌──────────────────────────────────────────────────────┐
+ *   │           Browser            Server                  │
+ *   │    POST /api/copy ──────────►  spawn pthread         │
+ *   │    ◄── {ok:true,async:true}       │                  │
+ *   │                                   │ copy thread      │
+ *   │    GET /api/copy_progress ◄────── atomic counters    │
+ *   │    (polled every 500ms)            │                  │
+ *   │                                   ▼                  │
+ *   │    GET /api/copy_progress ──► done=true              │
+ *   └──────────────────────────────────────────────────────┘
+ *===========================================================================*/
+
+#include <pthread.h>
+
+typedef struct {
+  _Atomic uint64_t bytes_copied;
+  _Atomic uint64_t total_bytes;
+  _Atomic int active; /* 1 while copy thread is running */
+  _Atomic int done;   /* 1 when copy finished            */
+  _Atomic int error;  /* 1 if copy failed                */
+  _Atomic int cancel; /* 1 to request cancellation       */
+} copy_progress_t;
+
+static copy_progress_t g_copy_progress = {0};
+
+static int copy_progress_cb(uint64_t bytes_copied, void *user_data) {
+  (void)user_data;
+  atomic_store(&g_copy_progress.bytes_copied, bytes_copied);
+  /* Check cancellation flag — return -1 to abort copy */
+  return (atomic_load(&g_copy_progress.cancel) != 0) ? -1 : 0;
+}
+
+/* Background copy thread */
+typedef struct {
+  char src[FTP_PATH_MAX];
+  char dst[FTP_PATH_MAX];
+} copy_thread_args_t;
+
+static void *copy_thread_fn(void *arg) {
+  copy_thread_args_t *a = (copy_thread_args_t *)arg;
+
+  ftp_error_t rc =
+      pal_file_copy_recursive_ex(a->src, a->dst, 1, copy_progress_cb, NULL);
+  if ((rc != FTP_OK) || (atomic_load(&g_copy_progress.cancel) != 0)) {
+    atomic_store(&g_copy_progress.error, 1);
+  }
+  atomic_store(&g_copy_progress.active, 0);
+  atomic_store(&g_copy_progress.done, 1);
+
+  free(a);
+  return NULL;
+}
+
+/*  GET /api/copy_progress  */
+static http_response_t *api_copy_progress(const http_request_t *request) {
+  (void)request;
+
+  uint64_t copied = atomic_load(&g_copy_progress.bytes_copied);
+  uint64_t total = atomic_load(&g_copy_progress.total_bytes);
+  int active = atomic_load(&g_copy_progress.active);
+  int done = atomic_load(&g_copy_progress.done);
+  int err = atomic_load(&g_copy_progress.error);
+
+  char body[256];
+  int len =
+      snprintf(body, sizeof(body),
+               "{\"active\":%s,\"done\":%s,\"error\":%s,"
+               "\"bytes_copied\":%" PRIu64 ",\"total_bytes\":%" PRIu64 "}",
+               active ? "true" : "false", done ? "true" : "false",
+               err ? "true" : "false", copied, total);
+
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  http_response_add_header(resp, "Content-Type", "application/json");
+  http_response_add_header(resp, "Access-Control-Allow-Origin", "*");
+  http_response_set_body(resp, body, (size_t)len);
+  return resp;
+}
+
+/*  POST /api/copy_cancel  */
+static http_response_t *api_copy_cancel(const http_request_t *request) {
+  (void)request;
+  atomic_store(&g_copy_progress.cancel, 1);
+
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  http_response_add_header(resp, "Content-Type", "application/json");
+  http_response_add_header(resp, "Access-Control-Allow-Origin", "*");
+  const char *body = "{\"ok\":true}";
+  http_response_set_body(resp, body, strlen(body));
+  return resp;
+}
+
+/*===========================================================================*
+ * POST /api/copy — Server-side file/directory copy
+ *
+ *   ┌──────────────────────────────────────────────────────┐
+ *   │  POST /api/copy?path=/src/file&dst=/dest/folder      │
+ *   │                                                      │
+ *   │  src  = validate_path(path)                          │
+ *   │  dst  = validate_path(dst) + '/' + basename(src)     │
+ *   │  pal_file_copy_recursive_ex(src, dst, keep_src=1)    │
+ *   │  result -> {"ok":true}                               │
+ *   └──────────────────────────────────────────────────────┘
+ *===========================================================================*/
+
+static int parse_dst_param(const char *query, char *out, size_t out_size) {
+  if (query == NULL || out == NULL) {
+    return -1;
+  }
+  if (out_size < 2U) {
+    return -1;
+  }
+
+  const char *start = strstr(query, "dst=");
+  if (start == NULL) {
+    return -1;
+  }
+  start += 4; /* skip "dst=" */
+
+  size_t in_pos = 0U;
+  size_t out_pos = 0U;
+
+  while ((start[in_pos] != '\0') && (start[in_pos] != '&') &&
+         (out_pos < (out_size - 1U))) {
+    unsigned char ch = (unsigned char)start[in_pos];
+
+    if ((ch == '%') && (start[in_pos + 1] != '\0') &&
+        (start[in_pos + 2] != '\0')) {
+      unsigned char hi = (unsigned char)start[in_pos + 1];
+      unsigned char lo = (unsigned char)start[in_pos + 2];
+
+      unsigned int v_hi;
+      unsigned int v_lo;
+
+      if ((hi >= '0') && (hi <= '9')) {
+        v_hi = (unsigned int)(hi - '0');
+      } else if ((hi >= 'A') && (hi <= 'F')) {
+        v_hi = 10U + (unsigned int)(hi - 'A');
+      } else if ((hi >= 'a') && (hi <= 'f')) {
+        v_hi = 10U + (unsigned int)(hi - 'a');
+      } else {
+        v_hi = 0xFFFFFFFFU;
+      }
+
+      if ((lo >= '0') && (lo <= '9')) {
+        v_lo = (unsigned int)(lo - '0');
+      } else if ((lo >= 'A') && (lo <= 'F')) {
+        v_lo = 10U + (unsigned int)(lo - 'A');
+      } else if ((lo >= 'a') && (lo <= 'f')) {
+        v_lo = 10U + (unsigned int)(lo - 'a');
+      } else {
+        v_lo = 0xFFFFFFFFU;
+      }
+
+      if ((v_hi != 0xFFFFFFFFU) && (v_lo != 0xFFFFFFFFU)) {
+        unsigned char decoded = (unsigned char)((v_hi << 4U) | v_lo);
+        if (decoded == '\0') {
+          return -1;
+        }
+        out[out_pos++] = (char)decoded;
+        in_pos += 3U;
+        continue;
+      }
+    }
+
+    if (ch == '+') {
+      out[out_pos++] = ' ';
+    } else {
+      out[out_pos++] = (char)ch;
+    }
+    in_pos++;
+  }
+  out[out_pos] = '\0';
+
+  if (out[0] == '\0') {
+    out[0] = '/';
+    out[1] = '\0';
+  }
+
+  return 0;
+}
+
+static http_response_t *api_copy(const http_request_t *request) {
+  if (request->method != HTTP_METHOD_POST) {
+    return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED,
+                      "Use POST for this endpoint");
+  }
+
+  /* Reject if a copy is already in progress */
+  if (atomic_load(&g_copy_progress.active) != 0) {
+    return error_json(HTTP_STATUS_400_BAD_REQUEST,
+                      "A copy operation is already in progress");
+  }
+
+  const char *query = strchr(request->uri, '?');
+  if (query == NULL) {
+    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing query string");
+  }
+
+  char src_path[1024] = "";
+  char dst_dir[1024] = "";
+  if (parse_path_param(query, src_path, sizeof(src_path)) != 0) {
+    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing or invalid path");
+  }
+  if (parse_dst_param(query, dst_dir, sizeof(dst_dir)) != 0) {
+    return error_json(HTTP_STATUS_400_BAD_REQUEST,
+                      "Missing or invalid dst parameter");
+  }
+
+  /* Validate source */
+  char safe_src[FTP_PATH_MAX];
+  if (!validate_path(src_path, safe_src, sizeof(safe_src))) {
+    return error_json(HTTP_STATUS_403_FORBIDDEN, "Source path forbidden");
+  }
+  if (pal_path_exists(safe_src) != 1) {
+    return error_json(HTTP_STATUS_404_NOT_FOUND, "Source not found");
+  }
+
+  /* Validate destination directory */
+  char safe_dst_dir[FTP_PATH_MAX];
+  if (!validate_path(dst_dir, safe_dst_dir, sizeof(safe_dst_dir))) {
+    return error_json(HTTP_STATUS_403_FORBIDDEN, "Destination path forbidden");
+  }
+  if (pal_path_is_directory(safe_dst_dir) != 1) {
+    return error_json(HTTP_STATUS_400_BAD_REQUEST,
+                      "Destination is not a directory");
+  }
+
+  /*
+   * Build full destination:  dst_dir + '/' + basename(src)
+   *
+   *   src = /data/files/readme.txt
+   *   dst = /mnt/usb0/backup
+   *   ->    /mnt/usb0/backup/readme.txt
+   */
+  const char *base = strrchr(safe_src, '/');
+  base = (base != NULL) ? base + 1 : safe_src;
+
+  char full_dst[FTP_PATH_MAX];
+  if (strcmp(safe_dst_dir, "/") == 0) {
+    (void)snprintf(full_dst, sizeof(full_dst), "/%s", base);
+  } else {
+    (void)snprintf(full_dst, sizeof(full_dst), "%s/%s", safe_dst_dir, base);
+  }
+
+  /* Re-validate the composed destination */
+  char safe_final[FTP_PATH_MAX];
+  if (!validate_path(full_dst, safe_final, sizeof(safe_final))) {
+    return error_json(HTTP_STATUS_403_FORBIDDEN, "Final destination forbidden");
+  }
+
+  /*
+   * Compute total size for progress UI.
+   * For a single file use stat(). For directories an exact total
+   * would require a full recursive scan — instead the browser
+   * passes an estimate via ?totalsize= from the original listing.
+   */
+  {
+    struct stat copy_st;
+    uint64_t total_est = 0U;
+    if (stat(safe_src, &copy_st) == 0) {
+      total_est = (uint64_t)copy_st.st_size;
+    }
+    /* Client may provide totalsize hint for dirs */
+    const char *ts_str = strstr(query, "totalsize=");
+    if (ts_str != NULL) {
+      uint64_t ts_val = (uint64_t)strtoull(ts_str + 10, NULL, 10);
+      if (ts_val > 0U) {
+        total_est = ts_val;
+      }
+    }
+    atomic_store(&g_copy_progress.bytes_copied, 0U);
+    atomic_store(&g_copy_progress.total_bytes, total_est);
+    atomic_store(&g_copy_progress.active, 1);
+    atomic_store(&g_copy_progress.done, 0);
+    atomic_store(&g_copy_progress.error, 0);
+    atomic_store(&g_copy_progress.cancel, 0);
+  }
+
+  /* Spawn background copy thread so event loop stays responsive */
+  copy_thread_args_t *args =
+      (copy_thread_args_t *)malloc(sizeof(copy_thread_args_t));
+  if (args == NULL) {
+    atomic_store(&g_copy_progress.active, 0);
+    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+  }
+  (void)strncpy(args->src, safe_src, sizeof(args->src) - 1U);
+  args->src[sizeof(args->src) - 1U] = '\0';
+  (void)strncpy(args->dst, safe_final, sizeof(args->dst) - 1U);
+  args->dst[sizeof(args->dst) - 1U] = '\0';
+
+  pthread_t tid;
+  if (pthread_create(&tid, NULL, copy_thread_fn, args) != 0) {
+    free(args);
+    atomic_store(&g_copy_progress.active, 0);
+    return error_json(HTTP_STATUS_500_INTERNAL_ERROR,
+                      "Failed to start copy thread");
+  }
+  (void)pthread_detach(tid);
+
+  /* Return immediately -- client polls /api/copy_progress for status */
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  http_response_add_header(resp, "Content-Type", "application/json");
+  http_response_add_header(resp, "Access-Control-Allow-Origin", "*");
+  const char *body = "{\"ok\":true,\"async\":true}";
+  http_response_set_body(resp, body, strlen(body));
+  return resp;
+}
 #endif
+
+/*===========================================================================*
+ * GET /api/stats/ram  — RAM usage
+ *
+ *  RESPONSE: { "used": N, "cached": N, "buffers": N, "free": N, "total": N }
+ *===========================================================================*/
+
+static int get_ram_stats(uint64_t *used, uint64_t *cached, uint64_t *buffers,
+                         uint64_t *free_b, uint64_t *total) {
+  if (!used || !cached || !buffers || !free_b || !total) {
+    return -1;
+  }
+  *used = 0; *cached = 0; *buffers = 0; *free_b = 0; *total = 0;
+
+#if defined(HAS_SYSINFO)
+  struct sysinfo si;
+  if (sysinfo(&si) != 0) {
+    return -1;
+  }
+  uint64_t unit = (uint64_t)si.mem_unit;
+  *total   = (uint64_t)si.totalram   * unit;
+  *free_b  = (uint64_t)si.freeram    * unit;
+  *buffers = (uint64_t)si.bufferram  * unit;
+  *cached  = 0; /* not in sysinfo; /proc/meminfo would give it */
+  *used    = (*total > *free_b + *buffers + *cached)
+               ? (*total - *free_b - *buffers - *cached) : 0U;
+  /* Try /proc/meminfo for Cached */
+  FILE *fp = fopen("/proc/meminfo", "r");
+  if (fp) {
+    char line[128];
+    while (fgets(line, sizeof(line), fp)) {
+      uint64_t v = 0;
+      if (sscanf(line, "Cached: %" SCNu64, &v) == 1) {
+        *cached = v * 1024U;
+      } else if (sscanf(line, "MemAvailable: %" SCNu64, &v) == 1) {
+        /* recalculate used from MemAvailable */
+        uint64_t avail = v * 1024U;
+        *used = (*total > avail) ? (*total - avail) : 0U;
+      }
+    }
+    fclose(fp);
+  }
+  return 0;
+#elif defined(PLATFORM_MACOS) || defined(__APPLE__)
+  /* Total physical memory */
+  uint64_t mem_total = 0;
+  size_t sz = sizeof(mem_total);
+  if (sysctlbyname("hw.memsize", &mem_total, &sz, NULL, 0) != 0) {
+    return -1;
+  }
+  *total = mem_total;
+
+  /* Page size */
+  vm_size_t page_sz = 0;
+  if (host_page_size(mach_host_self(), &page_sz) != KERN_SUCCESS) {
+    page_sz = 4096;
+  }
+
+  /* VM stats via host_statistics64 — same source as vm_stat(1) */
+  vm_statistics64_data_t vmstat;
+  mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+  if (host_statistics64(mach_host_self(), HOST_VM_INFO64,
+                        (host_info64_t)&vmstat, &count) != KERN_SUCCESS) {
+    return -1;
+  }
+
+  *free_b  = (uint64_t)vmstat.free_count        * (uint64_t)page_sz;
+  *used    = (uint64_t)(vmstat.active_count +
+                        vmstat.wire_count)       * (uint64_t)page_sz;
+  *cached  = (uint64_t)vmstat.inactive_count     * (uint64_t)page_sz;
+  *buffers = (uint64_t)vmstat.speculative_count  * (uint64_t)page_sz;
+  return 0;
+#elif defined(PLATFORM_PS4) || defined(PLATFORM_PS5) || defined(PS4) || defined(PS5)
+  /* PS4/PS5 FreeBSD-derived kernel */
+  uint64_t physmem = 0;
+  size_t psz = sizeof(physmem);
+  sysctlbyname("hw.physmem", &physmem, &psz, NULL, 0);
+  *total = physmem;
+
+  uint32_t page_sz32 = 16384;
+  psz = sizeof(page_sz32);
+  sysctlbyname("hw.pagesize", &page_sz32, &psz, NULL, 0);
+  uint64_t page_sz = (uint64_t)page_sz32;
+
+  uint32_t v_free = 0, v_active = 0, v_inactive = 0, v_wire = 0;
+  psz = sizeof(v_free);
+  sysctlbyname("vm.stats.vm.v_free_count",     &v_free,     &psz, NULL, 0);
+  psz = sizeof(v_active);
+  sysctlbyname("vm.stats.vm.v_active_count",   &v_active,   &psz, NULL, 0);
+  psz = sizeof(v_inactive);
+  sysctlbyname("vm.stats.vm.v_inactive_count", &v_inactive, &psz, NULL, 0);
+  psz = sizeof(v_wire);
+  sysctlbyname("vm.stats.vm.v_wire_count",     &v_wire,     &psz, NULL, 0);
+
+  *free_b  = (uint64_t)v_free     * page_sz;
+  *used    = (uint64_t)(v_active + v_wire) * page_sz;
+  *cached  = (uint64_t)v_inactive * page_sz;
+  *buffers = 0;
+  return 0;
+#else
+  return -1;
+#endif
+}
+
+static http_response_t *api_stats_ram(const http_request_t *request) {
+  (void)request;
+  uint64_t used = 0, cached = 0, buffers = 0, free_b = 0, total = 0;
+  get_ram_stats(&used, &cached, &buffers, &free_b, &total);
+
+  char body[256];
+  int len = snprintf(body, sizeof(body),
+    "{\"used\":%" PRIu64 ",\"cached\":%" PRIu64 ",\"buffers\":%" PRIu64
+    ",\"free\":%" PRIu64 ",\"total\":%" PRIu64 "}",
+    used, cached, buffers, free_b, total);
+
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  http_response_add_header(resp, "Content-Type", "application/json");
+  http_response_add_header(resp, "Cache-Control", "no-store");
+  http_response_set_body(resp, body, (size_t)len);
+  return resp;
+}
+
+/*===========================================================================*
+ * GET /api/stats/system  — CPU temp, uptime, boot time
+ *
+ *  RESPONSE: { "cpu_temp": N|null, "uptime_seconds": N|null,
+ *               "boot_epoch": N|null }
+ *===========================================================================*/
+
+static http_response_t *api_stats_system(const http_request_t *request) {
+  (void)request;
+
+  int32_t temp_c = 0;
+  int temp_ok = get_cpu_temp_c(&temp_c);
+
+  uint64_t boot_epoch = 0;
+  int boot_ok = get_boot_epoch_seconds(&boot_epoch);
+
+  uint64_t uptime_sec = 0;
+  if (boot_ok == 0) {
+    time_t now = time(NULL);
+    if (now > 0 && (uint64_t)now >= boot_epoch) {
+      uptime_sec = (uint64_t)now - boot_epoch;
+    }
+  }
+
+  char body[512];
+  size_t pos = 0;
+  size_t cap = sizeof(body);
+
+  pos += (size_t)snprintf(body + pos, cap - pos, "{");
+  if (temp_ok == 0) {
+    pos += (size_t)snprintf(body + pos, cap - pos,
+                            "\"cpu_temp\":%" PRId32, temp_c);
+  } else {
+    pos += (size_t)snprintf(body + pos, cap - pos, "\"cpu_temp\":null");
+  }
+  if (boot_ok == 0) {
+    pos += (size_t)snprintf(body + pos, cap - pos,
+                            ",\"uptime_seconds\":%" PRIu64
+                            ",\"boot_epoch\":%" PRIu64,
+                            uptime_sec, boot_epoch);
+  } else {
+    pos += (size_t)snprintf(body + pos, cap - pos,
+                            ",\"uptime_seconds\":null,\"boot_epoch\":null");
+  }
+  pos += (size_t)snprintf(body + pos, cap - pos, "}");
+
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  http_response_add_header(resp, "Content-Type", "application/json");
+  http_response_add_header(resp, "Cache-Control", "no-store");
+  http_response_set_body(resp, body, pos);
+  return resp;
+}
+
+/*===========================================================================*
+ * GET /api/disk/info  — Disk usage for largest mounted volume
+ *
+ *  RESPONSE: { "used": N, "free": N, "total": N, "path": "..." }
+ *===========================================================================*/
+
+static http_response_t *api_disk_info(const http_request_t *request) {
+  (void)request;
+
+  uint64_t total = 0, used = 0, free_b = 0;
+  const char *disk_path = NULL;
+  get_best_disk_stats(g_http_root, &disk_path, &total, &used, &free_b);
+
+  char body[256];
+  size_t pos = 0;
+  size_t cap = sizeof(body);
+  pos += (size_t)snprintf(body + pos, cap - pos,
+    "{\"used\":%" PRIu64 ",\"free\":%" PRIu64 ",\"total\":%" PRIu64 ",\"path\":\"",
+    used, free_b, total);
+  (void)json_escape_append(body, cap, &pos, disk_path ? disk_path : "/");
+  pos += (size_t)snprintf(body + pos, cap - pos, "\"}");
+
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  http_response_add_header(resp, "Content-Type", "application/json");
+  http_response_add_header(resp, "Cache-Control", "no-store");
+  http_response_set_body(resp, body, pos);
+  return resp;
+}
+
+/*===========================================================================*
+ * GET /api/disk/tree?path=X  — Directory tree (1 level deep, with sizes)
+ *
+ *  RESPONSE: { "name": "dirname", "type": "directory",
+ *               "size": N, "children": [ { "name":..., "type":..., "size":... }, ...] }
+ *===========================================================================*/
+
+#define DISK_TREE_MAX_CHILDREN 512
+
+static http_response_t *api_disk_tree(const http_request_t *request) {
+  const char *query = strchr(request->uri, '?');
+  char path[1024] = "/";
+  if (query != NULL) {
+    (void)parse_path_param(query, path, sizeof(path));
+  }
+
+  char safe[FTP_PATH_MAX];
+  if (!validate_path(path, safe, sizeof(safe))) {
+    return error_json(HTTP_STATUS_403_FORBIDDEN, "Forbidden path");
+  }
+
+  DIR *dir = opendir(safe);
+  if (dir == NULL) {
+    return error_json(HTTP_STATUS_404_NOT_FOUND, "Directory not found");
+  }
+
+  /* Allocate a generous output buffer — tree JSON can be large */
+  size_t cap = 512 * 1024; /* 512 KB */
+  char *body = (char *)malloc(cap);
+  if (body == NULL) {
+    closedir(dir);
+    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+  }
+
+  size_t pos = 0;
+
+  /* Header: root node name */
+  const char *dirname = strrchr(safe, '/');
+  dirname = (dirname && dirname[1] != '\0') ? dirname + 1 : safe;
+
+  pos += (size_t)snprintf(body + pos, cap - pos, "{\"name\":\"");
+  (void)json_escape_append(body, cap, &pos, dirname);
+  pos += (size_t)snprintf(body + pos, cap - pos,
+                          "\",\"type\":\"directory\",\"children\":[");
+
+  uint64_t dir_total = 0;
+  int first = 1;
+  int count = 0;
+
+  for (;;) {
+    errno = 0;
+    struct dirent *ent = readdir(dir);
+    if (ent == NULL) {
+      break;
+    }
+    if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
+      continue;
+    }
+    if (count >= DISK_TREE_MAX_CHILDREN) {
+      break;
+    }
+
+    /* Build full child path */
+    char child[FTP_PATH_MAX];
+    if (strcmp(safe, "/") == 0) {
+      (void)snprintf(child, sizeof(child), "/%s", ent->d_name);
+    } else {
+      (void)snprintf(child, sizeof(child), "%s/%s", safe, ent->d_name);
+    }
+
+    struct stat st;
+    if (stat(child, &st) != 0) {
+      continue;
+    }
+
+    uint64_t sz = (uint64_t)st.st_size;
+    const char *type = S_ISDIR(st.st_mode) ? "directory" : "file";
+
+    /* For directories, use statvfs block count as size approximation */
+    if (S_ISDIR(st.st_mode)) {
+      /* Use du-style: st_blocks * 512 */
+      sz = (uint64_t)st.st_blocks * 512U;
+    }
+
+    dir_total += sz;
+
+    if (!first) {
+      if (pos + 1 < cap) {
+        body[pos++] = ',';
+      }
+    }
+    first = 0;
+
+    /* Append child entry */
+    size_t name_start = pos;
+    pos += (size_t)snprintf(body + pos, cap - pos, "{\"name\":\"");
+    (void)json_escape_append(body, cap, &pos, ent->d_name);
+    pos += (size_t)snprintf(body + pos, cap - pos,
+                            "\",\"type\":\"%s\",\"size\":%" PRIu64 "}", type, sz);
+
+    /* Safety: if we are getting close to buffer limit, stop */
+    if (pos + 256 >= cap) {
+      /* Truncate last entry and break */
+      pos = name_start;
+      if (pos > 0 && body[pos - 1] == ',') {
+        pos--;
+      }
+      break;
+    }
+    count++;
+  }
+  closedir(dir);
+
+  pos += (size_t)snprintf(body + pos, cap - pos,
+                          "],\"size\":%" PRIu64 "}", dir_total);
+
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  http_response_add_header(resp, "Content-Type", "application/json");
+  http_response_add_header(resp, "Cache-Control", "no-store");
+  if (http_response_set_body_owned(resp, body, pos) != 0) {
+    free(body);
+  }
+  return resp;
+}
+
+/*===========================================================================*
+ * GET /api/processes  — Process list
+ *
+ *  RESPONSE: [ { "pid": N, "name": "...", "user": "...",
+ *                "cpu": F, "mem_mb": N, "status": "...",
+ *                "killable": bool }, ... ]
+ *===========================================================================*/
+
+#include <signal.h>
+
+#if defined(PLATFORM_MACOS) || defined(__APPLE__)
+#include <sys/sysctl.h>
+#include <sys/proc.h>
+#endif
+
+static http_response_t *api_processes(const http_request_t *request) {
+  (void)request;
+
+  size_t cap = 256 * 1024; /* 256 KB */
+  char *body = (char *)malloc(cap);
+  if (body == NULL) {
+    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+  }
+
+  size_t pos = 0;
+  pos += (size_t)snprintf(body + pos, cap - pos, "[");
+  int first = 1;
+
+#if defined(PLATFORM_MACOS) || defined(__APPLE__)
+  /* --- macOS: use KERN_PROC sysctl (no entitlements required) --- */
+  int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0};
+  size_t buf_size = 0;
+  /* First call: get required size */
+  if (sysctl(mib, 4, NULL, &buf_size, NULL, 0) == 0 && buf_size > 0) {
+    /* Over-allocate slightly to handle races */
+    buf_size += buf_size / 8;
+    struct kinfo_proc *procs = (struct kinfo_proc *)malloc(buf_size);
+    if (procs) {
+      if (sysctl(mib, 4, procs, &buf_size, NULL, 0) == 0) {
+        int n = (int)(buf_size / sizeof(struct kinfo_proc));
+        for (int i = 0; i < n; i++) {
+          struct kinfo_proc *kp = &procs[i];
+          pid_t pid = kp->kp_proc.p_pid;
+          if (pid <= 0) continue;
+
+          char name[MAXCOMLEN + 1];
+          strncpy(name, kp->kp_proc.p_comm, sizeof(name) - 1);
+          name[sizeof(name) - 1] = '\0';
+
+          unsigned int uid = (unsigned int)kp->kp_eproc.e_ucred.cr_uid;
+
+          /* p_stat: SSLEEP=1, SWAIT=2, SRUN=3, SIDL=4, SZOMB=5, SSTOP=6 */
+          const char *status = "running";
+          if (kp->kp_proc.p_stat == 1 || kp->kp_proc.p_stat == 2) status = "sleep";
+          else if (kp->kp_proc.p_stat == 5) status = "zombie";
+
+          /* RSS from e_vm — not always available, use 0 as fallback */
+          uint64_t mem_mb = 0;
+
+          int killable = (uid != 0) ? 1 : 0;
+
+          if (!first && pos + 2 < cap) { body[pos++] = ','; }
+          first = 0;
+
+          pos += (size_t)snprintf(body + pos, cap - pos,
+            "{\"pid\":%d,\"name\":\"", (int)pid);
+          (void)json_escape_append(body, cap, &pos, name);
+          pos += (size_t)snprintf(body + pos, cap - pos,
+            "\",\"user\":\"%u\",\"cpu\":0.0,\"mem_mb\":%" PRIu64
+            ",\"status\":\"%s\",\"killable\":%s}",
+            uid, mem_mb, status,
+            killable ? "true" : "false");
+
+          if (pos + 512 >= cap) break;
+        }
+      }
+      free(procs);
+    }
+  }
+
+#elif defined(HAS_SYSINFO)
+  /* --- Linux: parse /proc --- */
+  DIR *proc_dir = opendir("/proc");
+  if (proc_dir) {
+    struct dirent *ent;
+    while ((ent = readdir(proc_dir)) != NULL) {
+      /* Only numeric entries are PIDs */
+      int pid = 0;
+      int is_pid = 1;
+      for (const char *c = ent->d_name; *c; c++) {
+        if (*c < '0' || *c > '9') { is_pid = 0; break; }
+      }
+      if (!is_pid || ent->d_name[0] == '\0') continue;
+      pid = atoi(ent->d_name);
+      if (pid <= 0) continue;
+
+      /* /proc/<pid>/stat */
+      char stat_path[64];
+      snprintf(stat_path, sizeof(stat_path), "/proc/%d/stat", pid);
+      FILE *f = fopen(stat_path, "r");
+      if (!f) continue;
+
+      char comm[256] = "";
+      char state = '?';
+      long rss = 0;
+      unsigned int uid = 0;
+
+      /* Read comm from /proc/<pid>/status for cleaner name */
+      char status_path[64];
+      snprintf(status_path, sizeof(status_path), "/proc/%d/status", pid);
+      FILE *sf = fopen(status_path, "r");
+      if (sf) {
+        char line[256];
+        while (fgets(line, sizeof(line), sf)) {
+          if (strncmp(line, "Name:", 5) == 0) {
+            sscanf(line + 5, " %255s", comm);
+          } else if (strncmp(line, "Uid:", 4) == 0) {
+            sscanf(line + 4, " %u", &uid);
+          }
+        }
+        fclose(sf);
+      }
+
+      /* Read utime/stime/rss from stat */
+      {
+        char tmp[2048];
+        if (fgets(tmp, sizeof(tmp), f)) {
+          /* format: pid (comm) state ppid ... utime stime ... rss */
+          char *p = strrchr(tmp, ')');
+          if (p) {
+            sscanf(p + 2, " %c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u "
+                          "%*lu %*lu %*d %*d %*d %*d %*d %*d %*u %*u %ld",
+                   &state, &rss);
+          }
+        }
+      }
+      fclose(f);
+
+      if (comm[0] == '\0') snprintf(comm, sizeof(comm), "pid%d", pid);
+
+      uint64_t mem_mb = (uint64_t)((rss > 0 ? rss : 0) * 4096UL / (1024UL * 1024UL));
+      const char *status_str = "running";
+      if (state == 'S' || state == 'D') status_str = "sleep";
+      else if (state == 'Z') status_str = "zombie";
+      double cpu_pct = 0.0; /* snapshot only */
+      int killable = (uid != 0) ? 1 : 0;
+
+      if (!first && pos + 2 < cap) { body[pos++] = ','; }
+      first = 0;
+
+      pos += (size_t)snprintf(body + pos, cap - pos,
+        "{\"pid\":%d,\"name\":\"", pid);
+      (void)json_escape_append(body, cap, &pos, comm);
+      pos += (size_t)snprintf(body + pos, cap - pos,
+        "\",\"user\":\"%u\",\"cpu\":%.1f,\"mem_mb\":%" PRIu64
+        ",\"status\":\"%s\",\"killable\":%s}",
+        uid, cpu_pct, mem_mb, status_str,
+        killable ? "true" : "false");
+
+      if (pos + 512 >= cap) break;
+    }
+    closedir(proc_dir);
+  }
+
+#else
+  /* Unsupported platform — return empty array */
+  (void)first;
+#endif
+
+  if (pos + 2 < cap) {
+    body[pos++] = ']';
+    body[pos]   = '\0';
+  }
+
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  http_response_add_header(resp, "Content-Type", "application/json");
+  http_response_add_header(resp, "Cache-Control", "no-store");
+  if (http_response_set_body_owned(resp, body, pos) != 0) {
+    free(body);
+  }
+  return resp;
+}
+
+/*===========================================================================*
+ * POST /api/process/kill  — Send SIGTERM to a process
+ *
+ *  REQUEST BODY: { "pid": N }
+ *  RESPONSE:     { "success": true } | { "error": "..." }
+ *===========================================================================*/
+
+static int parse_pid_from_body(const char *body, size_t len, int *out_pid) {
+  if (!body || len == 0 || !out_pid) return -1;
+  const char *p = strstr(body, "\"pid\"");
+  if (!p) p = strstr(body, "\"pid\":");
+  if (!p) return -1;
+  p += 5; /* skip "pid" */
+  while (*p == ':' || *p == ' ' || *p == '\t') p++;
+  if (*p == '\0') return -1;
+  int v = atoi(p);
+  if (v <= 0) return -1;
+  *out_pid = v;
+  return 0;
+}
+
+static http_response_t *api_process_kill(const http_request_t *request) {
+#if ENABLE_WEB_UPLOAD
+  if (http_csrf_validate(request) != 0) {
+    return error_json(HTTP_STATUS_403_FORBIDDEN, "Invalid or missing CSRF token");
+  }
+#endif
+  if (request->method != HTTP_METHOD_POST) {
+    return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED, "Use POST");
+  }
+
+  int pid = 0;
+  if (parse_pid_from_body(request->body, request->body_length, &pid) != 0) {
+    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing or invalid pid");
+  }
+
+  /* Safety: never kill PID 1 or negative PIDs */
+  if (pid <= 1) {
+    return error_json(HTTP_STATUS_403_FORBIDDEN, "Cannot kill system process");
+  }
+
+  if (kill((pid_t)pid, SIGTERM) != 0) {
+    char msg[64];
+    snprintf(msg, sizeof(msg), "kill failed: %s", strerror(errno));
+    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, msg);
+  }
+
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  http_response_add_header(resp, "Content-Type", "application/json");
+  char body[64];
+  int len = snprintf(body, sizeof(body), "{\"success\":true,\"pid\":%d}", pid);
+  http_response_set_body(resp, body, (size_t)len);
+  return resp;
+}
 
 /*===========================================================================*
  * STATIC RESOURCE SERVING

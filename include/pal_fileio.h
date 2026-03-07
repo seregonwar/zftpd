@@ -278,6 +278,29 @@ ftp_error_t pal_file_copy_recursive(const char *src, const char *dst,
                                     int keep_src);
 
 /*===========================================================================*
+ * COPY PROGRESS CALLBACK
+ *
+ *   Invoked after each read/write chunk during file copy.
+ *
+ *   bytes_copied : cumulative bytes written so far (across all files)
+ *   user_data    : opaque pointer passed by the caller
+ *
+ *   Return:  0  = continue
+ *           -1  = cancel (copy will abort and return FTP_ERR_CANCELLED)
+ *===========================================================================*/
+
+typedef int (*pal_copy_progress_cb_t)(uint64_t bytes_copied, void *user_data);
+
+/**
+ * @brief Recursively copy with progress reporting
+ *
+ * Same as pal_file_copy_recursive() but invokes cb after each I/O chunk.
+ */
+ftp_error_t pal_file_copy_recursive_ex(const char *src, const char *dst,
+                                       int keep_src, pal_copy_progress_cb_t cb,
+                                       void *user_data);
+
+/*===========================================================================*
  * DIRECTORY OPERATIONS
  *===========================================================================*/
 

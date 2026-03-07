@@ -61,6 +61,46 @@ SOFTWARE.
 #include <unistd.h>
 
 /*===========================================================================*
+ * PFS FILE-CREATION SERIALISER
+ *
+ * On PS4/PS5, pal_file_open(O_CREAT) on a PFS-encrypted partition acquires
+ * an inode-allocation lock inside the kernel.  When two FTP sessions call it
+ * simultaneously the second one is forced to spin-wait on that same lock,
+ * turning a ~5 s open into a >20 s open — past FileZilla's command-response
+ * timeout — with 0 bytes transferred.
+ *
+ * Serialising O_CREAT opens at the application level lets each session
+ * proceed without journal contention.  The total elapsed time for two
+ * parallel uploads is ~10 s instead of >20 s, comfortably within the
+ * FileZilla command-response timeout.
+ *
+ * The lock is only held during the open() call itself (typically 3–8 s on
+ * PFS); the actual data transfer runs fully in parallel.
+ *===========================================================================*/
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+static pthread_mutex_t g_pfs_create_mtx = PTHREAD_MUTEX_INITIALIZER;
+
+/* pthread_mutex_timedlock() is absent from the OrbisOS (PS4/PS5) SDK.
+ * This helper polls with trylock + nanosleep to emulate a timed lock.
+ * Returns 0 on success, ETIMEDOUT if the deadline passes. */
+static int pfs_mutex_lock_timeout(pthread_mutex_t *mtx, int timeout_s) {
+  struct timespec sleep_ts;
+  sleep_ts.tv_sec = 0;
+  sleep_ts.tv_nsec = 10000000; /* 10 ms */
+  int elapsed_ms = 0;
+  const int limit_ms = timeout_s * 1000;
+  while (elapsed_ms < limit_ms) {
+    if (pthread_mutex_trylock(mtx) == 0) {
+      return 0;
+    }
+    nanosleep(&sleep_ts, NULL);
+    elapsed_ms += 10;
+  }
+  return ETIMEDOUT;
+}
+#endif
+
+/*===========================================================================*
  * FORWARD DECLARATIONS
  *===========================================================================*/
 
@@ -915,8 +955,12 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
    *     write directly to the original file (need to lseek)
    */
   char tmp_path[FTP_PATH_MAX];
-#if defined(PLATFORM_PS5)
-  /* PS5 /data/: no ShadowMount watching, skip atomic temp→rename overhead */
+  int was_fresh_upload = (session->restart_offset == 0) ? 1 : 0;
+#if defined(PLATFORM_PS5) || defined(PLATFORM_PS4)
+  /* PS4/PS5 /data/: no ShadowMount watching, skip atomic temp→rename overhead.
+   * On PS4, PFS-encrypted writes through a temp file add ~40ms per 256 KB
+   * chunk; the double-buffer producer stalls waiting for the writer, the TCP
+   * recv buffer fills, and the FileZilla client times out after 20 s. */
   int use_atomic = 0;
 #else
   int use_atomic = (session->restart_offset == 0) ? 1 : 0;
@@ -941,8 +985,50 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
     open_flags |= O_TRUNC;
   }
 
+  /*
+   * Open the destination file BEFORE sending 150 or accepting the data
+   * connection.  This matches ftpsrv's proven ordering.
+   *
+   * On PS4/PS5, pal_file_open(O_CREAT|O_TRUNC) on a PFS-encrypted partition
+   * (/data/pkg/) can block for several seconds while the filesystem allocates
+   * and encrypts the inode.  The critical insight is WHERE that latency is
+   * hidden:
+   *
+   *   Wrong order (150 → accept → open):
+   *     The client receives 150 and immediately connects / starts sending.
+   *     The server is still blocked in open().  The TCP receive buffer fills
+   *     in milliseconds (LAN speed >> PFS throughput), the window drops to 0,
+   *     the sender stalls, and FileZilla's 20-second DATA INACTIVITY timer
+   *     fires — even though 0 bytes were transferred.
+   *
+   *   Correct order (open → 150 → accept):
+   *     The latency is absorbed while the client is waiting for the STOR
+   *     command response (FileZilla's COMMAND-RESPONSE timeout, 20 s).
+   *     When 150 finally arrives the server is already ready to call recv();
+   *     data starts flowing immediately and the inactivity timer never fires.
+   */
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+  int held_pfs_mtx = 0;
+  if ((open_flags & O_CREAT) != 0) {
+    if (pfs_mutex_lock_timeout(&g_pfs_create_mtx, 10) == 0) {
+      held_pfs_mtx = 1;
+    } else {
+      session->restart_offset = 0;
+      return ftp_session_send_reply(session, FTP_REPLY_451_LOCAL_ERROR,
+                                    "Server busy, please retry.");
+    }
+  }
+#endif
   int fd = pal_file_open(write_path, open_flags, FILE_PERM);
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+  if (held_pfs_mtx != 0) {
+    pthread_mutex_unlock(&g_pfs_create_mtx);
+  }
+#endif
   if (fd < 0) {
+    if (use_atomic != 0) {
+      (void)unlink(tmp_path);
+    }
     session->restart_offset = 0;
     return ftp_session_send_reply(session, FTP_REPLY_550_FILE_ERROR,
                                   "Cannot create file.");
@@ -952,13 +1038,17 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
   if (session->restart_offset > 0) {
     if (lseek(fd, session->restart_offset, SEEK_SET) < 0) {
       pal_file_close(fd);
+      if (use_atomic != 0) {
+        (void)unlink(tmp_path);
+      } else if (was_fresh_upload != 0) {
+        (void)unlink(write_path);
+      }
       session->restart_offset = 0;
       return ftp_session_send_reply(session, FTP_REPLY_451_LOCAL_ERROR,
                                     "Seek failed.");
     }
   }
 
-  /* Open data connection */
   ftp_session_send_reply(session, FTP_REPLY_150_FILE_OK, NULL);
 
   err = ftp_session_open_data_connection(session);
@@ -966,6 +1056,8 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
     pal_file_close(fd);
     if (use_atomic != 0) {
       (void)unlink(tmp_path);
+    } else if (was_fresh_upload != 0) {
+      (void)unlink(write_path);
     }
     session->restart_offset = 0;
     return ftp_session_send_reply(session, FTP_REPLY_425_CANT_OPEN_DATA, NULL);
@@ -1198,9 +1290,21 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
                                   NULL);
   }
 
-  /* On failure, clean up temp file */
+  /* On failure, clean up partial file */
   if (use_atomic != 0) {
     (void)unlink(tmp_path);
+  } else if (was_fresh_upload != 0) {
+    /*
+     * Non-atomic path (PS4/PS5): the file was opened with O_CREAT|O_TRUNC
+     * directly on the destination.  If the transfer failed, an empty or
+     * partial file now sits on disk.  Delete it so that a subsequent LIST
+     * does not show a ghost file and cause the client to prompt for
+     * overwrite (or silently skip the upload).
+     *
+     * Resume uploads (was_fresh_upload == 0) are intentionally left alone
+     * so the client can attempt REST+STOR/APPE again.
+     */
+    (void)unlink(write_path);
   }
 
   ftp_log_session_event(session, "STOR_FAIL", FTP_ERR_UNKNOWN, total_received);
@@ -1254,7 +1358,25 @@ ftp_error_t cmd_APPE(ftp_session_t *session, const char *args) {
     open_flags |= O_APPEND;
   }
 
+  /* Open file BEFORE sending 150 — same rationale as cmd_STOR */
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+  int held_pfs_mtx_appe = 0;
+  if ((open_flags & O_CREAT) != 0) {
+    if (pfs_mutex_lock_timeout(&g_pfs_create_mtx, 10) == 0) {
+      held_pfs_mtx_appe = 1;
+    } else {
+      session->restart_offset = 0;
+      return ftp_session_send_reply(session, FTP_REPLY_451_LOCAL_ERROR,
+                                    "Server busy, please retry.");
+    }
+  }
+#endif
   int fd = pal_file_open(resolved, open_flags, FILE_PERM);
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+  if (held_pfs_mtx_appe != 0) {
+    pthread_mutex_unlock(&g_pfs_create_mtx);
+  }
+#endif
   if (fd < 0) {
     session->restart_offset = 0;
     return ftp_session_send_reply(session, FTP_REPLY_550_FILE_ERROR,
@@ -1271,7 +1393,6 @@ ftp_error_t cmd_APPE(ftp_session_t *session, const char *args) {
     }
   }
 
-  /* Open data connection */
   ftp_session_send_reply(session, FTP_REPLY_150_FILE_OK, NULL);
 
   err = ftp_session_open_data_connection(session);
@@ -1719,11 +1840,53 @@ ftp_error_t cmd_PASV(ftp_session_t *session, const char *args) {
   /* Enable address reuse */
   (void)pal_socket_set_reuseaddr(fd);
 
-  /* Bind to ephemeral port (port 0 = auto-assign) */
+  /*
+   * Set SO_RCVBUF on the LISTENING socket BEFORE bind/listen.
+   *
+   * On FreeBSD/PS4/PS5 the kernel copies the listening socket's receive
+   * buffer size into each accepted connection during the 3-way handshake.
+   * Setting SO_RCVBUF on the accepted socket after accept() is too late:
+   * the kernel caps post-connect increases to kern.ipc.maxsockbuf (~1 MB
+   * on OrbisOS), which is why STOR transfers stall after exactly 1 MB.
+   * Setting it here propagates the full 4 MB to every accepted data socket.
+   */
+  {
+    int rcvbuf = (int)FTP_TCP_RCVBUF;
+    (void)PAL_SETSOCKOPT(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+  }
+
+  /* Resolve the local IP from the control connection so the PASV
+   * listener is bound to the specific interface — not INADDR_ANY.
+   * On OrbisOS/FreeBSD (PS4/PS5), binding to INADDR_ANY causes
+   * inbound SYNs to be silently dropped when the kernel routes the
+   * incoming connection via a specific interface that doesn't match
+   * the wildcard binding, even though the 227 reply advertises the
+   * correct IP.  Binding to the exact local address fixes this. */
+  uint32_t ip = 0U;
+  {
+    struct sockaddr_in local;
+    socklen_t local_len = (socklen_t)sizeof(local);
+    memset(&local, 0, sizeof(local));
+    if (PAL_GETSOCKNAME(session->ctrl_fd, (struct sockaddr *)&local,
+                        &local_len) == 0) {
+      ip = PAL_NTOHL(local.sin_addr.s_addr);
+    }
+  }
+  if (ip == 0U) {
+    char ip_str[INET_ADDRSTRLEN];
+    if (pal_network_get_primary_ip(ip_str, sizeof(ip_str)) == FTP_OK) {
+      struct in_addr ia;
+      if (PAL_INET_PTON(AF_INET, ip_str, &ia) == 1) {
+        ip = PAL_NTOHL(ia.s_addr);
+      }
+    }
+  }
+
+  /* Bind to the resolved local IP, ephemeral port (port 0 = auto-assign) */
   struct sockaddr_in addr;
   memset(&addr, 0, sizeof(addr));
   addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = PAL_HTONL(INADDR_ANY);
+  addr.sin_addr.s_addr = (ip != 0U) ? PAL_HTONL(ip) : PAL_HTONL(INADDR_ANY);
   addr.sin_port = 0; /* Auto-assign port */
 
   if (PAL_BIND(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
@@ -1752,23 +1915,6 @@ ftp_error_t cmd_PASV(ftp_session_t *session, const char *args) {
   session->data_mode = FTP_DATA_MODE_PASSIVE;
 
   /* Format reply: 227 Entering Passive Mode (h1,h2,h3,h4,p1,p2) */
-  struct sockaddr_in local;
-  socklen_t local_len = (socklen_t)sizeof(local);
-  memset(&local, 0, sizeof(local));
-  uint32_t ip = 0U;
-  if (PAL_GETSOCKNAME(session->ctrl_fd, (struct sockaddr *)&local,
-                      &local_len) == 0) {
-    ip = PAL_NTOHL(local.sin_addr.s_addr);
-  }
-  if (ip == 0U) {
-    char ip_str[INET_ADDRSTRLEN];
-    if (pal_network_get_primary_ip(ip_str, sizeof(ip_str)) == FTP_OK) {
-      struct in_addr ia;
-      if (PAL_INET_PTON(AF_INET, ip_str, &ia) == 1) {
-        ip = PAL_NTOHL(ia.s_addr);
-      }
-    }
-  }
   if (ip == 0U) {
     ip = PAL_NTOHL(pasv_addr.sin_addr.s_addr);
   }
@@ -1819,10 +1965,39 @@ ftp_error_t cmd_EPSV(ftp_session_t *session, const char *args) {
 
   (void)pal_socket_set_reuseaddr(fd);
 
+  /* Set SO_RCVBUF on the listener — same rationale as cmd_PASV */
+  {
+    int rcvbuf = (int)FTP_TCP_RCVBUF;
+    (void)PAL_SETSOCKOPT(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+  }
+
+  /* Bind to the local IP of the control connection — not INADDR_ANY.
+   * Same rationale as cmd_PASV: on OrbisOS/FreeBSD, INADDR_ANY causes
+   * inbound SYNs to be silently dropped. */
+  uint32_t epsv_ip = 0U;
+  {
+    struct sockaddr_in local;
+    socklen_t local_len = (socklen_t)sizeof(local);
+    memset(&local, 0, sizeof(local));
+    if (PAL_GETSOCKNAME(session->ctrl_fd, (struct sockaddr *)&local,
+                        &local_len) == 0) {
+      epsv_ip = PAL_NTOHL(local.sin_addr.s_addr);
+    }
+  }
+  if (epsv_ip == 0U) {
+    char ip_str[INET_ADDRSTRLEN];
+    if (pal_network_get_primary_ip(ip_str, sizeof(ip_str)) == FTP_OK) {
+      struct in_addr ia;
+      if (PAL_INET_PTON(AF_INET, ip_str, &ia) == 1) {
+        epsv_ip = PAL_NTOHL(ia.s_addr);
+      }
+    }
+  }
+
   struct sockaddr_in addr;
   memset(&addr, 0, sizeof(addr));
   addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = PAL_HTONL(INADDR_ANY);
+  addr.sin_addr.s_addr = (epsv_ip != 0U) ? PAL_HTONL(epsv_ip) : PAL_HTONL(INADDR_ANY);
   addr.sin_port = 0;
 
   if (PAL_BIND(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
