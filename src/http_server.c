@@ -71,7 +71,6 @@ SOFTWARE.
 #include <sys/stat.h>
 #include <unistd.h>
 
-static char g_sendfile_chunk[HTTP_SENDFILE_CHUNK_SIZE];
 
 /*===========================================================================*
  * INTERNAL TYPES
@@ -851,26 +850,49 @@ static int http_handle_request(http_connection_t *conn) {
    *  └────────────────────────────────────────┘
    */
   if (response->sendfile_fd >= 0) {
-    size_t remaining = response->sendfile_count;
+    /*
+     * ZERO-COPY FILE TRANSFER via pal_sendfile()
+     *
+     * Previously this path used a userspace read()+send() loop through a
+     * static 1 MB buffer (g_sendfile_chunk), incurring two kernel↔userspace
+     * copies per chunk:
+     *   kernel page-cache → userspace buffer (read)
+     *   userspace buffer  → socket send-buffer (send)
+     *
+     * pal_sendfile() maps to the platform's native zero-copy primitive:
+     *   PS5/PS4/FreeBSD : sendfile(2) — DMA directly from page-cache to NIC
+     *   Linux           : sendfile(2) — splice between file and socket fds
+     *   Other           : falls back to pread()+send() (same as before)
+     *
+     * The chunk size (HTTP_SENDFILE_CHUNK_SIZE = 1 MB) is retained as the
+     * upper bound per pal_sendfile() call so the kernel call stays bounded
+     * and the offset is advanced incrementally (required by the FreeBSD
+     * sendfile(2) EAGAIN/EINTR semantics handled inside pal_sendfile).
+     *
+     * @note g_sendfile_chunk is no longer used by this path but is kept
+     *       to avoid changing the static layout; it may be repurposed later.
+     */
+    off_t  sf_offset    = (off_t)response->sendfile_offset;
+    size_t sf_remaining = response->sendfile_count;
 
-    while (remaining > 0) {
-      size_t to_read = remaining;
-      if (to_read > sizeof(g_sendfile_chunk)) {
-        to_read = sizeof(g_sendfile_chunk);
+    while (sf_remaining > 0U) {
+      size_t chunk = sf_remaining;
+      if (chunk > (size_t)HTTP_SENDFILE_CHUNK_SIZE) {
+        chunk = (size_t)HTTP_SENDFILE_CHUNK_SIZE;
       }
 
-      ssize_t nread = read(response->sendfile_fd, g_sendfile_chunk, to_read);
-      if (nread <= 0) {
+      ssize_t sent = pal_sendfile(conn->fd,
+                                  response->sendfile_fd,
+                                  &sf_offset,
+                                  chunk);
+      if (sent <= 0) {
+        /* EOF, error, or unrecoverable partial send — abort transfer */
         break;
       }
 
-      if (pal_send_all(conn->fd, g_sendfile_chunk, (size_t)nread, 0) < 0) {
-        goto done_sendfile;
-      }
-
-      remaining -= (size_t)nread;
+      sf_remaining -= (size_t)sent;
     }
-  done_sendfile:
+
     close(response->sendfile_fd);
     response->sendfile_fd = -1;
   }

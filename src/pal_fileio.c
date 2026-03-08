@@ -410,8 +410,26 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
 
   src_fd = open(src_path, O_RDONLY);
 
-  /* Sequential read-ahead hint — Linux only (PS4/PS5 lack posix_fadvise) */
-#if defined(POSIX_FADV_SEQUENTIAL) && defined(PLATFORM_LINUX)
+  /*
+   * Sequential read-ahead hint.
+   *
+   * Previously guarded by PLATFORM_LINUX, which incorrectly excluded PS5.
+   * pal_file_open() already applies POSIX_FADV_SEQUENTIAL on PS5 via the
+   * same guard, so this was an oversight rather than a deliberate exclusion.
+   *
+   * IMPORTANT: posix_fadvise() is safe here because this fd is never passed
+   * to sendfile() — pal_file_copy_atomic_ex() uses read()/write() loops, not
+   * sendfile(). (Setting POSIX_FADV_SEQUENTIAL on an fd later passed to
+   * sendfile() on PS5 can cause undefined behaviour; that concern does not
+   * apply in this copy path.)
+   *
+   * NOTE: F_NOCACHE is intentionally NOT set here.  Unlike pal_file_open(),
+   * this copy function targets /data PFS writes where F_NOCACHE on the write
+   * fd causes EINVAL failures due to PFS alignment constraints.  The source
+   * fd could theoretically use F_NOCACHE, but POSIX_FADV_SEQUENTIAL achieves
+   * the same read-ahead benefit without the alignment risk.
+   */
+#if defined(PLATFORM_PS5) && defined(POSIX_FADV_SEQUENTIAL)
   if (src_fd >= 0) {
     (void)posix_fadvise(src_fd, 0, 0, POSIX_FADV_SEQUENTIAL);
   }
@@ -825,25 +843,70 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
     for (;;) {
       ssize_t r = read(src_fd, copy_buf, (size_t)PAL_FILE_COPY_BUFFER_SIZE);
       if (r > 0) {
-        ssize_t w = pal_file_write_all(dst_fd, copy_buf, (size_t)r);
-        if (w != r) {
-          {
-            int e = errno;
-            char msg[256];
-            snprintf(msg, sizeof(msg),
-                     "[XDEV] write failed: errno=%d written_so_far=%llu "
-                     "file_size=%llu dst=%s",
-                     e,
-                     (unsigned long long)serial_written,
-                     (unsigned long long)st.st_size,
-                     dst_path);
-            ftp_log_line(FTP_LOG_WARN, msg);
-            if (out_errno != NULL) {
-              *out_errno = e;
+        /*
+         * Write the full buffer in a single write() loop — do NOT call
+         * pal_file_write_all(), which subdivides writes into
+         * PAL_FILE_WRITE_CHUNK_MAX (128 KB on PS5, 64 KB on PS4).
+         *
+         * That limit exists exclusively to prevent TCP recv-buffer stalls
+         * in cmd_STOR.  It has no relevance for a file-to-file copy: large
+         * single write() calls let the USB exFAT driver allocate contiguous
+         * extents and avoid per-chunk FAT chain updates, which is the same
+         * rationale used by the double-buffer pipeline above.
+         *
+         * On PS5 (NVMe PFS, ~215 MB/s write bandwidth), using 128 KB chunks
+         * instead of 4 MB chunks causes ~32x more write() syscalls per buffer,
+         * each with its own AES-XTS context setup in the kernel VFS layer.
+         * This is the primary cause of the observed 130 MB/s cap vs the
+         * 230 MB/s target.
+         *
+         * PS4/PS5 PFS quirk: a full filesystem silently returns write() == 0
+         * instead of -1 + ENOSPC.  Detect and synthesise ENOSPC so the log
+         * always shows a meaningful errno value.
+         */
+        {
+          const uint8_t *p_wr    = copy_buf;
+          size_t         rem_wr  = (size_t)r;
+          int            write_ok = 1;
+          int            write_errno = 0;
+
+          while (rem_wr > 0U) {
+            ssize_t w = write(dst_fd, p_wr, rem_wr);
+            if (w > 0) {
+              p_wr   += (size_t)w;
+              rem_wr -= (size_t)w;
+              continue;
             }
+            if ((w < 0) && (errno == EINTR)) {
+              continue;
+            }
+            /*
+             * w == 0: PS4/PS5 PFS silent ENOSPC — synthesise the real errno
+             * so the caller and log see a meaningful error code.
+             */
+            write_errno = (w == 0) ? ENOSPC : errno;
+            write_ok = 0;
+            break;
           }
-          out_err = FTP_ERR_FILE_WRITE;
-          goto cleanup;
+
+          if (write_ok == 0) {
+            {
+              char msg[256];
+              snprintf(msg, sizeof(msg),
+                       "[XDEV] write failed: errno=%d written_so_far=%llu "
+                       "file_size=%llu dst=%s",
+                       write_errno,
+                       (unsigned long long)serial_written,
+                       (unsigned long long)st.st_size,
+                       dst_path);
+              ftp_log_line(FTP_LOG_WARN, msg);
+              if (out_errno != NULL) {
+                *out_errno = write_errno;
+              }
+            }
+            out_err = FTP_ERR_FILE_WRITE;
+            goto cleanup;
+          }
         }
         serial_written += (uint64_t)r;
 
