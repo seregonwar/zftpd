@@ -885,8 +885,31 @@ static int http_handle_request(http_connection_t *conn) {
                                   response->sendfile_fd,
                                   &sf_offset,
                                   chunk);
-      if (sent <= 0) {
-        /* EOF, error, or unrecoverable partial send — abort transfer */
+      if (sent < 0) {
+        /* Unrecoverable error (EIO, EBADF, ENOTSOCK, …) — abort */
+        break;
+      }
+      if (sent == 0) {
+        /*
+         * pal_sendfile() returns 0 in two distinct situations on
+         * FreeBSD/PS5 (errno is still set from the underlying syscall):
+         *
+         *   EINTR : sendfile(2) was interrupted by a signal before sending
+         *           any bytes.  The offset has NOT advanced.  Retry
+         *           immediately — this is a normal, transient condition.
+         *
+         *   EAGAIN: the socket send-buffer is full (non-blocking I/O or
+         *           kernel back-pressure).  Spinning here burns CPU and
+         *           starves other connections, which was the cause of the
+         *           throughput regression from 390 MB/s to 240 MB/s.
+         *           Break and let the caller (the event loop or the
+         *           blocking-socket path) handle flow control naturally.
+         *
+         *   Other / Linux EOF: treat as end-of-file or error — break.
+         */
+        if (errno == EINTR) {
+          continue;
+        }
         break;
       }
 

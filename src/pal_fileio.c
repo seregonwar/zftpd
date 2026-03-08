@@ -48,29 +48,21 @@ SOFTWARE.
 
 /* Fallback buffer size for non-sendfile platforms */
 #define FALLBACK_BUFFER_SIZE FTP_BUFFER_SIZE
+
 /*
- * Write chunk ceiling for pal_file_write_all().
- *
- *   PS4/PS5: /data/ lives on a PFS-encrypted NVMe partition.
- *            Every write() triggers per-block AES in the kernel VFS.
- *            Larger chunks (1 MB) cut the number of crypto context
- *            switches by 4x vs. the old 256 KB default.
- *
- *   POSIX:   256 KB is a safe, portable default.
+ * PAL_FILE_WRITE_CHUNK_MAX is defined in pal_fileio.h.
+ * This fallback guard protects against edge cases where a transitive include
+ * of pal_fileio.h fires before our own #include above (e.g. via ftp_types.h),
+ * causing the header guard to suppress the macro on the second pass.
  */
-#if defined(PLATFORM_PS5) || defined(PS5)
-#define PAL_FILE_WRITE_CHUNK_MAX                                               \
-  131072U /* 128 KB — keeps writer latency <5ms per chunk so the             \
-             double-buffer producer never stalls long enough to drain the      \
-             kernel recv buffer and trigger the client 20s inactivity timer */
-#elif defined(PLATFORM_PS4) || defined(PS4)
-#define PAL_FILE_WRITE_CHUNK_MAX                                               \
-  65536U /* 64 KB — PS4 PFS crypto is slow (~2ms/chunk); keep writes short   \
-            so the double-buffer producer is never stalled long enough for     \
-            the FileZilla 20-second client idle timeout to fire            */
-#else
-#define PAL_FILE_WRITE_CHUNK_MAX                                               \
-  262144U /* 256 KB — safe POSIX default         */
+#ifndef PAL_FILE_WRITE_CHUNK_MAX
+#  if defined(PLATFORM_PS5) || defined(PS5)
+#    define PAL_FILE_WRITE_CHUNK_MAX 131072U  /* 128 KB */
+#  elif defined(PLATFORM_PS4) || defined(PS4)
+#    define PAL_FILE_WRITE_CHUNK_MAX  65536U  /*  64 KB */
+#  else
+#    define PAL_FILE_WRITE_CHUNK_MAX 262144U  /* 256 KB */
+#  endif
 #endif
 
 /* Max recursion depth for cross-device directory move */
@@ -241,9 +233,23 @@ ssize_t pal_sendfile(int sock_fd, int file_fd, off_t *offset, size_t count) {
   if (count == 0U) {
     return 0;
   }
-  if (count > (size_t)PAL_FILE_WRITE_CHUNK_MAX) {
-    count = (size_t)PAL_FILE_WRITE_CHUNK_MAX;
-  }
+
+  /*
+   * NOTE: PAL_FILE_WRITE_CHUNK_MAX is intentionally NOT applied here.
+   *
+   * That cap (128 KB on PS5, 64 KB on PS4) exists to keep per-chunk write
+   * latency under ~5 ms so the FTP double-buffer producer never starves the
+   * kernel TCP recv-buffer long enough to trigger a client inactivity timeout.
+   * It is an FTP protocol concern, not a platform abstraction concern.
+   *
+   * Enforcing it here silently degraded HTTP /api/download throughput from
+   * ~300 MB/s to ~240 MB/s: the HTTP server passes 1 MB chunks but each call
+   * was internally cut to 128 KB, generating 8x more syscalls per MB.
+   *
+   * The FTP caller (ftp_commands.c cmd_RETR) now passes pre-capped chunks
+   * using PAL_FILE_WRITE_CHUNK_MAX directly, so the limit is preserved where
+   * it matters without penalising other callers.
+   */
 
 #if defined(__linux__)
   /*

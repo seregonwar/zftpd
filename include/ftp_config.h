@@ -330,7 +330,7 @@ SOFTWARE.
 #endif
 
 /**
- * TCP send buffer size in bytes
+ * TCP send buffer size for control socket (bytes)
  *
  *   Sized to fill the bandwidth-delay product (BDP):
  *     GbE 1 ms RTT  ->  BDP = 125 KB  ->  1 MB is generous
@@ -338,6 +338,50 @@ SOFTWARE.
  */
 #ifndef FTP_TCP_SNDBUF
 #define FTP_TCP_SNDBUF 1048576U
+#endif
+
+/**
+ * Maximum retries when sendfile() returns 0 bytes (TCP back-pressure)
+ *
+ *   Each retry sleeps FTP_SENDFILE_EAGAIN_SLEEP_US microseconds.
+ *   Total maximum wait = retries × sleep = 256 × 1000 µs = 256 ms.
+ *   This covers internet RTTs up to ~256 ms before declaring a driver stall.
+ */
+#ifndef FTP_SENDFILE_EAGAIN_RETRIES
+#define FTP_SENDFILE_EAGAIN_RETRIES 256
+#endif
+
+/** Sleep between sendfile EAGAIN retries (microseconds) */
+#ifndef FTP_SENDFILE_EAGAIN_SLEEP_US
+#define FTP_SENDFILE_EAGAIN_SLEEP_US 1000U /* 1 ms */
+#endif
+
+/**
+ * DESIGN RATIONALE - distinct from PAL_FILE_WRITE_CHUNK_MAX:
+ *
+ *   PAL_FILE_WRITE_CHUNK_MAX (64 KB on PS4, 128 KB on PS5) was designed
+ *   to keep per-chunk PFS WRITE latency under ~5 ms in the STOR
+ *   double-buffer path so the FTP recv thread never starves the TCP
+ *   receive window.  It is a WRITE latency constraint, not a READ one.
+ *
+ *   Using it in cmd_RETR sendfile() penalises downloads with 4-8x the
+ *   number of syscalls compared to the HTTP server (512 KB chunks).
+ *   Each unnecessary syscall boundary:
+ *     - re-acquires the socket lock
+ *     - may flush a partial TCP_CORK/TCP_NOPUSH window prematurely
+ *     - triggers a false "driver stall" if the send buffer is momentarily
+ *       full (TCP back-pressure) before sufficient ACKs have arrived
+ *
+ *   512 KB is:
+ *     - below the PS5 sendfile EAGAIN threshold (>= 1 MB)
+ *     - large enough that one chunk fills the BDP on most internet paths
+ *     - the value HTTP /api/download already uses (HTTP_SENDFILE_CHUNK_SIZE)
+ *
+ * @see cmd_RETR in ftp_commands.c
+ * @see HTTP_SENDFILE_CHUNK_SIZE in http_config.h
+ */
+#ifndef FTP_RETR_SENDFILE_CHUNK
+#define FTP_RETR_SENDFILE_CHUNK (512U * 1024U) /* 512 KB */
 #endif
 
 /**

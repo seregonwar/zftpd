@@ -59,6 +59,20 @@ SOFTWARE.
 #include <pthread.h>
 #include <time.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <fcntl.h> /* posix_fadvise(POSIX_FADV_DONTNEED) */
+#endif
+
+/* Fallback: pal_fileio.h may be suppressed by a transitive include guard */
+#ifndef PAL_FILE_WRITE_CHUNK_MAX
+#  if defined(PLATFORM_PS5) || defined(PS5)
+#    define PAL_FILE_WRITE_CHUNK_MAX 131072U  /* 128 KB */
+#  elif defined(PLATFORM_PS4) || defined(PS4)
+#    define PAL_FILE_WRITE_CHUNK_MAX  65536U  /*  64 KB */
+#  else
+#    define PAL_FILE_WRITE_CHUNK_MAX 262144U  /* 256 KB */
+#  endif
+#endif
 
 /*===========================================================================*
  * PFS FILE-CREATION SERIALISER
@@ -722,17 +736,75 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
 
       while (remaining > 0U) {
         ssize_t sent =
-            pal_sendfile(session->data_fd, node.fd, &offset, remaining);
+            pal_sendfile(session->data_fd, node.fd, &offset,
+                         (remaining > (size_t)FTP_RETR_SENDFILE_CHUNK)
+                             ? (size_t)FTP_RETR_SENDFILE_CHUNK
+                             : remaining);
 
         if (sent <= 0) {
           if ((sent < 0) && (errno == EINTR)) {
             continue;
           }
-          /* Stalled: sync offset and switch to read() cooldown */
-          vfs_set_offset(&node, (uint64_t)offset);
 
+          /*
+           * sent == 0: two possible causes need different responses.
+           *
+           * (A) TCP back-pressure — send buffer momentarily full.
+           *     ACKs are in-flight; a short sleep lets them drain the
+           *     buffer so sendfile can continue.  This is identical to
+           *     what the HTTP server does on EAGAIN (usleep 1 ms + retry).
+           *
+           * (B) Platform driver stall (PS5 exFAT / sendfile internal
+           *     limit).  Retries do not recover; fall to read() cooldown.
+           *
+           * Disambiguation strategy: retry up to FTP_SENDFILE_EAGAIN_RETRIES
+           * times, each time sleeping FTP_SENDFILE_EAGAIN_SLEEP_US µs.  If
+           * any retry sends bytes → (A), continue burst.  If all retries
+           * return 0 → (B), fall to cooldown.
+           *
+           * With FTP_SENDFILE_EAGAIN_RETRIES = 256 and 1 ms sleep, we wait
+           * up to 256 ms before declaring a stall — enough to cover any
+           * realistic internet RTT and allow TCP ACKs to return.
+           */
+          int recovered = 0;
+          for (int r = 0; r < FTP_SENDFILE_EAGAIN_RETRIES; r++) {
+            usleep(FTP_SENDFILE_EAGAIN_SLEEP_US);
+            ssize_t r_sent =
+                pal_sendfile(session->data_fd, node.fd, &offset,
+                             (remaining > (size_t)FTP_RETR_SENDFILE_CHUNK)
+                                 ? (size_t)FTP_RETR_SENDFILE_CHUNK
+                                 : remaining);
+            if (r_sent > 0) {
+              /* TCP backpressure cleared — count as sent and continue */
+              sf_sent_any = 1;
+              remaining -= (size_t)r_sent;
+              bytes_sent += (uint64_t)r_sent;
+              session->last_activity = time(NULL);
+              atomic_fetch_add(&session->stats.bytes_sent, (uint64_t)r_sent);
+#if defined(__linux__) && defined(POSIX_FADV_DONTNEED)
+              if (node.fd >= 0) {
+                off_t evict_start = offset - (off_t)r_sent;
+                if (evict_start >= 0) {
+                  (void)posix_fadvise(node.fd, evict_start,
+                                      (off_t)r_sent, POSIX_FADV_DONTNEED);
+                }
+              }
+#endif
+              recovered = 1;
+              break;
+            }
+            if ((r_sent < 0) && (errno == EINTR)) {
+              r--; /* don't count EINTR as a retry */
+            }
+          }
+
+          if (recovered != 0) {
+            continue; /* back to sendfile burst */
+          }
+
+          /* True driver stall (all retries failed) */
+          vfs_set_offset(&node, (uint64_t)offset);
           if (sf_sent_any == 0) {
-            /* sendfile failed immediately on retry -> give up */
             use_sendfile = 0;
           }
           break;
@@ -743,17 +815,42 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
         bytes_sent += (uint64_t)sent;
         session->last_activity = time(NULL);
         atomic_fetch_add(&session->stats.bytes_sent, (uint64_t)sent);
+
+        /*
+         * Evict pages we have already sent from the kernel page cache.
+         *
+         *   Without this hint, the kernel caches every page of the source
+         *   file as it is DMA'd to the socket buffer.  For large transfers
+         *   (12–60 GB) the page cache fills all available RAM; the kernel
+         *   then spends increasing time on page reclaim, causing the
+         *   observed monotonic throughput drop from 260 Mbps toward 0.
+         *
+         *   POSIX_FADV_DONTNEED on Linux marks the just-sent pages as
+         *   eligible for immediate eviction (they remain accessible but
+         *   are freed under memory pressure before any other pages).
+         *   This keeps cache pressure flat regardless of file size.
+         *
+         *   Only safe on Linux here (the fadvise is on the source fd, not
+         *   a sendfile-internal mapping, so there is no conflict with the
+         *   PS5 sendfile vnode-pin concern described in pal_fileio.c).
+         */
+#if defined(__linux__) && defined(POSIX_FADV_DONTNEED)
+        if (node.fd >= 0) {
+          off_t evict_start = offset - (off_t)sent;
+          if (evict_start >= 0) {
+            (void)posix_fadvise(node.fd, evict_start,
+                                (off_t)sent, POSIX_FADV_DONTNEED);
+          }
+        }
+#endif
       }
       pal_socket_uncork(session->data_fd);
 
       if (remaining == 0U) {
         break; /* transfer complete */
       }
-      if (use_sendfile != 0) {
-        /* Stalled but sent some data: run cooldown then retry */
-        continue;
-      }
       /* use_sendfile == 0: permanent fallback, drop through */
+      /* use_sendfile != 0: stalled mid-transfer, fall through to read() cooldown */
     }
 
     /*-- read() path: cooldown (limited) or finish (unlimited) --*/
@@ -772,14 +869,9 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
      * If sendfile is permanently disabled, run until transfer complete.
      */
     int can_retry_sf = ((vfs_get_caps(&node) & VFS_CAP_SENDFILE) != 0U) &&
-                       (use_sendfile == 0) &&
+                       (use_sendfile != 0) &&
+                       (bytes_sent > 0U) &&
                        (remaining > SENDFILE_COOLDOWN_BYTES);
-    /* Only retry if sendfile actually worked at least once this transfer */
-    if ((can_retry_sf != 0) && (bytes_sent > 0U)) {
-      can_retry_sf = 1;
-    } else {
-      can_retry_sf = 0;
-    }
 
     size_t cooldown_left = can_retry_sf ? SENDFILE_COOLDOWN_BYTES : remaining;
     int read_error = 0;
@@ -810,6 +902,18 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
       remaining -= (size_t)n;
       cooldown_left -= (size_t)n;
       session->last_activity = time(NULL);
+
+      /* Evict pages already sent; same rationale as the sendfile path. */
+#if defined(__linux__) && defined(POSIX_FADV_DONTNEED)
+      if (node.fd >= 0) {
+        off_t sent_end = (off_t)(file_size - (uint64_t)remaining);
+        off_t evict_start = sent_end - (off_t)sent;
+        if (evict_start >= 0) {
+          (void)posix_fadvise(node.fd, evict_start,
+                              (off_t)sent, POSIX_FADV_DONTNEED);
+        }
+      }
+#endif
     }
     pal_socket_uncork(session->data_fd);
 
@@ -1908,6 +2012,33 @@ ftp_error_t cmd_PASV(ftp_session_t *session, const char *args) {
     (void)PAL_SETSOCKOPT(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
   }
 
+  /*
+   * SO_SNDBUF is intentionally NOT set on the listening socket.
+   *
+   * DESIGN RATIONALE — auto-tuning vs. explicit SNDBUF:
+   *
+   *   On both Linux (tcp_wmem) and FreeBSD (net.inet.tcp.sendbuf_auto),
+   *   calling setsockopt(SO_SNDBUF) explicitly on any socket — even
+   *   pre-bind — marks that socket as "manually sized" and DISABLES
+   *   the kernel's TCP send-buffer auto-tuning for it.
+   *
+   *   The HTTP server never sets SO_SNDBUF and relies on auto-tuning;
+   *   it achieves full link speed at any internet RTT because the kernel
+   *   grows the buffer to exactly BDP = RTT × bandwidth.
+   *
+   *   A previous version of this code set SO_SNDBUF = FTP_TCP_DATA_SNDBUF
+   *   (4 MB) here, hoping to bypass kern.ipc.maxsockbuf via the 3-way
+   *   handshake inheritance trick.  On OrbisOS the kernel still capped the
+   *   effective buffer (≈ 512 KB–1 MB) and, critically, disabled
+   *   auto-tuning — leaving FTP stuck at ≈ 30 Mbps while HTTP with
+   *   auto-tuning reached 80 Mbps on the same link.
+   *
+   *   SO_RCVBUF (STOR/uploads) cannot use auto-tuning because the kernel
+   *   does not auto-grow the receive buffer on FreeBSD; the explicit value
+   *   is required there to prevent zero-window stalls.  The send buffer
+   *   (RETR/downloads) has no such constraint — leave it for auto-tuning.
+   */
+
   /* Resolve the local IP from the control connection so the PASV
    * listener is bound to the specific interface — not INADDR_ANY.
    * On OrbisOS/FreeBSD (PS4/PS5), binding to INADDR_ANY causes
@@ -2023,6 +2154,8 @@ ftp_error_t cmd_EPSV(ftp_session_t *session, const char *args) {
     int rcvbuf = (int)FTP_TCP_RCVBUF;
     (void)PAL_SETSOCKOPT(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
   }
+
+  /* SO_SNDBUF intentionally NOT set — see cmd_PASV comment on auto-tuning. */
 
   /* Bind to the local IP of the control connection — not INADDR_ANY.
    * Same rationale as cmd_PASV: on OrbisOS/FreeBSD, INADDR_ANY causes

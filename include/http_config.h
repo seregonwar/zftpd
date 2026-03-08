@@ -58,8 +58,22 @@ SOFTWARE.
 #define HTTP_HEADER_MAX_COUNT 32
 #define HTTP_HEADER_LINE_MAX 1024
 
-/* File transfer — 1 MB chunks reduce syscall overhead for large downloads */
-#define HTTP_SENDFILE_CHUNK_SIZE (1024 * 1024)
+/*
+ * File transfer chunk size for sendfile() in /api/download.
+ *
+ * PS5 REGRESSION NOTE:
+ *   PS5's modified FreeBSD kernel triggers an internal buffer limit with
+ *   sendfile() chunks >= 1 MB, returning EAGAIN (sbytes = 0) even on
+ *   nominally-blocking sockets.  Each EAGAIN costs a usleep(1 ms) yield
+ *   (to avoid busy-spinning).  At 1 MB/chunk: 1.2 GB / 1 MB × 1 ms =
+ *   ~1.2 s of extra sleep latency per download — the observed regression
+ *   ("previously downloaded 1.2 GB immediately").
+ *
+ *   512 KB chunks stay well below the 1 MB trigger threshold, eliminating
+ *   the EAGAIN storms while keeping syscall count reasonable (2× increase
+ *   vs 1 MB, negligible vs I/O latency).
+ */
+#define HTTP_SENDFILE_CHUNK_SIZE (512 * 1024)
 
 /* Thread stack size (bytes) */
 #ifndef HTTP_THREAD_STACK_SIZE

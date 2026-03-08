@@ -522,6 +522,8 @@ ftp_error_t ftp_session_open_data_connection(ftp_session_t *session) {
       (void)PAL_SETSOCKOPT(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
     }
 
+    /* SO_SNDBUF intentionally NOT set — see cmd_PASV comment on auto-tuning. */
+
     {
       char dbg[128];
       snprintf(dbg, sizeof(dbg), "[DBG] ACTIVE connect to %s:%u ...",
@@ -620,6 +622,11 @@ ftp_error_t ftp_session_open_data_connection(ftp_session_t *session) {
       /* else: inherited value is adequate — do NOT call setsockopt,
        * which would downgrade the cap-bypassed buffer. */
     }
+
+    /*
+     * SO_SNDBUF is intentionally NOT set here.
+     * See cmd_PASV for the full rationale (auto-tuning vs. explicit value).
+     */
   }
 
   /* Configure data socket for bulk transfer
