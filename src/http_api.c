@@ -1422,10 +1422,12 @@ static http_response_t *api_rename(const http_request_t *request) {
 typedef struct {
   _Atomic uint64_t bytes_copied;
   _Atomic uint64_t total_bytes;
-  _Atomic int active; /* 1 while copy thread is running */
-  _Atomic int done;   /* 1 when copy finished            */
-  _Atomic int error;  /* 1 if copy failed                */
-  _Atomic int cancel; /* 1 to request cancellation       */
+  _Atomic int active;     /* 1 while copy thread is running  */
+  _Atomic int done;       /* 1 when copy finished             */
+  _Atomic int error;      /* 1 if copy failed                 */
+  _Atomic int cancel;     /* 1 to request cancellation        */
+  _Atomic int error_code; /* ftp_error_t value on failure     */
+  _Atomic int error_errno; /* errno captured at failure point */
 } copy_progress_t;
 
 static copy_progress_t g_copy_progress = {0};
@@ -1441,15 +1443,20 @@ static int copy_progress_cb(uint64_t bytes_copied, void *user_data) {
 typedef struct {
   char src[FTP_PATH_MAX];
   char dst[FTP_PATH_MAX];
+  int *out_errno; /* points to g_copy_progress.error_errno storage (unused; errno captured inside) */
 } copy_thread_args_t;
 
 static void *copy_thread_fn(void *arg) {
   copy_thread_args_t *a = (copy_thread_args_t *)arg;
 
+  int saved_errno = 0;
   ftp_error_t rc =
-      pal_file_copy_recursive_ex(a->src, a->dst, 1, copy_progress_cb, NULL);
+      pal_file_copy_recursive_ex(a->src, a->dst, 1, copy_progress_cb,
+                                 NULL, &saved_errno);
   if ((rc != FTP_OK) || (atomic_load(&g_copy_progress.cancel) != 0)) {
     atomic_store(&g_copy_progress.error, 1);
+    atomic_store(&g_copy_progress.error_code, (int)rc);
+    atomic_store(&g_copy_progress.error_errno, saved_errno);
   }
   atomic_store(&g_copy_progress.active, 0);
   atomic_store(&g_copy_progress.done, 1);
@@ -1467,14 +1474,17 @@ static http_response_t *api_copy_progress(const http_request_t *request) {
   int active = atomic_load(&g_copy_progress.active);
   int done = atomic_load(&g_copy_progress.done);
   int err = atomic_load(&g_copy_progress.error);
+  int err_code = atomic_load(&g_copy_progress.error_code);
+  int err_errno = atomic_load(&g_copy_progress.error_errno);
 
-  char body[256];
+  char body[320];
   int len =
       snprintf(body, sizeof(body),
-               "{\"active\":%s,\"done\":%s,\"error\":%s,"
+               "{\"active\":%s,\"done\":%s,\"error\":%s,\"error_code\":%d,"
+               "\"error_errno\":%d,"
                "\"bytes_copied\":%" PRIu64 ",\"total_bytes\":%" PRIu64 "}",
                active ? "true" : "false", done ? "true" : "false",
-               err ? "true" : "false", copied, total);
+               err ? "true" : "false", err_code, err_errno, copied, total);
 
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
   http_response_add_header(resp, "Content-Type", "application/json");
@@ -1680,6 +1690,8 @@ static http_response_t *api_copy(const http_request_t *request) {
     atomic_store(&g_copy_progress.active, 1);
     atomic_store(&g_copy_progress.done, 0);
     atomic_store(&g_copy_progress.error, 0);
+    atomic_store(&g_copy_progress.error_code, 0);
+    atomic_store(&g_copy_progress.error_errno, 0);
     atomic_store(&g_copy_progress.cancel, 0);
   }
 

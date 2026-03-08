@@ -114,7 +114,7 @@ http_response_t *http_response_create(http_status_t status) {
       http_response_add_header(resp, "Cache-Control", "no-store") != 0 ||
       http_response_add_header(resp, "Content-Security-Policy",
                                "default-src 'self'; "
-                               "connect-src 'self'; "
+                               "connect-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com; "
                                "img-src 'self' data:; "
                                "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
                                "style-src-elem 'self' 'unsafe-inline' https://fonts.googleapis.com; "

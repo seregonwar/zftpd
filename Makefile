@@ -272,7 +272,11 @@ DEPENDS := $(patsubst $(OBJ_DIR)/%.o,$(DEP_DIR)/%.d,$(OBJECTS))
 #============================================================================
 
 .PHONY: all clean distclean install test help bin deploy deploy-i deploy-nc doctor-ps4
-.PHONY: all-platforms release-all debug-all ffi ffi-java ffi-rust ffi-python
+.PHONY: all-platforms release-all debug-all ffi ffi-java ffi-rust ffi-python resources
+
+resources:
+	@echo "  [GEN] src/http_resources.c"
+	@python3 tools/generate_resources.py > src/http_resources.c
 
 .DEFAULT_GOAL := all
 

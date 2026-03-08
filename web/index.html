@@ -1907,35 +1907,80 @@
 
     /* ══ STATS MODAL ══════════════════════════════════════════════ */
     @keyframes smSlideUp {
-      from { opacity: 0; transform: translateY(40px) }
-      to   { opacity: 1; transform: translateY(0) }
+      from {
+        opacity: 0;
+        transform: translateY(40px)
+      }
+
+      to {
+        opacity: 1;
+        transform: translateY(0)
+      }
     }
+
     @keyframes smSlideDown {
-      from { opacity: 1; transform: translateY(0) }
-      to   { opacity: 0; transform: translateY(40px) }
+      from {
+        opacity: 1;
+        transform: translateY(0)
+      }
+
+      to {
+        opacity: 0;
+        transform: translateY(40px)
+      }
     }
+
     @keyframes smFadeTab {
-      from { opacity: 0 }
-      to   { opacity: 1 }
+      from {
+        opacity: 0
+      }
+
+      to {
+        opacity: 1
+      }
     }
+
     @keyframes smPulse {
-      0%,100% { opacity: 1 }
-      50%      { opacity: .3 }
+
+      0%,
+      100% {
+        opacity: 1
+      }
+
+      50% {
+        opacity: .3
+      }
     }
+
     @keyframes smToastIn {
-      from { opacity: 0; transform: translateX(60px) }
-      to   { opacity: 1; transform: translateX(0) }
+      from {
+        opacity: 0;
+        transform: translateX(60px)
+      }
+
+      to {
+        opacity: 1;
+        transform: translateX(0)
+      }
     }
+
     @keyframes smToastOut {
-      from { opacity: 1; transform: translateX(0) }
-      to   { opacity: 0; transform: translateX(60px) }
+      from {
+        opacity: 1;
+        transform: translateX(0)
+      }
+
+      to {
+        opacity: 0;
+        transform: translateX(60px)
+      }
     }
 
     .smo-overlay {
       position: fixed;
       inset: 0;
       z-index: 5000;
-      background: rgba(0,0,0,.72);
+      background: rgba(0, 0, 0, .72);
       backdrop-filter: blur(6px);
       display: flex;
       align-items: flex-end;
@@ -1945,10 +1990,12 @@
       pointer-events: none;
       transition: opacity .28s ease;
     }
+
     .smo-overlay.smo-open {
       opacity: 1;
       pointer-events: auto;
     }
+
     .smo-modal {
       width: 100%;
       max-width: 1280px;
@@ -1959,16 +2006,18 @@
       background: var(--sf);
       border: 1px solid var(--bd2);
       border-radius: 18px 18px 0 0;
-      box-shadow: 0 -20px 80px rgba(0,0,0,.6);
+      box-shadow: 0 -20px 80px rgba(0, 0, 0, .6);
       overflow: hidden;
       transform: translateY(40px);
       opacity: 0;
-      transition: transform .28s cubic-bezier(.22,1,.36,1), opacity .28s ease;
+      transition: transform .28s cubic-bezier(.22, 1, .36, 1), opacity .28s ease;
     }
+
     .smo-overlay.smo-open .smo-modal {
       transform: translateY(0);
       opacity: 1;
     }
+
     .smo-modal.smo-closing {
       transform: translateY(40px);
       opacity: 0;
@@ -1983,6 +2032,7 @@
       padding: 14px 20px 0;
       flex-shrink: 0;
     }
+
     .smo-title {
       font-family: 'Syne', sans-serif;
       font-size: 15px;
@@ -1993,11 +2043,13 @@
       background-clip: text;
       letter-spacing: -.01em;
     }
+
     .smo-head-btns {
       margin-left: auto;
       display: flex;
       gap: 6px;
     }
+
     .smo-btn-icon {
       background: none;
       border: 1px solid var(--bd2);
@@ -2013,10 +2065,12 @@
       transition: border-color .15s, color .15s;
       font-family: inherit;
     }
+
     .smo-btn-icon:hover {
       border-color: var(--ac);
       color: var(--tx);
     }
+
     .smo-btn-icon.smo-close:hover {
       border-color: var(--er);
       color: var(--er);
@@ -2030,6 +2084,7 @@
       border-bottom: 1px solid var(--bd);
       flex-shrink: 0;
     }
+
     .smo-tab {
       padding: 7px 16px;
       font-size: 11px;
@@ -2047,7 +2102,12 @@
       transition: color .15s, background .15s;
       white-space: nowrap;
     }
-    .smo-tab:hover { color: var(--tx); background: var(--sf2); }
+
+    .smo-tab:hover {
+      color: var(--tx);
+      background: var(--sf2);
+    }
+
     .smo-tab.smo-tab-active {
       color: var(--ac);
       background: var(--sf2);
@@ -2061,11 +2121,15 @@
       overflow-y: auto;
       padding: 18px 20px;
     }
+
     .smo-section {
       display: none;
       animation: smFadeTab .15s ease;
     }
-    .smo-section.smo-active { display: block; }
+
+    .smo-section.smo-active {
+      display: block;
+    }
 
     /* ── Footer ── */
     .smo-footer {
@@ -2078,6 +2142,7 @@
       color: var(--tx2);
       flex-shrink: 0;
     }
+
     .smo-live-dot {
       width: 7px;
       height: 7px;
@@ -2087,7 +2152,11 @@
       animation: smPulse 2s ease-in-out infinite;
       flex-shrink: 0;
     }
-    .smo-ts { color: var(--tx3); }
+
+    .smo-ts {
+      color: var(--tx3);
+    }
+
     .smo-refresh-btn {
       margin-left: auto;
       display: flex;
@@ -2104,7 +2173,11 @@
       cursor: pointer;
       transition: border-color .15s, color .15s;
     }
-    .smo-refresh-btn:hover { border-color: var(--ac); color: var(--tx); }
+
+    .smo-refresh-btn:hover {
+      border-color: var(--ac);
+      color: var(--tx);
+    }
 
     /* ── Cards ── */
     .smo-card {
@@ -2113,6 +2186,7 @@
       border-radius: 13px;
       padding: 16px;
     }
+
     .smo-card-title {
       font-size: 10px;
       font-weight: 700;
@@ -2131,12 +2205,14 @@
       grid-template-columns: 1fr 1fr;
       gap: 14px;
     }
+
     .smo-grid-3 {
       display: grid;
       grid-template-columns: 1fr 1fr 1fr;
       gap: 14px;
       margin-top: 14px;
     }
+
     .smo-grid-system {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -2150,12 +2226,17 @@
       align-items: center;
       gap: 14px;
     }
+
     .smo-gauge-wrap {
       position: relative;
       width: 120px;
       height: 120px;
     }
-    .smo-gauge-wrap svg { transform: rotate(-90deg); }
+
+    .smo-gauge-wrap svg {
+      transform: rotate(-90deg);
+    }
+
     .smo-gauge-center {
       position: absolute;
       inset: 0;
@@ -2165,12 +2246,14 @@
       justify-content: center;
       gap: 2px;
     }
+
     .smo-gauge-pct {
       font-size: 22px;
       font-weight: 700;
       color: var(--ac);
       line-height: 1;
     }
+
     .smo-gauge-label {
       font-size: 9px;
       color: var(--tx3);
@@ -2187,9 +2270,21 @@
       display: flex;
       background: var(--bd);
     }
-    .smo-seg-used { background: var(--ac); transition: width .6s ease; }
-    .smo-seg-cache { background: var(--wn); transition: width .6s ease; }
-    .smo-seg-free { background: var(--bd2); flex: 1; }
+
+    .smo-seg-used {
+      background: var(--ac);
+      transition: width .6s ease;
+    }
+
+    .smo-seg-cache {
+      background: var(--wn);
+      transition: width .6s ease;
+    }
+
+    .smo-seg-free {
+      background: var(--bd2);
+      flex: 1;
+    }
 
     /* ── Generic bar ── */
     .smo-bar {
@@ -2199,6 +2294,7 @@
       overflow: hidden;
       margin-top: 8px;
     }
+
     .smo-bar-fill {
       height: 100%;
       border-radius: 999px;
@@ -2206,16 +2302,29 @@
       transition: width .6s ease;
       width: 0%;
     }
-    .smo-bar-fill.ok  { background: linear-gradient(90deg, var(--ok), #16a34a); }
-    .smo-bar-fill.wn  { background: linear-gradient(90deg, var(--wn), #d97706); }
-    .smo-bar-fill.cr  { background: linear-gradient(90deg, var(--er), #dc2626); }
+
+    .smo-bar-fill.ok {
+      background: linear-gradient(90deg, var(--ok), #16a34a);
+    }
+
+    .smo-bar-fill.wn {
+      background: linear-gradient(90deg, var(--wn), #d97706);
+    }
+
+    .smo-bar-fill.cr {
+      background: linear-gradient(90deg, var(--er), #dc2626);
+    }
 
     /* ── Sparkline ── */
     .smo-sparkline {
       width: 100%;
       overflow: hidden;
     }
-    .smo-sparkline svg { display: block; overflow: visible; }
+
+    .smo-sparkline svg {
+      display: block;
+      overflow: visible;
+    }
 
     /* ── Metric cards row ── */
     .smo-metric {
@@ -2223,18 +2332,21 @@
       flex-direction: column;
       gap: 4px;
     }
+
     .smo-metric-label {
       font-size: 10px;
       color: var(--tx3);
       text-transform: uppercase;
       letter-spacing: .08em;
     }
+
     .smo-metric-val {
       font-size: 20px;
       font-weight: 700;
       color: var(--tx);
       line-height: 1.1;
     }
+
     .smo-metric-sub {
       font-size: 10px;
       color: var(--tx2);
@@ -2248,14 +2360,22 @@
       overflow: hidden;
       margin: 10px 0;
     }
+
     .smo-disk-bar-fill {
       height: 100%;
       border-radius: 999px;
       background: linear-gradient(90deg, var(--ok), #16a34a);
       transition: width .6s ease;
     }
-    .smo-disk-bar-fill.wn { background: linear-gradient(90deg, var(--wn), #d97706); }
-    .smo-disk-bar-fill.cr { background: linear-gradient(90deg, var(--er), #dc2626); }
+
+    .smo-disk-bar-fill.wn {
+      background: linear-gradient(90deg, var(--wn), #d97706);
+    }
+
+    .smo-disk-bar-fill.cr {
+      background: linear-gradient(90deg, var(--er), #dc2626);
+    }
+
     .smo-disk-info {
       display: flex;
       justify-content: space-between;
@@ -2263,7 +2383,10 @@
       color: var(--tx2);
       margin-bottom: 4px;
     }
-    .smo-disk-info b { color: var(--tx); }
+
+    .smo-disk-info b {
+      color: var(--tx);
+    }
 
     /* ── Treemap ── */
     .smo-treemap {
@@ -2274,10 +2397,23 @@
       background: var(--bg);
       min-height: 220px;
     }
-    .smo-treemap svg { display: block; }
-    .smo-tm-node { cursor: pointer; }
-    .smo-tm-node rect { rx: 3; transition: filter .15s; }
-    .smo-tm-node:hover rect { filter: brightness(1.25); }
+
+    .smo-treemap svg {
+      display: block;
+    }
+
+    .smo-tm-node {
+      cursor: pointer;
+    }
+
+    .smo-tm-node rect {
+      rx: 3;
+      transition: filter .15s;
+    }
+
+    .smo-tm-node:hover rect {
+      filter: brightness(1.25);
+    }
 
     /* Treemap tooltip */
     .smo-tm-tip {
@@ -2289,16 +2425,36 @@
       padding: 9px 13px;
       font-size: 11px;
       pointer-events: none;
-      box-shadow: 0 10px 40px rgba(0,0,0,.5);
+      box-shadow: 0 10px 40px rgba(0, 0, 0, .5);
       opacity: 0;
       transition: opacity .1s;
       max-width: 200px;
     }
-    .smo-tm-tip.visible { opacity: 1; }
-    .smo-tm-tip-name { font-weight: 700; color: var(--tx); margin-bottom: 2px; }
-    .smo-tm-tip-size { color: var(--ac); }
-    .smo-tm-tip-pct  { color: var(--tx2); font-size: 10px; }
-    .smo-tm-tip-hint { color: var(--tx3); font-size: 10px; margin-top: 4px; }
+
+    .smo-tm-tip.visible {
+      opacity: 1;
+    }
+
+    .smo-tm-tip-name {
+      font-weight: 700;
+      color: var(--tx);
+      margin-bottom: 2px;
+    }
+
+    .smo-tm-tip-size {
+      color: var(--ac);
+    }
+
+    .smo-tm-tip-pct {
+      color: var(--tx2);
+      font-size: 10px;
+    }
+
+    .smo-tm-tip-hint {
+      color: var(--tx3);
+      font-size: 10px;
+      margin-top: 4px;
+    }
 
     /* Breadcrumb inside disk tab */
     .smo-breadcrumb {
@@ -2308,6 +2464,7 @@
       flex-wrap: wrap;
       margin-bottom: 10px;
     }
+
     .smo-crumb {
       font-size: 11px;
       color: var(--tx2);
@@ -2317,19 +2474,70 @@
       transition: color .1s, background .1s;
       white-space: nowrap;
     }
-    .smo-crumb:hover { color: var(--ac); background: var(--gw); }
-    .smo-crumb.smo-crumb-act { color: var(--ac); font-weight: 600; }
-    .smo-crumb-sep { color: var(--bd2); font-size: 11px; }
+
+    .smo-crumb:hover {
+      color: var(--ac);
+      background: var(--gw);
+    }
+
+    .smo-crumb.smo-crumb-act {
+      color: var(--ac);
+      font-weight: 600;
+    }
+
+    .smo-crumb-sep {
+      color: var(--bd2);
+      font-size: 11px;
+    }
 
     /* Top-10 list */
-    .smo-top-list { width: 100%; border-collapse: collapse; }
-    .smo-top-list td { padding: 5px 6px; font-size: 11px; vertical-align: middle; }
-    .smo-top-list tr:hover td { background: var(--sf3); border-radius: 6px; }
-    .smo-top-num { color: var(--tx3); width: 22px; }
-    .smo-top-name { color: var(--tx); font-weight: 600; max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .smo-top-size { color: var(--tx2); white-space: nowrap; width: 70px; text-align: right; }
-    .smo-top-bar { width: 100px; }
-    .smo-top-bar-inner { height: 4px; border-radius: 999px; background: var(--ac); transition: width .5s ease; }
+    .smo-top-list {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    .smo-top-list td {
+      padding: 5px 6px;
+      font-size: 11px;
+      vertical-align: middle;
+    }
+
+    .smo-top-list tr:hover td {
+      background: var(--sf3);
+      border-radius: 6px;
+    }
+
+    .smo-top-num {
+      color: var(--tx3);
+      width: 22px;
+    }
+
+    .smo-top-name {
+      color: var(--tx);
+      font-weight: 600;
+      max-width: 130px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .smo-top-size {
+      color: var(--tx2);
+      white-space: nowrap;
+      width: 70px;
+      text-align: right;
+    }
+
+    .smo-top-bar {
+      width: 100px;
+    }
+
+    .smo-top-bar-inner {
+      height: 4px;
+      border-radius: 999px;
+      background: var(--ac);
+      transition: width .5s ease;
+    }
 
     /* Treemap legend */
     .smo-tm-legend {
@@ -2340,8 +2548,19 @@
       font-size: 10px;
       color: var(--tx2);
     }
-    .smo-tm-legend-item { display: flex; align-items: center; gap: 5px; }
-    .smo-tm-legend-dot { width: 9px; height: 9px; border-radius: 2px; flex-shrink: 0; }
+
+    .smo-tm-legend-item {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .smo-tm-legend-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 2px;
+      flex-shrink: 0;
+    }
 
     /* ── Process table ── */
     .smo-proc-header {
@@ -2351,8 +2570,16 @@
       margin-bottom: 12px;
       flex-wrap: wrap;
     }
-    .smo-proc-total { font-size: 11px; color: var(--tx2); }
-    .smo-proc-total b { color: var(--ac); }
+
+    .smo-proc-total {
+      font-size: 11px;
+      color: var(--tx2);
+    }
+
+    .smo-proc-total b {
+      color: var(--ac);
+    }
+
     .smo-proc-search {
       display: flex;
       align-items: center;
@@ -2362,6 +2589,7 @@
       border-radius: 7px;
       padding: 5px 10px;
     }
+
     .smo-proc-search-inp {
       background: none;
       border: none;
@@ -2371,7 +2599,11 @@
       outline: none;
       width: 180px;
     }
-    .smo-proc-search-inp::placeholder { color: var(--tx3); }
+
+    .smo-proc-search-inp::placeholder {
+      color: var(--tx3);
+    }
+
     .smo-proc-sort-wrap {
       display: flex;
       align-items: center;
@@ -2380,6 +2612,7 @@
       color: var(--tx2);
       margin-left: auto;
     }
+
     .smo-proc-sort-sel {
       background: var(--sf2);
       border: 1px solid var(--bd2);
@@ -2391,11 +2624,13 @@
       cursor: pointer;
       outline: none;
     }
+
     .smo-table {
       width: 100%;
       border-collapse: collapse;
       font-size: 11px;
     }
+
     .smo-table thead th {
       text-align: left;
       padding: 7px 10px;
@@ -2409,29 +2644,87 @@
       user-select: none;
       white-space: nowrap;
     }
-    .smo-table thead th:hover { color: var(--ac); }
-    .smo-table thead th.sort-active { color: var(--ac); }
+
+    .smo-table thead th:hover {
+      color: var(--ac);
+    }
+
+    .smo-table thead th.sort-active {
+      color: var(--ac);
+    }
+
     .smo-table tbody tr {
       border-bottom: 1px solid var(--bd);
       transition: background .1s, opacity .3s, max-height .3s;
     }
-    .smo-table tbody tr:hover { background: var(--sf2); }
-    .smo-table tbody tr.smo-row-hot { background: rgba(239,68,68,.07); }
-    .smo-table tbody tr.smo-row-hot:hover { background: rgba(239,68,68,.12); }
+
+    .smo-table tbody tr:hover {
+      background: var(--sf2);
+    }
+
+    .smo-table tbody tr.smo-row-hot {
+      background: rgba(239, 68, 68, .07);
+    }
+
+    .smo-table tbody tr.smo-row-hot:hover {
+      background: rgba(239, 68, 68, .12);
+    }
+
     .smo-table tbody tr.smo-row-dying {
       opacity: 0;
       pointer-events: none;
       transition: opacity .3s ease;
     }
-    .smo-table tbody td { padding: 7px 10px; vertical-align: middle; }
-    .smo-pid  { color: var(--tx3); font-size: 10px; width: 48px; }
-    .smo-name { font-weight: 600; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .smo-user { color: var(--tx2); max-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .smo-cpu  { font-weight: 700; width: 55px; }
-    .smo-mem  { color: var(--tx2); width: 65px; }
-    .smo-stat { width: 60px; }
-    .smo-act  { width: 80px; }
-    .smo-cpu.hot { color: var(--er); }
+
+    .smo-table tbody td {
+      padding: 7px 10px;
+      vertical-align: middle;
+    }
+
+    .smo-pid {
+      color: var(--tx3);
+      font-size: 10px;
+      width: 48px;
+    }
+
+    .smo-name {
+      font-weight: 600;
+      max-width: 160px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .smo-user {
+      color: var(--tx2);
+      max-width: 80px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .smo-cpu {
+      font-weight: 700;
+      width: 55px;
+    }
+
+    .smo-mem {
+      color: var(--tx2);
+      width: 65px;
+    }
+
+    .smo-stat {
+      width: 60px;
+    }
+
+    .smo-act {
+      width: 80px;
+    }
+
+    .smo-cpu.hot {
+      color: var(--er);
+    }
+
     .smo-badge {
       display: inline-flex;
       align-items: center;
@@ -2445,13 +2738,44 @@
       font-family: inherit;
       transition: filter .15s;
     }
-    .smo-badge:hover { filter: brightness(1.2); }
-    .smo-badge-kill { background: rgba(34,197,94,.15); color: #22c55e; border: 1px solid rgba(34,197,94,.3); cursor: pointer; }
-    .smo-badge-sys  { background: rgba(100,116,139,.15); color: #94a3b8; border: 1px solid rgba(100,116,139,.25); cursor: default; }
-    .smo-badge-zmb  { background: rgba(245,158,11,.15); color: var(--wn); border: 1px solid rgba(245,158,11,.3); cursor: default; }
-    .smo-status-running { color: var(--ok); }
-    .smo-status-sleep   { color: var(--tx3); }
-    .smo-status-zombie  { color: var(--wn); }
+
+    .smo-badge:hover {
+      filter: brightness(1.2);
+    }
+
+    .smo-badge-kill {
+      background: rgba(34, 197, 94, .15);
+      color: #22c55e;
+      border: 1px solid rgba(34, 197, 94, .3);
+      cursor: pointer;
+    }
+
+    .smo-badge-sys {
+      background: rgba(100, 116, 139, .15);
+      color: #94a3b8;
+      border: 1px solid rgba(100, 116, 139, .25);
+      cursor: default;
+    }
+
+    .smo-badge-zmb {
+      background: rgba(245, 158, 11, .15);
+      color: var(--wn);
+      border: 1px solid rgba(245, 158, 11, .3);
+      cursor: default;
+    }
+
+    .smo-status-running {
+      color: var(--ok);
+    }
+
+    .smo-status-sleep {
+      color: var(--tx3);
+    }
+
+    .smo-status-zombie {
+      color: var(--wn);
+    }
+
     .smo-load-more {
       display: block;
       width: 100%;
@@ -2466,28 +2790,38 @@
       cursor: pointer;
       transition: border-color .15s, color .15s;
     }
-    .smo-load-more:hover { border-color: var(--ac); color: var(--tx); }
+
+    .smo-load-more:hover {
+      border-color: var(--ac);
+      color: var(--tx);
+    }
 
     /* ── Kill confirm modal ── */
     .smo-kill-overlay {
       position: fixed;
       inset: 0;
       z-index: 7000;
-      background: rgba(0,0,0,.55);
+      background: rgba(0, 0, 0, .55);
       display: flex;
       align-items: center;
       justify-content: center;
       display: none;
     }
-    .smo-kill-overlay.on { display: flex; animation: fadeIn .15s ease; }
+
+    .smo-kill-overlay.on {
+      display: flex;
+      animation: fadeIn .15s ease;
+    }
+
     .smo-kill-panel {
       width: min(400px, 90vw);
       background: var(--sf);
       border: 1px solid var(--bd2);
       border-radius: 16px;
-      box-shadow: 0 24px 80px rgba(0,0,0,.7);
+      box-shadow: 0 24px 80px rgba(0, 0, 0, .7);
       overflow: hidden;
     }
+
     .smo-kill-head {
       padding: 14px 18px;
       border-bottom: 1px solid var(--bd);
@@ -2499,22 +2833,28 @@
       align-items: center;
       gap: 8px;
     }
+
     .smo-kill-body {
       padding: 18px;
       font-size: 12px;
       color: var(--tx2);
       line-height: 1.7;
     }
-    .smo-kill-body b { color: var(--tx); }
+
+    .smo-kill-body b {
+      color: var(--tx);
+    }
+
     .smo-kill-warn {
       margin-top: 12px;
       padding: 8px 12px;
       border-radius: 8px;
-      background: rgba(239,68,68,.08);
-      border: 1px solid rgba(239,68,68,.2);
+      background: rgba(239, 68, 68, .08);
+      border: 1px solid rgba(239, 68, 68, .2);
       color: var(--er);
       font-size: 11px;
     }
+
     .smo-kill-foot {
       padding: 12px 18px;
       border-top: 1px solid var(--bd);
@@ -2522,6 +2862,7 @@
       gap: 8px;
       justify-content: flex-end;
     }
+
     .smo-kill-cancel {
       background: var(--sf2);
       border: 1px solid var(--bd2);
@@ -2534,10 +2875,15 @@
       cursor: pointer;
       transition: all .15s;
     }
-    .smo-kill-cancel:hover { border-color: var(--ac); color: var(--tx); }
+
+    .smo-kill-cancel:hover {
+      border-color: var(--ac);
+      color: var(--tx);
+    }
+
     .smo-kill-confirm {
-      background: rgba(239,68,68,.15);
-      border: 1px solid rgba(239,68,68,.35);
+      background: rgba(239, 68, 68, .15);
+      border: 1px solid rgba(239, 68, 68, .35);
       color: var(--er);
       border-radius: 8px;
       padding: 7px 16px;
@@ -2547,7 +2893,10 @@
       cursor: pointer;
       transition: all .15s;
     }
-    .smo-kill-confirm:hover { background: rgba(239,68,68,.3); }
+
+    .smo-kill-confirm:hover {
+      background: rgba(239, 68, 68, .3);
+    }
 
     /* ── System tab ── */
     .smo-temp-badge {
@@ -2560,9 +2909,22 @@
       font-weight: 700;
       margin-left: 8px;
     }
-    .smo-temp-ok   { background: rgba(34,197,94,.15);  color: #22c55e; }
-    .smo-temp-warn { background: rgba(245,158,11,.15); color: var(--wn); }
-    .smo-temp-crit { background: rgba(239,68,68,.15);  color: var(--er); }
+
+    .smo-temp-ok {
+      background: rgba(34, 197, 94, .15);
+      color: #22c55e;
+    }
+
+    .smo-temp-warn {
+      background: rgba(245, 158, 11, .15);
+      color: var(--wn);
+    }
+
+    .smo-temp-crit {
+      background: rgba(239, 68, 68, .15);
+      color: var(--er);
+    }
+
     .smo-temp-legend {
       margin-top: 12px;
       display: flex;
@@ -2571,30 +2933,76 @@
       font-size: 10px;
       color: var(--tx2);
     }
+
     .smo-temp-legend-item {
       display: flex;
       align-items: center;
       gap: 6px;
     }
+
     .smo-legend-dot {
-      width: 7px; height: 7px;
+      width: 7px;
+      height: 7px;
       border-radius: 50%;
       flex-shrink: 0;
     }
+
     .smo-net-row {
       display: flex;
       align-items: center;
       gap: 10px;
       margin-bottom: 8px;
     }
-    .smo-net-label { font-size: 11px; color: var(--tx2); width: 90px; flex-shrink: 0; }
-    .smo-net-val   { font-size: 12px; font-weight: 700; color: var(--tx); width: 80px; }
-    .smo-net-bar   { flex: 1; height: 5px; border-radius: 999px; background: var(--bd); overflow: hidden; }
-    .smo-net-bar-fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--ac), var(--ac2)); transition: width .6s ease; }
-    .smo-sys-kv    { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid var(--bd); font-size: 11px; }
-    .smo-sys-kv:last-child { border-bottom: none; }
-    .smo-sys-k { color: var(--tx2); }
-    .smo-sys-v { color: var(--tx); font-weight: 600; }
+
+    .smo-net-label {
+      font-size: 11px;
+      color: var(--tx2);
+      width: 90px;
+      flex-shrink: 0;
+    }
+
+    .smo-net-val {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--tx);
+      width: 80px;
+    }
+
+    .smo-net-bar {
+      flex: 1;
+      height: 5px;
+      border-radius: 999px;
+      background: var(--bd);
+      overflow: hidden;
+    }
+
+    .smo-net-bar-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--ac), var(--ac2));
+      transition: width .6s ease;
+    }
+
+    .smo-sys-kv {
+      display: flex;
+      justify-content: space-between;
+      padding: 5px 0;
+      border-bottom: 1px solid var(--bd);
+      font-size: 11px;
+    }
+
+    .smo-sys-kv:last-child {
+      border-bottom: none;
+    }
+
+    .smo-sys-k {
+      color: var(--tx2);
+    }
+
+    .smo-sys-v {
+      color: var(--tx);
+      font-weight: 600;
+    }
 
     /* ── Toast ── */
     .smo-toast-wrap {
@@ -2607,6 +3015,7 @@
       gap: 8px;
       pointer-events: none;
     }
+
     .smo-toast {
       pointer-events: auto;
       display: flex;
@@ -2618,29 +3027,79 @@
       border: 1px solid var(--bd2);
       font-size: 11px;
       font-weight: 600;
-      box-shadow: 0 8px 32px rgba(0,0,0,.5);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, .5);
       max-width: 280px;
       animation: smToastIn .2s ease;
     }
-    .smo-toast.ok { border-color: var(--ok); color: var(--ok); }
-    .smo-toast.er { border-color: var(--er); color: var(--er); }
-    .smo-toast.wn { border-color: var(--wn); color: var(--wn); }
+
+    .smo-toast.ok {
+      border-color: var(--ok);
+      color: var(--ok);
+    }
+
+    .smo-toast.er {
+      border-color: var(--er);
+      color: var(--er);
+    }
+
+    .smo-toast.wn {
+      border-color: var(--wn);
+      color: var(--wn);
+    }
 
     /* ── Responsive ── */
     @media (max-width: 860px) {
-      .smo-grid-2, .smo-grid-system { grid-template-columns: 1fr; }
-      .smo-grid-3 { grid-template-columns: 1fr; }
-      .smo-modal { height: 94vh; border-radius: 14px 14px 0 0; }
-      .smo-proc-search-inp { width: 120px; }
-      .smo-top-bar { display: none; }
+
+      .smo-grid-2,
+      .smo-grid-system {
+        grid-template-columns: 1fr;
+      }
+
+      .smo-grid-3 {
+        grid-template-columns: 1fr;
+      }
+
+      .smo-modal {
+        height: 94vh;
+        border-radius: 14px 14px 0 0;
+      }
+
+      .smo-proc-search-inp {
+        width: 120px;
+      }
+
+      .smo-top-bar {
+        display: none;
+      }
     }
+
     @media (max-width: 560px) {
-      .smo-tabs { overflow-x: auto; scrollbar-width: none; }
-      .smo-tabs::-webkit-scrollbar { display: none; }
-      .smo-tab { padding: 6px 10px; font-size: 10px; }
-      .smo-table { font-size: 10px; }
-      .smo-table td { padding: 5px 6px; }
-      .smo-user, .smo-stat { display: none; }
+      .smo-tabs {
+        overflow-x: auto;
+        scrollbar-width: none;
+      }
+
+      .smo-tabs::-webkit-scrollbar {
+        display: none;
+      }
+
+      .smo-tab {
+        padding: 6px 10px;
+        font-size: 10px;
+      }
+
+      .smo-table {
+        font-size: 10px;
+      }
+
+      .smo-table td {
+        padding: 5px 6px;
+      }
+
+      .smo-user,
+      .smo-stat {
+        display: none;
+      }
     }
   </style>
 </head>
@@ -2859,8 +3318,9 @@
 
       <!-- Header -->
       <div class="smo-head">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="color:var(--ac)">
-          <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" style="color:var(--ac)">
+          <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
         </svg>
         <span class="smo-title">System Monitor</span>
         <div class="smo-head-btns">
@@ -2872,19 +3332,37 @@
       <!-- Tabs -->
       <div class="smo-tabs" role="tablist">
         <button class="smo-tab smo-tab-active" data-tab="ram" role="tab" type="button">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="7" width="20" height="14" rx="2" ry="2" />
+            <path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16" />
+          </svg>
           RAM
         </button>
         <button class="smo-tab" data-tab="disk" role="tab" type="button">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"/><path d="M12 1v6m6.66-1.31-4.24 4.24m5.97 5.97h-6m1.31 6.66-4.24-4.24m-5.97 5.97v-6M1 12.34l4.24-4.24M5.31 5.65 1 1"/></svg>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="1" />
+            <path
+              d="M12 1v6m6.66-1.31-4.24 4.24m5.97 5.97h-6m1.31 6.66-4.24-4.24m-5.97 5.97v-6M1 12.34l4.24-4.24M5.31 5.65 1 1" />
+          </svg>
           Disk
         </button>
         <button class="smo-tab" data-tab="proc" role="tab" type="button">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="1" />
+            <circle cx="19" cy="12" r="1" />
+            <circle cx="5" cy="12" r="1" />
+          </svg>
           Processes
         </button>
         <button class="smo-tab" data-tab="sys" role="tab" type="button">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="2" y1="17" x2="22" y2="17"/></svg>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+            <line x1="2" y1="17" x2="22" y2="17" />
+          </svg>
           System
         </button>
       </div>
@@ -2899,10 +3377,10 @@
             <div class="smo-card smo-gauge">
               <div class="smo-gauge-wrap">
                 <svg width="120" height="120" viewBox="0 0 120 120">
-                  <circle class="d-track" cx="60" cy="60" r="50" fill="none" stroke="var(--bd2)" stroke-width="10"/>
+                  <circle class="d-track" cx="60" cy="60" r="50" fill="none" stroke="var(--bd2)" stroke-width="10" />
                   <circle id="smo-ram-arc" cx="60" cy="60" r="50" fill="none" stroke="var(--ac)" stroke-width="10"
                     stroke-linecap="round" stroke-dasharray="314.16" stroke-dashoffset="314.16"
-                    style="transition:stroke-dashoffset .7s cubic-bezier(.4,0,.2,1)"/>
+                    style="transition:stroke-dashoffset .7s cubic-bezier(.4,0,.2,1)" />
                 </svg>
                 <div class="smo-gauge-center">
                   <span class="smo-gauge-pct" id="smo-ram-pct">0%</span>
@@ -2916,9 +3394,12 @@
                   <div class="smo-seg-free"></div>
                 </div>
                 <div style="display:flex;gap:14px;margin-top:7px;font-size:10px;color:var(--tx2)">
-                  <span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--ac);margin-right:4px;vertical-align:middle"></span>Used</span>
-                  <span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--wn);margin-right:4px;vertical-align:middle"></span>Cache</span>
-                  <span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--bd2);margin-right:4px;vertical-align:middle"></span>Free</span>
+                  <span><span
+                      style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--ac);margin-right:4px;vertical-align:middle"></span>Used</span>
+                  <span><span
+                      style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--wn);margin-right:4px;vertical-align:middle"></span>Cache</span>
+                  <span><span
+                      style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--bd2);margin-right:4px;vertical-align:middle"></span>Free</span>
                 </div>
               </div>
             </div>
@@ -2954,13 +3435,16 @@
           <div class="smo-card" style="margin-bottom:14px">
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
               <span class="smo-card-title" style="margin-bottom:0">Disk Usage</span>
-              <span style="margin-left:auto;font-size:11px;color:var(--tx2)">Path: <b id="smo-disk-path" style="color:var(--tx)">/</b></span>
+              <span style="margin-left:auto;font-size:11px;color:var(--tx2)">Path: <b id="smo-disk-path"
+                  style="color:var(--tx)">/</b></span>
             </div>
             <div class="smo-disk-info">
               <span>Used: <b id="smo-disk-used">—</b></span>
               <span>Free: <b id="smo-disk-free">—</b> / <b id="smo-disk-total">—</b></span>
             </div>
-            <div class="smo-disk-bar"><div class="smo-disk-bar-fill" id="smo-disk-bar-fill" style="width:0%"></div></div>
+            <div class="smo-disk-bar">
+              <div class="smo-disk-bar-fill" id="smo-disk-bar-fill" style="width:0%"></div>
+            </div>
           </div>
           <!-- Treemap + Top-10 -->
           <div class="smo-grid-2">
@@ -2970,19 +3454,35 @@
               <div class="smo-breadcrumb" id="smo-tm-breadcrumb"></div>
               <div class="smo-treemap" id="smo-treemap"></div>
               <div class="smo-tm-legend" id="smo-tm-legend">
-                <div class="smo-tm-legend-item"><div class="smo-tm-legend-dot" style="background:#4da6ff"></div>Folders</div>
-                <div class="smo-tm-legend-item"><div class="smo-tm-legend-dot" style="background:#ff8a65"></div>Video</div>
-                <div class="smo-tm-legend-item"><div class="smo-tm-legend-dot" style="background:#ce93d8"></div>Images</div>
-                <div class="smo-tm-legend-item"><div class="smo-tm-legend-dot" style="background:#ffb74d"></div>Archives</div>
-                <div class="smo-tm-legend-item"><div class="smo-tm-legend-dot" style="background:#80cbc4"></div>Code</div>
-                <div class="smo-tm-legend-item"><div class="smo-tm-legend-dot" style="background:#90caf9"></div>Docs</div>
-                <div class="smo-tm-legend-item"><div class="smo-tm-legend-dot" style="background:#546e7a"></div>Other</div>
+                <div class="smo-tm-legend-item">
+                  <div class="smo-tm-legend-dot" style="background:#4da6ff"></div>Folders
+                </div>
+                <div class="smo-tm-legend-item">
+                  <div class="smo-tm-legend-dot" style="background:#ff8a65"></div>Video
+                </div>
+                <div class="smo-tm-legend-item">
+                  <div class="smo-tm-legend-dot" style="background:#ce93d8"></div>Images
+                </div>
+                <div class="smo-tm-legend-item">
+                  <div class="smo-tm-legend-dot" style="background:#ffb74d"></div>Archives
+                </div>
+                <div class="smo-tm-legend-item">
+                  <div class="smo-tm-legend-dot" style="background:#80cbc4"></div>Code
+                </div>
+                <div class="smo-tm-legend-item">
+                  <div class="smo-tm-legend-dot" style="background:#90caf9"></div>Docs
+                </div>
+                <div class="smo-tm-legend-item">
+                  <div class="smo-tm-legend-dot" style="background:#546e7a"></div>Other
+                </div>
               </div>
             </div>
             <!-- Top 10 -->
             <div class="smo-card">
               <div class="smo-card-title">Top Directories by Size</div>
-              <table class="smo-top-list" id="smo-top-list"><tbody></tbody></table>
+              <table class="smo-top-list" id="smo-top-list">
+                <tbody></tbody>
+              </table>
             </div>
           </div>
         </div>
@@ -2992,8 +3492,13 @@
           <div class="smo-proc-header">
             <span class="smo-proc-total">Total: <b id="smo-proc-count">—</b> processes</span>
             <div class="smo-proc-search">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" style="color:var(--tx3)"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-              <input class="smo-proc-search-inp" id="smo-proc-q" type="text" placeholder="Search process…" autocomplete="off" spellcheck="false">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                stroke-linecap="round" style="color:var(--tx3)">
+                <circle cx="11" cy="11" r="8" />
+                <path d="m21 21-4.35-4.35" />
+              </svg>
+              <input class="smo-proc-search-inp" id="smo-proc-q" type="text" placeholder="Search process…"
+                autocomplete="off" spellcheck="false">
             </div>
             <div class="smo-proc-sort-wrap">
               Sort:
@@ -3030,62 +3535,104 @@
             <!-- CPU Temp -->
             <div class="smo-card">
               <div class="smo-card-title">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;margin-right:6px"><path d="M14 14.76v1.3a2 2 0 0 1-2 2h-.5a2 2 0 0 1-2-2v-1.3m4 0a2 2 0 0 0-4 0m4 0h.5a2 2 0 0 1 2 2v.5a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-.5a2 2 0 0 1 2-2h.5M7 10a5 5 0 0 1 10 0"/><line x1="12" y1="2" x2="12" y2="6"/></svg>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round" style="display:inline;margin-right:6px">
+                  <path
+                    d="M14 14.76v1.3a2 2 0 0 1-2 2h-.5a2 2 0 0 1-2-2v-1.3m4 0a2 2 0 0 0-4 0m4 0h.5a2 2 0 0 1 2 2v.5a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-.5a2 2 0 0 1 2-2h.5M7 10a5 5 0 0 1 10 0" />
+                  <line x1="12" y1="2" x2="12" y2="6" />
+                </svg>
                 CPU Temperature
                 <span class="smo-temp-badge smo-temp-ok" id="smo-temp-badge">● OK</span>
               </div>
               <div style="font-size:28px;font-weight:700;color:var(--tx);margin-bottom:8px">
                 <span id="smo-temp-val">—</span>
               </div>
-              <div class="smo-bar"><div class="smo-bar-fill" id="smo-temp-bar" style="width:0%"></div></div>
+              <div class="smo-bar">
+                <div class="smo-bar-fill" id="smo-temp-bar" style="width:0%"></div>
+              </div>
               <div class="smo-sparkline" id="smo-temp-sparkline" style="height:80px;margin-top:12px"></div>
               <div class="smo-temp-legend">
-                <div class="smo-temp-legend-item"><div class="smo-legend-dot" style="background:#22c55e"></div>&lt;60°C — OK</div>
-                <div class="smo-temp-legend-item"><div class="smo-legend-dot" style="background:var(--wn)"></div>60–80°C — WARN</div>
-                <div class="smo-temp-legend-item"><div class="smo-legend-dot" style="background:var(--er)"></div>&gt;80°C — CRIT</div>
+                <div class="smo-temp-legend-item">
+                  <div class="smo-legend-dot" style="background:#22c55e"></div>&lt;60°C — OK
+                </div>
+                <div class="smo-temp-legend-item">
+                  <div class="smo-legend-dot" style="background:var(--wn)"></div>60–80°C — WARN
+                </div>
+                <div class="smo-temp-legend-item">
+                  <div class="smo-legend-dot" style="background:var(--er)"></div>&gt;80°C — CRIT
+                </div>
               </div>
             </div>
             <!-- Right column: Uptime + Dir -->
             <div style="display:flex;flex-direction:column;gap:14px">
               <div class="smo-card">
                 <div class="smo-card-title">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;margin-right:6px"><circle cx="12" cy="12" r="9"/><polyline points="12 6 12 12 16 14"/></svg>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round" style="display:inline;margin-right:6px">
+                    <circle cx="12" cy="12" r="9" />
+                    <polyline points="12 6 12 12 16 14" />
+                  </svg>
                   Uptime
                 </div>
-                <div style="font-size:16px;font-weight:700;color:var(--tx);margin-bottom:6px" id="smo-uptime-val">—</div>
-                <div class="smo-sys-kv"><span class="smo-sys-k">Boot time</span><span class="smo-sys-v" id="smo-boot-time">—</span></div>
+                <div style="font-size:16px;font-weight:700;color:var(--tx);margin-bottom:6px" id="smo-uptime-val">—
+                </div>
+                <div class="smo-sys-kv"><span class="smo-sys-k">Boot time</span><span class="smo-sys-v"
+                    id="smo-boot-time">—</span></div>
               </div>
               <div class="smo-card">
                 <div class="smo-card-title">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;margin-right:6px"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round" style="display:inline;margin-right:6px">
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                  </svg>
                   Current Directory
                 </div>
-                <div class="smo-sys-kv"><span class="smo-sys-k">Path</span><span class="smo-sys-v" id="smo-sys-path" style="max-width:180px;overflow:hidden;text-overflow:ellipsis">—</span></div>
-                <div class="smo-sys-kv"><span class="smo-sys-k">Items</span><span class="smo-sys-v" id="smo-sys-items">—</span></div>
+                <div class="smo-sys-kv"><span class="smo-sys-k">Path</span><span class="smo-sys-v" id="smo-sys-path"
+                    style="max-width:180px;overflow:hidden;text-overflow:ellipsis">—</span></div>
+                <div class="smo-sys-kv"><span class="smo-sys-k">Items</span><span class="smo-sys-v"
+                    id="smo-sys-items">—</span></div>
               </div>
             </div>
           </div>
           <!-- Network -->
           <div class="smo-card" id="smo-net-card" style="display:none">
             <div class="smo-card-title">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;margin-right:6px"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4m0-4v4"/></svg>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round" style="display:inline;margin-right:6px">
+                <circle cx="12" cy="12" r="10" />
+                <path d="M12 16v-4m0-4v4" />
+              </svg>
               Network
             </div>
             <div class="smo-net-row">
               <span class="smo-net-label">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;margin-right:4px"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36M20.49 15a9 9 0 0 1-14.85 3.36"/></svg>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round" style="display:inline;margin-right:4px">
+                  <polyline points="23 4 23 10 17 10" />
+                  <polyline points="1 20 1 14 7 14" />
+                  <path d="M3.51 9a9 9 0 0 1 14.85-3.36M20.49 15a9 9 0 0 1-14.85 3.36" />
+                </svg>
                 Upload
               </span>
               <span class="smo-net-val" id="smo-net-up">—</span>
-              <div class="smo-net-bar"><div class="smo-net-bar-fill" id="smo-net-up-bar" style="width:0%"></div></div>
+              <div class="smo-net-bar">
+                <div class="smo-net-bar-fill" id="smo-net-up-bar" style="width:0%"></div>
+              </div>
             </div>
             <div class="smo-net-row">
               <span class="smo-net-label">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;margin-right:4px"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36M20.49 15a9 9 0 0 1-14.85 3.36"/></svg>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round" style="display:inline;margin-right:4px">
+                  <polyline points="23 4 23 10 17 10" />
+                  <polyline points="1 20 1 14 7 14" />
+                  <path d="M3.51 9a9 9 0 0 1 14.85-3.36M20.49 15a9 9 0 0 1-14.85 3.36" />
+                </svg>
                 Download
               </span>
               <span class="smo-net-val" id="smo-net-down">—</span>
-              <div class="smo-net-bar"><div class="smo-net-bar-fill" id="smo-net-down-bar" style="width:0%"></div></div>
+              <div class="smo-net-bar">
+                <div class="smo-net-bar-fill" id="smo-net-down-bar" style="width:0%"></div>
+              </div>
             </div>
             <div style="font-size:10px;color:var(--tx3);margin-top:6px" id="smo-net-iface"></div>
           </div>
@@ -3099,7 +3646,11 @@
         <span>Live</span>
         <span class="smo-ts">Last update: <span id="smo-ts">—</span></span>
         <button class="smo-refresh-btn" id="smo-refresh-btn" type="button">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+            stroke-linecap="round">
+            <polyline points="23 4 23 10 17 10" />
+            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+          </svg>
           Refresh now
         </button>
       </div>
@@ -3111,7 +3662,12 @@
   <div id="smo-kill-overlay" class="smo-kill-overlay">
     <div class="smo-kill-panel">
       <div class="smo-kill-head">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+          stroke-linecap="round">
+          <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+          <line x1="12" y1="9" x2="12" y2="13" />
+          <line x1="12" y1="17" x2="12.01" y2="17" />
+        </svg>
         Confirm Termination
       </div>
       <div class="smo-kill-body">
@@ -3135,7 +3691,7 @@
   <div id="smo-tm-tip" class="smo-tm-tip">
     <div class="smo-tm-tip-name" id="smo-tm-tip-name"></div>
     <div class="smo-tm-tip-size" id="smo-tm-tip-size"></div>
-    <div class="smo-tm-tip-pct"  id="smo-tm-tip-pct"></div>
+    <div class="smo-tm-tip-pct" id="smo-tm-tip-pct"></div>
     <div class="smo-tm-tip-hint" id="smo-tm-tip-hint">Click to drill down</div>
   </div>
 
@@ -3645,7 +4201,21 @@
                   clearInterval(pollTimer);
                   if (d.error) {
                     xferCardDone(card);
-                    toast('Copy failed: ' + name, 'er');
+                    var errReason = (function(c, en) {
+                      var m = { '-2':'Out of memory', '-10':'Cannot open file', '-11':'Read error (USB)',
+                                '-12':'Write error', '-13':'Stat failed', '-14':'Cannot open dir',
+                                '-17':'Source not found', '-18':'Permission denied', '-99':'Unknown error' };
+                      var enoMap = { '1':'EPERM', '2':'ENOENT', '5':'EIO', '12':'ENOMEM', '13':'EACCES',
+                                     '17':'EEXIST', '22':'EINVAL', '28':'ENOSPC', '30':'EROFS' };
+                      /* Show specific human-readable reason for common cases */
+                      if (c === -12 && en === 28) return 'Disk full \u2014 not enough space on destination';
+                      if (c === -12 && en === 12) return 'Out of memory \u2014 system low on RAM';
+                      if (c === -12 && en === 30) return 'Read-only filesystem';
+                      var r = m[String(c)] || ('err ' + c);
+                      if (en) r += ' (errno ' + en + (enoMap[String(en)] ? '=' + enoMap[String(en)] : '') + ')';
+                      return r;
+                    })(d.error_code, d.error_errno);
+                    toast('Copy failed: ' + name + ' \u2014 ' + errReason, 'er');
                   } else {
                     xferCardUpdate(card, 100, speed, elapsed);
                     xferCardDone(card);

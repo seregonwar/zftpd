@@ -298,7 +298,7 @@ typedef int (*pal_copy_progress_cb_t)(uint64_t bytes_copied, void *user_data);
  */
 ftp_error_t pal_file_copy_recursive_ex(const char *src, const char *dst,
                                        int keep_src, pal_copy_progress_cb_t cb,
-                                       void *user_data);
+                                       void *user_data, int *out_errno);
 
 /*===========================================================================*
  * DIRECTORY OPERATIONS

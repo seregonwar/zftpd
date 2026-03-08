@@ -2392,8 +2392,13 @@ static void *ftp_copy_thread_func(void *arg) {
 
   ftp_log_line(FTP_LOG_INFO, "[COPY] Background task started");
 
-  ftp_error_t err =
-      pal_file_copy_recursive(task->src_path, task->dst_path, !task->is_move);
+  /* Use pal_file_copy_recursive_ex so the OS errno is captured and visible
+   * in the failure log.  Previously pal_file_copy_recursive was called with
+   * no errno output, causing all error logs to show errno=0. */
+  int copy_errno = 0;
+  ftp_error_t err = pal_file_copy_recursive_ex(task->src_path, task->dst_path,
+                                               !task->is_move, NULL, NULL,
+                                               &copy_errno);
 
   pthread_mutex_lock(&session->copy_mutex);
   session->copy_in_progress = 0;
@@ -2403,8 +2408,8 @@ static void *ftp_copy_thread_func(void *arg) {
     ftp_log_line(FTP_LOG_INFO, "[COPY] Background task completed successfully");
   } else {
     char msg[256];
-    snprintf(msg, sizeof(msg), "[COPY] Background task failed: err=%d",
-             (int)err);
+    snprintf(msg, sizeof(msg), "[COPY] Background task failed: err=%d errno=%d",
+             (int)err, copy_errno);
     ftp_log_line(FTP_LOG_WARN, msg);
   }
 

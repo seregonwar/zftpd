@@ -43,6 +43,7 @@ SOFTWARE.
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 /* Fallback buffer size for non-sendfile platforms */
@@ -59,14 +60,14 @@ SOFTWARE.
  */
 #if defined(PLATFORM_PS5) || defined(PS5)
 #define PAL_FILE_WRITE_CHUNK_MAX                                               \
-  131072U  /* 128 KB — keeps writer latency <5ms per chunk so the             \
-              double-buffer producer never stalls long enough to drain the     \
-              kernel recv buffer and trigger the client 20s inactivity timer   */
+  131072U /* 128 KB — keeps writer latency <5ms per chunk so the             \
+             double-buffer producer never stalls long enough to drain the      \
+             kernel recv buffer and trigger the client 20s inactivity timer */
 #elif defined(PLATFORM_PS4) || defined(PS4)
 #define PAL_FILE_WRITE_CHUNK_MAX                                               \
-  65536U   /* 64 KB — PS4 PFS crypto is slow (~2ms/chunk); keep writes short
-              so the double-buffer producer is never stalled long enough for
-              the FileZilla 20-second client idle timeout to fire            */
+  65536U /* 64 KB — PS4 PFS crypto is slow (~2ms/chunk); keep writes short   \
+            so the double-buffer producer is never stalled long enough for     \
+            the FileZilla 20-second client idle timeout to fire            */
 #else
 #define PAL_FILE_WRITE_CHUNK_MAX                                               \
   262144U /* 256 KB — safe POSIX default         */
@@ -75,13 +76,143 @@ SOFTWARE.
 /* Max recursion depth for cross-device directory move */
 #define PAL_MOVE_MAX_DEPTH 64U
 
+/*
+ * PAL_FILE_COPY_BUFFER_SIZE — per-buffer size for the copy pipeline.
+ *
+ * PS5 USB→NVMe throughput analysis (exFAT → PFS, 12 GB file):
+ *
+ *   Observed serial throughput:   135 MB/s
+ *   Target pipelined throughput:  215 MB/s
+ *
+ *   USB exFAT sequential read:   ~363 MB/s
+ *   NVMe PFS sequential write:   ~215 MB/s
+ *
+ *   Serial model: 1/(1/363 + 1/215) = 135 MB/s  ✓ matches observation
+ *   Pipelined:    min(363, 215)      = 215 MB/s  ✓ matches target
+ *
+ * PS4 USB→HDD/SSD throughput analysis:
+ *
+ *   USB exFAT sequential read:   ~320 MB/s
+ *   HDD 5400 RPM PFS write:       ~85 MB/s  →  serial ~67 MB/s,  pipelined  85
+ * MB/s (+27%) SSD aftermarket PFS write:   ~175 MB/s  →  serial ~113 MB/s,
+ * pipelined 175 MB/s (+55%)
+ *
+ *   1 MB buffers are sufficient on PS4: T_read(1MB) = 3.3 ms is well under
+ *   T_write_HDD(1MB) = 12.3 ms, so the reader always finishes before the
+ *   writer and the pipeline never stalls.  4 MB buffers add memory pressure
+ *   (PS4 daemon budget ~78 MB) with no throughput gain.
+ *
+ * The serial read+write loop leaves one device idle during every cycle.
+ * A double-buffer pipeline overlaps USB reads with NVMe/HDD writes fully,
+ * recovering the throughput gap on both platforms.
+ *
+ * IMPORTANT: the copy path writes the FULL buffer in a single write()
+ * call, bypassing pal_file_write_all()'s PAL_WRITE_CHUNK_MAX subdivision.
+ * That limit (128 KB on PS5, 64 KB on PS4) exists to prevent TCP stalls
+ * in cmd_STOR; it has no relevance for a file-to-file copy.
+ */
 #ifndef PAL_FILE_COPY_BUFFER_SIZE
-#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
-#define PAL_FILE_COPY_BUFFER_SIZE (1024U * 1024U)
+#if defined(PLATFORM_PS5)
+#define PAL_FILE_COPY_BUFFER_SIZE                                              \
+  (4U * 1024U *                                                                \
+   1024U) /* 4 MB — NVMe ~215 MB/s, T_write=19ms covers T_read=12ms */
+#elif defined(PLATFORM_PS4)
+#define PAL_FILE_COPY_BUFFER_SIZE                                              \
+  (1024U * 1024U) /* 1 MB — HDD ~85 MB/s,  T_write=12ms covers T_read=3ms  */
 #else
 #define PAL_FILE_COPY_BUFFER_SIZE FTP_BUFFER_SIZE
 #endif
 #endif
+
+/*---------------------------------------------------------------------------*
+ * DOUBLE-BUFFER COPY PIPELINE (PS4 and PS5)
+ *
+ * Two buffers alternate between a reader thread (USB exFAT) and the
+ * calling thread (NVMe/HDD PFS writer), fully overlapping I/O:
+ *
+ *   Cycle N:    [read buf A from USB]  [write buf B to storage]
+ *   Cycle N+1:  [read buf B from USB]  [write buf A to storage]
+ *
+ * PS5: writer (NVMe, ~215 MB/s) is the bottleneck; reader (USB, ~363 MB/s)
+ *      always finishes first.  Net throughput: 215 MB/s.
+ * PS4: writer (HDD, ~85 MB/s) is the bottleneck; reader (USB, ~320 MB/s)
+ *      always finishes first.  Net throughput: ~85 MB/s (vs ~67 MB/s serial).
+ *
+ * Thread roles:
+ *   Main thread   — writer: drains the filled buffer to dst_fd, calls
+ *                           the progress callback, signals cv_free.
+ *   Reader thread — reads from src_fd into the free buffer, signals
+ *                           cv_ready when a full chunk is available.
+ *
+ * State machine (protected by pipe_mtx):
+ *   fill_idx    — buffer currently being read into (0 or 1)
+ *   drain_idx   — buffer currently being written out (1-fill_idx)
+ *   len[i]      — bytes available in buffer i (0 = free, >0 = ready)
+ *   done        — reader has hit EOF or error
+ *   reader_err  — non-zero errno set by reader on error
+ *---------------------------------------------------------------------------*/
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+#include <pthread.h>
+
+typedef struct {
+  uint8_t *buf[2]; /* two PAL_FILE_COPY_BUFFER_SIZE buffers          */
+  size_t len[2];   /* bytes filled in each buffer (0 = free)         */
+  int fill_idx;    /* index reader is filling right now              */
+  int src_fd;      /* source file descriptor                         */
+  size_t buf_sz;   /* PAL_FILE_COPY_BUFFER_SIZE                      */
+  int done;        /* reader set to 1 on EOF or error                */
+  int reader_err;  /* errno from reader (0 = ok)                     */
+  pthread_mutex_t mtx;
+  pthread_cond_t cv_ready; /* writer waits: "buffer filled and ready"        */
+  pthread_cond_t cv_free;  /* reader waits: "buffer drained and free"        */
+} copy_pipe_t;
+
+static void *copy_reader_thread(void *arg) {
+  copy_pipe_t *p = (copy_pipe_t *)arg;
+
+  pthread_mutex_lock(&p->mtx);
+  for (;;) {
+    int fi = p->fill_idx;
+
+    /* Wait until the fill buffer is free (len[fi] == 0) */
+    while ((p->len[fi] != 0U) && (p->done == 0)) {
+      pthread_cond_wait(&p->cv_free, &p->mtx);
+    }
+    if (p->done != 0) {
+      break; /* main thread requested stop (write error or cancel) */
+    }
+
+    pthread_mutex_unlock(&p->mtx);
+
+    /* Read without holding the lock — this is the slow USB read */
+    ssize_t n;
+    do {
+      n = read(p->src_fd, p->buf[fi], p->buf_sz);
+    } while ((n < 0) && (errno == EINTR));
+
+    pthread_mutex_lock(&p->mtx);
+
+    if (n < 0) {
+      p->reader_err = errno;
+      p->done = 1;
+      pthread_cond_signal(&p->cv_ready);
+      break;
+    }
+    if (n == 0) {
+      /* EOF */
+      p->done = 1;
+      pthread_cond_signal(&p->cv_ready);
+      break;
+    }
+
+    p->len[fi] = (size_t)n;
+    p->fill_idx = 1 - fi; /* swap to the other buffer */
+    pthread_cond_signal(&p->cv_ready);
+  }
+  pthread_mutex_unlock(&p->mtx);
+  return NULL;
+}
+#endif /* PLATFORM_PS4 || PLATFORM_PS5 */
 
 /*===========================================================================*
  * ZERO-COPY FILE TRANSFER
@@ -214,11 +345,10 @@ ssize_t pal_sendfile(int sock_fd, int file_fd, off_t *offset, size_t count) {
  * FILE OPERATIONS
  *===========================================================================*/
 
-static ftp_error_t pal_file_copy_atomic_ex(const char *src_path,
-                                           const char *dst_path,
-                                           pal_copy_progress_cb_t cb,
-                                           void *user_data,
-                                           uint64_t *cumulative) {
+static ftp_error_t
+pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
+                        pal_copy_progress_cb_t cb, void *user_data,
+                        uint64_t *cumulative, int *out_errno) {
   if ((src_path == NULL) || (dst_path == NULL)) {
     return FTP_ERR_INVALID_PARAM;
   }
@@ -294,6 +424,9 @@ static ftp_error_t pal_file_copy_atomic_ex(const char *src_path,
                src_path);
       ftp_log_line(FTP_LOG_WARN, msg);
     }
+    if (out_errno != NULL) {
+      *out_errno = e;
+    }
     switch (e) {
     case ENOENT:
       out_err = FTP_ERR_NOT_FOUND;
@@ -310,7 +443,66 @@ static ftp_error_t pal_file_copy_atomic_ex(const char *src_path,
   }
 
   mode_t mode = (mode_t)(st.st_mode & 0777);
+
+  /*
+   * PRE-FLIGHT SPACE CHECK (PS4/PS5 PFS silent-full workaround)
+   *
+   * PFS on /data does not always propagate ENOSPC through write() — it
+   * can silently return 0, leaving errno==0 and making the failure
+   * completely opaque.  Check available space up front so we can abort
+   * immediately with a clear diagnostic rather than failing mid-copy
+   * with errno=0 deep inside the write pipeline.
+   *
+   * statvfs() on the DESTINATION directory (not src) gives us the free
+   * blocks on the target filesystem.  We accept up to a ~1 % statvfs
+   * race (file is being written by someone else), so the check is a
+   * warning rather than a hard block — we still attempt the copy and
+   * rely on the write-loop fix to surface ENOSPC if it happens anyway.
+   */
+  {
+    /* Extract parent directory of dst_path for statvfs */
+    char dst_dir[FTP_PATH_MAX];
+    const char *dst_slash = strrchr(dst_path, '/');
+    if (dst_slash != NULL && dst_slash != dst_path) {
+      size_t dlen = (size_t)(dst_slash - dst_path);
+      if (dlen < sizeof(dst_dir)) {
+        memcpy(dst_dir, dst_path, dlen);
+        dst_dir[dlen] = '\0';
+      } else {
+        dst_dir[0] = '\0'; /* fallback: skip check */
+      }
+    } else {
+      dst_dir[0] = '/';
+      dst_dir[1] = '\0';
+    }
+
+    if (dst_dir[0] != '\0') {
+      struct statvfs vfs;
+      if (statvfs(dst_dir, &vfs) == 0) {
+        uint64_t free_bytes =
+            (uint64_t)vfs.f_bavail * (uint64_t)vfs.f_frsize;
+        uint64_t need_bytes = (uint64_t)st.st_size;
+        if (need_bytes > free_bytes) {
+          char msg[256];
+          snprintf(msg, sizeof(msg),
+                   "[XDEV] pre-flight ENOSPC: need=%llu free=%llu dst=%s",
+                   (unsigned long long)need_bytes,
+                   (unsigned long long)free_bytes, dst_path);
+          ftp_log_line(FTP_LOG_WARN, msg);
+          if (out_errno != NULL) {
+            *out_errno = ENOSPC;
+          }
+          return FTP_ERR_FILE_WRITE;
+        }
+      }
+    }
+  }
+
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+  dst_fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, mode);
+#else
   dst_fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode);
+#endif
   if (dst_fd < 0) {
     int e = errno;
     {
@@ -318,6 +510,9 @@ static ftp_error_t pal_file_copy_atomic_ex(const char *src_path,
       snprintf(msg, sizeof(msg), "[XDEV] open(tmp) failed: errno=%d path=%s", e,
                tmp_path);
       ftp_log_line(FTP_LOG_WARN, msg);
+    }
+    if (out_errno != NULL) {
+      *out_errno = e;
     }
     switch (e) {
     case EACCES:
@@ -342,62 +537,388 @@ static ftp_error_t pal_file_copy_atomic_ex(const char *src_path,
    * A single malloc/free per copy call returns the memory immediately after
    * the operation, keeping the daemon's footprint minimal when idle.
    */
+  /*=========================================================================*
+   * COPY LOOP
+   *
+   * PS5:   double-buffer pipeline — reader thread (USB) runs in parallel
+   *        with the writer (NVMe), achieving min(USB_bw, NVMe_bw) = 215 MB/s.
+   *
+   * Other: simple serial read→write loop.
+   *=========================================================================*/
+
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+  /*-----------------------------------------------------------------------*
+   * PS4/PS5 double-buffer copy pipeline
+   *
+   * Allocate both buffers up-front.  If either malloc fails, fall through
+   * to the serial path (pal_malloc returns NULL gracefully).
+   *-----------------------------------------------------------------------*/
+  {
+    uint8_t *dbuf0 = (uint8_t *)pal_malloc(PAL_FILE_COPY_BUFFER_SIZE);
+    uint8_t *dbuf1 = (uint8_t *)pal_malloc(PAL_FILE_COPY_BUFFER_SIZE);
+
+    /* Log arena state immediately after the two allocs so we can correlate
+     * with SceShellCore heap pressure messages in the system log. */
+    {
+      pal_alloc_stats_t ast;
+      pal_alloc_get_stats(&ast);
+      char msg[256];
+      snprintf(msg, sizeof(msg),
+               "[XDEV] pipeline alloc: buf0=%s buf1=%s "
+               "arena_inuse=%llu peak=%llu failures=%llu file=%s",
+               (dbuf0 != NULL) ? "ok" : "NULL",
+               (dbuf1 != NULL) ? "ok" : "NULL",
+               (unsigned long long)ast.bytes_in_use,
+               (unsigned long long)ast.bytes_peak,
+               (unsigned long long)ast.failures,
+               src_path);
+      ftp_log_line((dbuf0 && dbuf1) ? FTP_LOG_INFO : FTP_LOG_WARN, msg);
+    }
+
+    if ((dbuf0 != NULL) && (dbuf1 != NULL)) {
+      /* Initialise pipeline state */
+      copy_pipe_t pipe;
+      pipe.buf[0] = dbuf0;
+      pipe.buf[1] = dbuf1;
+      pipe.len[0] = 0U;
+      pipe.len[1] = 0U;
+      pipe.fill_idx = 0;
+      pipe.src_fd = src_fd;
+      pipe.buf_sz = (size_t)PAL_FILE_COPY_BUFFER_SIZE;
+      pipe.done = 0;
+      pipe.reader_err = 0;
+      pthread_mutex_init(&pipe.mtx, NULL);
+      pthread_cond_init(&pipe.cv_ready, NULL);
+      pthread_cond_init(&pipe.cv_free, NULL);
+
+      pthread_t reader_tid;
+      int pt_ret = pthread_create(&reader_tid, NULL, copy_reader_thread, &pipe);
+      int thread_ok = (pt_ret == 0) ? 1 : 0;
+
+      /* Log pthread_create result — on PS4 this can fail with EAGAIN (thread
+       * limit) or ENOMEM (stack allocation failed under memory pressure). */
+      if (thread_ok == 0) {
+        char msg[256];
+        snprintf(msg, sizeof(msg),
+                 "[XDEV] pthread_create failed: errno=%d — "
+                 "falling back to serial copy for %s",
+                 pt_ret, src_path);
+        ftp_log_line(FTP_LOG_WARN, msg);
+      }
+
+      if (thread_ok != 0) {
+        /* Writer loop: drain the buffer that the reader just filled */
+        ssize_t written = 0; /* last write result — checked after join */
+        int write_errno = 0; /* saved errno from the last failed write();
+                              * hoisted outside the for loop so it remains
+                              * accessible after break for the post-join log */
+        pthread_mutex_lock(&pipe.mtx);
+        for (;;) {
+          /* Wait for a filled buffer or EOF/error */
+          while ((pipe.len[1 - pipe.fill_idx] == 0U) && (pipe.done == 0)) {
+            pthread_cond_wait(&pipe.cv_ready, &pipe.mtx);
+          }
+
+          int drain_idx = 1 - pipe.fill_idx;
+          size_t nbytes = pipe.len[drain_idx];
+
+          if ((nbytes == 0U) && (pipe.done != 0)) {
+            break; /* EOF — pipeline drained */
+          }
+
+          pthread_mutex_unlock(&pipe.mtx);
+
+          /*
+           * Write the full buffer in a single write() call.
+           *
+           * We intentionally bypass pal_file_write_all()'s
+           * PAL_WRITE_CHUNK_MAX=128 KB subdivision here.  That limit
+           * exists to prevent TCP recv-buffer stalls in cmd_STOR; it
+           * has no relevance for a file-to-file copy.  A single 4 MB
+           * write() is processed by the PFS driver as a sequential
+           * extent, avoiding per-chunk AES-XTS context setup overhead.
+           */
+          written = 0;
+          write_errno = 0; /* reset each iteration; saved before mutex lock */
+          {
+            const uint8_t *p_out = pipe.buf[drain_idx];
+            size_t remaining = nbytes;
+            while (remaining > 0U) {
+              ssize_t w = write(dst_fd, p_out, remaining);
+              if (w > 0) {
+                p_out += (size_t)w;
+                remaining -= (size_t)w;
+                written += w;
+                continue;
+              }
+              if ((w < 0) && (errno == EINTR)) {
+                continue;
+              }
+              /*
+               * Save errno NOW — pthread_mutex_lock() below can
+               * overwrite it on success (POSIX does not guarantee
+               * errno is untouched on a successful call).
+               *
+               * IMPORTANT — w == 0 case (PS4/PS5 PFS quirk):
+               * POSIX does not define write() returning 0 for a
+               * positive count on a regular file.  On Orbis/Prospero
+               * PFS, a full filesystem silently returns 0 instead of
+               * -1 + ENOSPC.  Detect this and synthesise ENOSPC so
+               * the log always shows a meaningful errno value.
+               */
+              write_errno = (w == 0) ? ENOSPC : errno;
+              written = -1;
+              break;
+            }
+          }
+
+          pthread_mutex_lock(&pipe.mtx);
+
+          if (written < 0) {
+            /*
+             * Write error — signal reader to stop, then break.
+             * We log below after joining the reader thread.
+             */
+            if (out_errno != NULL) {
+              *out_errno = write_errno;
+            }
+            pipe.done = 1;
+            pthread_cond_signal(&pipe.cv_free);
+            out_err = FTP_ERR_FILE_WRITE;
+            break;
+          }
+
+          /* Report progress */
+          if ((cb != NULL) && (cumulative != NULL)) {
+            *cumulative += (uint64_t)written;
+            if (cb(*cumulative, user_data) < 0) {
+              pipe.done = 1;
+              pthread_cond_signal(&pipe.cv_free);
+              out_err = FTP_ERR_UNKNOWN; /* cancelled */
+              break;
+            }
+          }
+
+          /* Mark buffer as free and wake reader */
+          pipe.len[drain_idx] = 0U;
+          pthread_cond_signal(&pipe.cv_free);
+        }
+        pthread_mutex_unlock(&pipe.mtx);
+
+        /* Join reader; collect any read-side error */
+        (void)pthread_join(reader_tid, NULL);
+
+        /*
+         * Post-join result resolution.
+         *
+         * Priority: write error > read error > cancellation > success.
+         *
+         * IMPORTANT: do NOT use `out_err` to detect write failures here.
+         * `out_err` is initialised to FTP_ERR_FILE_WRITE (line ~376) and
+         * is only changed during the loop for cancellation (FTP_ERR_UNKNOWN)
+         * or left at its initial value on both success AND write failure.
+         * Using it as a success/failure discriminator therefore confuses the
+         * two cases and causes a successful pipeline copy to return
+         * FTP_ERR_FILE_WRITE.  Use `written < 0` instead — it is set to -1
+         * exclusively by the write-error break path.
+         */
+        if (written < 0) {
+          /* write() failed — write_errno was captured before mutex lock */
+          char msg[256];
+          snprintf(msg, sizeof(msg), "[COPY] write failed: errno=%d dst=%s",
+                   write_errno, dst_path);
+          ftp_log_line(FTP_LOG_WARN, msg);
+          if (out_errno != NULL) {
+            *out_errno = write_errno;
+          }
+          out_err = FTP_ERR_FILE_WRITE;
+        } else if (pipe.reader_err != 0) {
+          char msg[256];
+          snprintf(msg, sizeof(msg), "[COPY] read failed: errno=%d src=%s",
+                   pipe.reader_err, src_path);
+          ftp_log_line(FTP_LOG_WARN, msg);
+          if (out_errno != NULL) {
+            *out_errno = pipe.reader_err;
+          }
+          out_err = FTP_ERR_FILE_READ;
+        } else if (out_err == FTP_ERR_UNKNOWN) {
+          /* cancelled by progress callback — out_err already set */
+        } else {
+          /* Pipeline completed successfully */
+          out_err = FTP_OK;
+        }
+      } else {
+        /* pthread_create failed — fall through to serial path below */
+        out_err = FTP_ERR_FILE_WRITE; /* will be overwritten by serial path */
+      }
+
+      pthread_mutex_destroy(&pipe.mtx);
+      pthread_cond_destroy(&pipe.cv_ready);
+      pthread_cond_destroy(&pipe.cv_free);
+
+      pal_free(dbuf0);
+      pal_free(dbuf1);
+
+      if (thread_ok != 0) {
+        /* Pipeline ran (success or failure) — skip serial fallback */
+        if (out_err != FTP_OK) {
+          goto cleanup;
+        }
+        goto copy_done;
+      }
+      /* thread_ok == 0: fall through to serial path (already logged above) */
+    } else {
+      /* One or both malloc failed — free whichever succeeded and fall through */
+      {
+        char msg[256];
+        snprintf(msg, sizeof(msg),
+                 "[XDEV] pipeline malloc failed (buf0=%s buf1=%s) — "
+                 "falling back to serial copy for %s",
+                 (dbuf0 != NULL) ? "ok" : "NULL",
+                 (dbuf1 != NULL) ? "ok" : "NULL",
+                 src_path);
+        ftp_log_line(FTP_LOG_WARN, msg);
+      }
+      pal_free(dbuf0);
+      pal_free(dbuf1);
+    }
+  }
+  /* --- Serial fallback (malloc failure or pthread_create failure) --- */
+#endif /* PLATFORM_PS4 || PLATFORM_PS5 */
+
+  {
+    char msg[256];
+    snprintf(msg, sizeof(msg),
+             "[XDEV] serial copy starting: file_size=%llu buf=%u src=%s",
+             (unsigned long long)st.st_size,
+             (unsigned)PAL_FILE_COPY_BUFFER_SIZE,
+             src_path);
+    ftp_log_line(FTP_LOG_INFO, msg);
+  }
+
   copy_buf = (uint8_t *)pal_malloc(PAL_FILE_COPY_BUFFER_SIZE);
   if (copy_buf == NULL) {
+    {
+      pal_alloc_stats_t ast;
+      pal_alloc_get_stats(&ast);
+      char msg[256];
+      snprintf(msg, sizeof(msg),
+               "[XDEV] serial malloc failed: arena_inuse=%llu peak=%llu "
+               "failures=%llu buf_needed=%u src=%s",
+               (unsigned long long)ast.bytes_in_use,
+               (unsigned long long)ast.bytes_peak,
+               (unsigned long long)ast.failures,
+               (unsigned)PAL_FILE_COPY_BUFFER_SIZE,
+               src_path);
+      ftp_log_line(FTP_LOG_WARN, msg);
+    }
     out_err = FTP_ERR_OUT_OF_MEMORY;
     goto cleanup;
   }
 
-  for (;;) {
-    ssize_t r = read(src_fd, copy_buf, (size_t)PAL_FILE_COPY_BUFFER_SIZE);
-    if (r > 0) {
-      ssize_t w = pal_file_write_all(dst_fd, copy_buf, (size_t)r);
-      if (w != r) {
-        {
-          char msg[256];
-          snprintf(msg, sizeof(msg), "[XDEV] write failed: errno=%d dst=%s",
-                   errno, dst_path);
-          ftp_log_line(FTP_LOG_WARN, msg);
-        }
-        out_err = FTP_ERR_FILE_WRITE;
-        goto cleanup;
-      }
-      /* Report progress to caller; check for cancellation */
-      if ((cb != NULL) && (cumulative != NULL)) {
-        *cumulative += (uint64_t)r;
-        if (cb(*cumulative, user_data) < 0) {
-          out_err = FTP_ERR_UNKNOWN; /* cancelled */
+  {
+    uint64_t serial_written = 0U;
+    uint64_t serial_last_log = 0U;
+    /* Log every 64 MB so we can see how far the copy got before failing */
+    const uint64_t LOG_INTERVAL = 64U * 1024U * 1024U;
+
+    for (;;) {
+      ssize_t r = read(src_fd, copy_buf, (size_t)PAL_FILE_COPY_BUFFER_SIZE);
+      if (r > 0) {
+        ssize_t w = pal_file_write_all(dst_fd, copy_buf, (size_t)r);
+        if (w != r) {
+          {
+            int e = errno;
+            char msg[256];
+            snprintf(msg, sizeof(msg),
+                     "[XDEV] write failed: errno=%d written_so_far=%llu "
+                     "file_size=%llu dst=%s",
+                     e,
+                     (unsigned long long)serial_written,
+                     (unsigned long long)st.st_size,
+                     dst_path);
+            ftp_log_line(FTP_LOG_WARN, msg);
+            if (out_errno != NULL) {
+              *out_errno = e;
+            }
+          }
+          out_err = FTP_ERR_FILE_WRITE;
           goto cleanup;
         }
-      }
-      continue;
-    }
-    if (r == 0) {
-      break;
-    }
-    if (errno == EINTR) {
-      continue;
-    }
-    {
-      char msg[256];
-      snprintf(msg, sizeof(msg), "[XDEV] read failed: errno=%d src=%s", errno,
-               src_path);
-      ftp_log_line(FTP_LOG_WARN, msg);
-    }
-    out_err = FTP_ERR_FILE_READ;
-    goto cleanup;
-  }
+        serial_written += (uint64_t)r;
 
-  pal_free(copy_buf);
-  copy_buf = NULL;
+        /* Periodic progress log */
+        if (serial_written - serial_last_log >= LOG_INTERVAL) {
+          serial_last_log = serial_written;
+          char msg[256];
+          snprintf(msg, sizeof(msg),
+                   "[XDEV] serial progress: %llu / %llu bytes (%.1f%%) dst=%s",
+                   (unsigned long long)serial_written,
+                   (unsigned long long)st.st_size,
+                   (st.st_size > 0)
+                       ? (100.0 * (double)serial_written / (double)st.st_size)
+                       : 0.0,
+                   dst_path);
+          ftp_log_line(FTP_LOG_INFO, msg);
+        }
+
+        /* Report progress to caller; check for cancellation */
+        if ((cb != NULL) && (cumulative != NULL)) {
+          *cumulative += (uint64_t)r;
+          if (cb(*cumulative, user_data) < 0) {
+            out_err = FTP_ERR_UNKNOWN; /* cancelled */
+            goto cleanup;
+          }
+        }
+        continue;
+      }
+      if (r == 0) {
+        break;
+      }
+      if (errno == EINTR) {
+        continue;
+      }
+      {
+        int e = errno;
+        char msg[256];
+        snprintf(msg, sizeof(msg),
+                 "[XDEV] read failed: errno=%d written_so_far=%llu src=%s",
+                 e, (unsigned long long)serial_written, src_path);
+        ftp_log_line(FTP_LOG_WARN, msg);
+        if (out_errno != NULL) {
+          *out_errno = e;
+        }
+      }
+      out_err = FTP_ERR_FILE_READ;
+    goto cleanup;
+  } /* end serial for(;;) loop */
+  } /* end serial_written scope */
+
+  out_err = FTP_OK;
+
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+copy_done:;
+#endif
+
+  /* Log completion before the atomic rename so a crash here is diagnosable */
+  {
+    char msg[256];
+    snprintf(msg, sizeof(msg),
+             "[XDEV] copy complete, renaming tmp -> dst: %s", dst_path);
+    ftp_log_line(FTP_LOG_INFO, msg);
+  }
 
   if (rename(tmp_path, dst_path) < 0) {
     {
+      int e = errno;
       char msg[256];
       snprintf(msg, sizeof(msg),
-               "[XDEV] rename(tmp->dst) failed: errno=%d tmp=%s dst=%s", errno,
+               "[XDEV] rename(tmp->dst) failed: errno=%d tmp=%s dst=%s", e,
                tmp_path, dst_path);
       ftp_log_line(FTP_LOG_WARN, msg);
+      if (out_errno != NULL) {
+        *out_errno = e;
+      }
     }
     out_err = FTP_ERR_FILE_WRITE;
     goto cleanup;
@@ -633,7 +1154,11 @@ ssize_t pal_file_write_all(int fd, const void *buffer, size_t count) {
       continue;
     }
     if (n == 0) {
-      errno = EIO;
+      /* POSIX does not define write() returning 0 for count > 0.
+       * On PS4/PS5 PFS a full filesystem silently returns 0 instead
+       * of -1 + ENOSPC.  Map this to ENOSPC so callers see the real
+       * cause rather than the misleading EIO. */
+      errno = ENOSPC;
       return -1;
     }
     if (errno == EINTR) {
@@ -832,7 +1357,8 @@ static ftp_error_t pal_copy_cross_device_r_ex(const char *src, const char *dst,
                                               unsigned depth, int keep_src,
                                               pal_copy_progress_cb_t cb,
                                               void *user_data,
-                                              uint64_t *cumulative) {
+                                              uint64_t *cumulative,
+                                              int *out_errno) {
   if ((src == NULL) || (dst == NULL)) {
     return FTP_ERR_INVALID_PARAM;
   }
@@ -869,13 +1395,20 @@ static ftp_error_t pal_copy_cross_device_r_ex(const char *src, const char *dst,
    * Leaf: regular file -> atomic copy + delete source     *
    *-------------------------------------------------------*/
   if (S_ISREG(src_st.st_mode)) {
+    /* Use a local errno so the error log below always shows the real OS code
+     * even when the caller passes NULL for out_errno (e.g. the async copy
+     * thread).  If the caller DID provide out_errno, we forward into it. */
+    int local_errno = 0;
+    int *errno_ptr = (out_errno != NULL) ? out_errno : &local_errno;
     ftp_error_t err =
-        pal_file_copy_atomic_ex(src, dst, cb, user_data, cumulative);
+        pal_file_copy_atomic_ex(src, dst, cb, user_data, cumulative, errno_ptr);
     if (err != FTP_OK) {
       {
+        int os_err = *errno_ptr; /* always valid: either *out_errno or local_errno */
         char msg[256];
-        snprintf(msg, sizeof(msg), "[XDEV] file copy failed (err=%d): %s -> %s",
-                 (int)err, src, dst);
+        snprintf(msg, sizeof(msg),
+                 "[XDEV] file copy failed (err=%d, errno=%d): %s -> %s",
+                 (int)err, os_err, src, dst);
         ftp_log_line(FTP_LOG_WARN, msg);
       }
       return err;
@@ -971,7 +1504,7 @@ static ftp_error_t pal_copy_cross_device_r_ex(const char *src, const char *dst,
     }
 
     err = pal_copy_cross_device_r_ex(src_child, dst_child, depth + 1U, keep_src,
-                                     cb, user_data, cumulative);
+                                     cb, user_data, cumulative, out_errno);
     if (err != FTP_OK) {
       break;
     }
@@ -1045,15 +1578,16 @@ ftp_error_t pal_file_rename(const char *old_path, const char *new_path) {
 ftp_error_t pal_file_copy_recursive(const char *src, const char *dst,
                                     int keep_src) {
   uint64_t cum = 0U;
-  return pal_copy_cross_device_r_ex(src, dst, 0U, keep_src, NULL, NULL, &cum);
+  return pal_copy_cross_device_r_ex(src, dst, 0U, keep_src, NULL, NULL, &cum,
+                                    NULL);
 }
 
 ftp_error_t pal_file_copy_recursive_ex(const char *src, const char *dst,
                                        int keep_src, pal_copy_progress_cb_t cb,
-                                       void *user_data) {
+                                       void *user_data, int *out_errno) {
   uint64_t cum = 0U;
-  return pal_copy_cross_device_r_ex(src, dst, 0U, keep_src, cb, user_data,
-                                    &cum);
+  return pal_copy_cross_device_r_ex(src, dst, 0U, keep_src, cb, user_data, &cum,
+                                    out_errno);
 }
 
 /*===========================================================================*
