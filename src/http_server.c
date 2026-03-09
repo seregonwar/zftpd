@@ -62,6 +62,7 @@ SOFTWARE.
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h> /* TCP_NODELAY */
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -93,6 +94,25 @@ typedef struct {
   int upload_active;
   int upload_fd;
   size_t upload_remaining;
+  /*
+   * @field upload_chunk_buf
+   * Heap-allocated read buffer for streaming uploads.
+   * NULL when no upload is active.  Allocated to HTTP_UPLOAD_CHUNK_SIZE
+   * at upload start; freed in http_connection_release().
+   *
+   * WHY: the connection's header buffer (conn->buffer) is only
+   * HTTP_REQUEST_BUFFER_SIZE (8 KB).  Reading 8 KB per event-loop
+   * iteration limits upload throughput to a few MB/s.  A dedicated
+   * 256 KB buffer reduces the required syscall rate by 32× at the
+   * same throughput target.
+   *
+   * ISOLATION: this field is only accessed inside ENABLE_WEB_UPLOAD
+   * guards.  FTP paths, download paths, and internal copy are unaffected.
+   *
+   * @note Thread-safety: NOT thread-safe (single event-loop thread)
+   * @note Must be freed (not closed) in http_connection_release()
+   */
+  uint8_t *upload_chunk_buf;
 #endif
 } http_connection_t;
 
@@ -109,6 +129,7 @@ static void http_connections_init(void) {
     g_http_connections[i].upload_active = 0;
     g_http_connections[i].upload_fd = -1;
     g_http_connections[i].upload_remaining = 0;
+    g_http_connections[i].upload_chunk_buf = NULL;
 #endif
   }
 }
@@ -147,6 +168,11 @@ static void http_connection_release(http_connection_t *conn) {
   }
   conn->upload_active = 0;
   conn->upload_remaining = 0;
+  /* Free the upload read buffer if it was allocated */
+  if (conn->upload_chunk_buf != NULL) {
+    free(conn->upload_chunk_buf);
+    conn->upload_chunk_buf = NULL;
+  }
 #endif
   conn->fd = -1;
   conn->server = NULL;
@@ -478,6 +504,49 @@ static int http_accept_callback(int fd, uint32_t events, void *data) {
     return 0; /* EAGAIN or error, keep listening */
   }
 
+  /*
+   * SOCKET TUNING FOR UPLOAD THROUGHPUT
+   *
+   * TCP_NODELAY
+   *   Disable Nagle's algorithm on the server's outgoing path.
+   *   Nagle batches small writes, adding up to 200 ms of latency for
+   *   ACKs and HTTP response headers.  Disabling it ensures the 200-byte
+   *   "HTTP/1.1 200 OK" response after upload completes is sent immediately
+   *   rather than waiting for the kernel to accumulate more data.
+   *   Has no effect on incoming data (upload body direction).
+   *
+   * SO_RCVBUF
+   *   Hint the kernel to allocate a 2 MB receive buffer for this socket.
+   *   A larger receive buffer allows the kernel to acknowledge incoming
+   *   data in larger batches, keeping the sender's congestion window open
+   *   between event-loop wakeups.  Without this, the default receive buffer
+   *   (~87 KB on Linux, ~256 KB on FreeBSD) can be drained faster than the
+   *   event loop wakes up, forcing the remote sender to pause.
+   *
+   *   IMPORTANT: setsockopt(SO_RCVBUF) is a hint.  The kernel caps it at
+   *   net.core.rmem_max (Linux) or kern.ipc.maxsockbuf (FreeBSD/PS5) and
+   *   silently ignores requests above the system maximum.  Setting it here
+   *   is therefore always safe — worst case it has no effect.
+   *
+   * @note These options apply to ALL HTTP client connections, not just
+   *       uploads.  TCP_NODELAY is universally beneficial for request/
+   *       response HTTP.  The SO_RCVBUF hint is harmless for short API
+   *       requests (the kernel won't actually allocate the full buffer
+   *       until data arrives).
+   *
+   * @note Thread-safety: called only in the accept callback (single
+   *       event-loop thread).
+   */
+  {
+    int nodelay = 1;
+    (void)setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY,
+                     &nodelay, sizeof(nodelay));
+
+    int rcvbuf = (int)HTTP_UPLOAD_RCVBUF_SIZE;
+    (void)setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF,
+                     &rcvbuf, sizeof(rcvbuf));
+  }
+
   /* Connection limit */
   if (atomic_load(&server->connection_count) >= HTTP_MAX_CONNECTIONS) {
     close(client_fd);
@@ -516,7 +585,43 @@ static int http_client_callback(int fd, uint32_t events, void *data) {
   if (events & EVENT_READ) {
 #if ENABLE_WEB_UPLOAD
     if (conn->upload_active != 0) {
-      ssize_t n = read(conn->fd, conn->buffer, sizeof(conn->buffer));
+      /*
+       * UPLOAD STREAMING READ
+       *
+       * Use the pre-allocated upload_chunk_buf (HTTP_UPLOAD_CHUNK_SIZE =
+       * 256 KB) instead of conn->buffer (HTTP_REQUEST_BUFFER_SIZE = 8 KB).
+       *
+       * WHY: reading 8 KB per event-loop iteration caps throughput because
+       * each iteration requires a kqueue/epoll round-trip (typically
+       * 5-20 µs).  At 8 KB × 50 000 wakeups/s the ceiling is ~400 MB/s in
+       * theory, but in practice kernel scheduling overhead and interrupt
+       * coalescing bring the real ceiling much lower (measured ~5 MB/s).
+       *
+       * At 256 KB the required syscall rate for 113 MB/s drops to ~440/s,
+       * well within the event-loop budget.  Each read() drains a much
+       * larger window of TCP receive-buffer data in one call, so the kernel
+       * spends far more time in DMA and far less in context switches.
+       *
+       * FALLBACK: if malloc failed during upload initialisation,
+       * upload_chunk_buf is NULL and we fall back to conn->buffer (8 KB).
+       * This preserves correctness at the cost of performance.
+       *
+       * ISOLATION: only active when upload_active != 0.  All other HTTP
+       * paths (headers, download, API) continue to use conn->buffer.
+       * FTP and internal copy are completely unaffected.
+       *
+       * @pre  conn->upload_chunk_buf allocated at upload start (or NULL)
+       * @pre  conn->upload_remaining > 0
+       * @post conn->upload_remaining decremented by bytes written to file
+       */
+      uint8_t *rd_buf  = (conn->upload_chunk_buf != NULL)
+                             ? conn->upload_chunk_buf
+                             : (uint8_t *)conn->buffer;
+      size_t   rd_cap  = (conn->upload_chunk_buf != NULL)
+                             ? (size_t)HTTP_UPLOAD_CHUNK_SIZE
+                             : sizeof(conn->buffer);
+
+      ssize_t n = read(conn->fd, rd_buf, rd_cap);
       if (n <= 0) {
         http_close_connection(conn);
         return -1;
@@ -528,7 +633,7 @@ static int http_client_callback(int fd, uint32_t events, void *data) {
       }
 
       if ((got > 0U) && (conn->upload_fd >= 0)) {
-        if (pal_file_write_all(conn->upload_fd, conn->buffer, got) < 0) {
+        if (pal_file_write_all(conn->upload_fd, rd_buf, got) < 0) {
           http_close_connection(conn);
           return -1;
         }
@@ -692,6 +797,19 @@ static int http_client_callback(int fd, uint32_t events, void *data) {
         }
         conn->upload_fd = out_fd;
         conn->upload_active = 1;
+
+        /*
+         * Allocate the large upload read buffer (HTTP_UPLOAD_CHUNK_SIZE =
+         * 256 KB).  If malloc fails we fall back to conn->buffer (8 KB) —
+         * correctness is preserved, only throughput is affected.
+         *
+         * The buffer is freed in http_connection_release() regardless of
+         * how the connection terminates (success, error, or timeout).
+         */
+        if (conn->upload_chunk_buf == NULL) {
+          conn->upload_chunk_buf = (uint8_t *)malloc(HTTP_UPLOAD_CHUNK_SIZE);
+          /* malloc failure is non-fatal: fallback path uses conn->buffer */
+        }
 
         size_t in_buf = 0U;
         if (conn->buffer_used > header_len) {

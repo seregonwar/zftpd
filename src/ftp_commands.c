@@ -747,6 +747,29 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
           }
 
           /*
+           * Fatal storage error — EIO / ESTALE / EBADF / EFAULT.
+           *
+           * pal_sendfile() now always returns -1 for these (never a
+           * positive sbytes), so errno is still set from the underlying
+           * sendfile(2) syscall.
+           *
+           * Do NOT enter the EAGAIN retry loop: every retry would call
+           * sendfile() again on the same bad/unmounted vnode, which on
+           * PS5/PS4 (FreeBSD sendfile) can trigger an unrecoverable
+           * kernel panic.
+           *
+           * Instead, disable sendfile for this session and fall through
+           * to the read()-based cooldown path, which handles I/O errors
+           * gracefully by returning an FTP 426 reply.
+           */
+          if ((sent < 0) && ((errno == EIO) || (errno == ESTALE) ||
+                             (errno == EBADF) || (errno == EFAULT))) {
+            vfs_set_offset(&node, (uint64_t)offset);
+            use_sendfile = 0; /* switch to read() for remainder */
+            break;
+          }
+
+          /*
            * sent == 0: two possible causes need different responses.
            *
            * (A) TCP back-pressure — send buffer momentarily full.

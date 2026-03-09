@@ -90,4 +90,41 @@ SOFTWARE.
 #define ENABLE_WEB_UPLOAD 0
 #endif
 
+/*---------------------------------------------------------------------------*
+ * Upload streaming performance tuning
+ *
+ * HTTP_UPLOAD_CHUNK_SIZE
+ *   Heap-allocated read buffer used exclusively while an upload is active.
+ *   Each event-loop iteration drains up to this many bytes from the socket.
+ *
+ *   Rationale:
+ *     The connection's header buffer (HTTP_REQUEST_BUFFER_SIZE = 8 KB) is
+ *     reused during streaming, capping each read() at 8 KB.  At 113 MB/s
+ *     that requires ~13 800 read() + kqueue round-trips per second — well
+ *     beyond what a single-threaded event loop can sustain.
+ *
+ *     256 KB reduces the required syscall rate to ~440/s at 113 MB/s,
+ *     comfortably within budget while keeping per-upload heap overhead low.
+ *     The buffer is allocated on upload start and freed on completion, so
+ *     idle connections pay no memory cost.
+ *
+ * HTTP_UPLOAD_RCVBUF_SIZE
+ *   SO_RCVBUF hint set on each accepted client socket.  A larger kernel
+ *   receive buffer absorbs TCP bursts between event-loop wakeups and keeps
+ *   the sender's congestion window open.  2 MB is sufficient for RTTs up
+ *   to ~140 µs at 113 MB/s (BDP = 113e6 * 140e-6 ≈ 15 KB; 2 MB is 133×
+ *   the BDP — intentionally oversized so the kernel never stalls).
+ *
+ *   IMPORTANT: This is a hint only.  The kernel caps it at
+ *   net.core.rmem_max (Linux) or kern.ipc.maxsockbuf (FreeBSD/PS5).
+ *   Setting it higher than the system maximum is silently ignored.
+ *---------------------------------------------------------------------------*/
+#ifndef HTTP_UPLOAD_CHUNK_SIZE
+#define HTTP_UPLOAD_CHUNK_SIZE    (256U * 1024U)   /* 256 KB per active upload */
+#endif
+
+#ifndef HTTP_UPLOAD_RCVBUF_SIZE
+#define HTTP_UPLOAD_RCVBUF_SIZE   (2U * 1024U * 1024U) /* 2 MB SO_RCVBUF hint */
+#endif
+
 #endif /* HTTP_CONFIG_H */

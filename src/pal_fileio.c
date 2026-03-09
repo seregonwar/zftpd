@@ -301,25 +301,81 @@ ssize_t pal_sendfile(int sock_fd, int file_fd, off_t *offset, size_t count) {
   } else if ((ret == -1) && ((errno == EIO) || (errno == ESTALE) ||
                              (errno == EBADF) || (errno == EFAULT))) {
     /*
-     * Storage-level error during transfer.
+     * Fatal storage-level error during transfer.
      *
-     * EIO    : underlying device I/O error (USB read failure)
-     * ESTALE : stale vnode — filesystem unmounted under us
-     * EBADF  : fd invalidated (shouldn't happen, but guard anyway)
-     * EFAULT : kernel memory fault — should never reach userspace,
-     *          but if it does we must NOT retry with sendfile()
+     * EIO    : underlying device I/O error (USB read failure, NVMe fault)
+     * ESTALE : stale vnode — filesystem unmounted while transfer was in flight
+     * EBADF  : fd invalidated — should never reach here, but guard anyway
+     * EFAULT : kernel memory fault — extremely rare; never retry
      *
-     * These errors indicate the source filesystem is no longer
-     * accessible. Return whatever was sent so far; the caller
-     * will detect the short count and send reply 426.
+     * CRITICAL: ALWAYS return -1 here, regardless of sbytes.
      *
-     * CRITICAL: do NOT retry sendfile() after any of these —
-     * retrying on a detached vnode can panic the kernel.
+     * Previous behaviour returned sbytes when sbytes > 0, signalling
+     * a "partial success" to the caller.  This caused the caller's loop
+     * to decrement its remaining-byte counter and call pal_sendfile()
+     * again on the same (now-corrupted/unmounted) vnode.  On PS5/PS4
+     * that second call can trigger an unrecoverable kernel panic.
+     *
+     * Safety: *offset has already been advanced by sbytes above, so no
+     * data is double-sent.  The caller sees -1, breaks out of its loop,
+     * and closes the connection cleanly — which is the correct behaviour.
+     *
+     * FTP callers (ftp_commands.c): they detect sent < 0, check errno,
+     * and skip the EAGAIN retry loop (see the EIO guard there), falling
+     * through to the read()-based cooldown path without any sendfile retry.
      */
-    return (sbytes > 0) ? sbytes : -1;
-  } else {
-    /* Other error (e.g. ENOTSOCK, EINVAL) */
     return -1;
+
+  } else {
+    /*
+     * EINVAL / ENOSYS / ENXIO / other unexpected sendfile() error.
+     *
+     * On PS5 and PS4, sendfile(2) is not supported for every file+socket
+     * combination.  Known cases:
+     *   - exFAT / FAT32 USB drives: sendfile can return EINVAL because
+     *     the kernel vnode driver for exFAT does not implement the
+     *     sendfile vnode operation.
+     *   - Special pseudo-files (pipes, device nodes, etc.)
+     *
+     * If sbytes == 0 (sendfile failed before sending a single byte) we
+     * transparently fall back to pread(2) + pal_send_all().  The caller
+     * never notices the switch — it just receives the expected data.
+     *
+     * If sbytes > 0 (sendfile sent some data then failed with EINVAL,
+     * which is unusual but possible) we continue the fallback from the
+     * already-advanced *offset so no bytes are skipped or duplicated.
+     *
+     * IMPORTANT: this fallback MUST NOT be used for EIO/ESTALE — those
+     * errors indicate the underlying storage is gone and pread() will
+     * either also fail or return stale data from an inconsistent vnode.
+     * They are handled in the branch above.
+     */
+    static _Thread_local char fb_buf[FALLBACK_BUFFER_SIZE];
+
+    size_t fb_remaining = count - (size_t)sbytes;
+
+    while (fb_remaining > 0U) {
+      size_t chunk = (fb_remaining < (size_t)FALLBACK_BUFFER_SIZE)
+                         ? fb_remaining
+                         : (size_t)FALLBACK_BUFFER_SIZE;
+
+      ssize_t nread = pread(file_fd, fb_buf, chunk, *offset);
+      if (nread <= 0) {
+        /* EOF or read error — return what we managed to send */
+        return (sbytes > 0) ? sbytes : -1;
+      }
+
+      ssize_t nsent = pal_send_all(sock_fd, fb_buf, (size_t)nread, 0);
+      if (nsent < 0) {
+        return (sbytes > 0) ? sbytes : -1;
+      }
+
+      *offset      += (off_t)nsent;
+      sbytes       += (off_t)nsent;
+      fb_remaining -= (size_t)nsent;
+    }
+
+    return sbytes;
   }
 
 #else
