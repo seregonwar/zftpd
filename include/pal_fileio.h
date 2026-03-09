@@ -328,6 +328,7 @@ ftp_error_t pal_dir_create(const char *path, mode_t mode);
  * @note Directory must be empty
  */
 ftp_error_t pal_dir_remove(const char *path);
+ftp_error_t pal_dir_remove_recursive_pub(const char *path);
 
 /**
  * @brief Check if path exists

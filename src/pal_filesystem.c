@@ -93,15 +93,35 @@ ftp_error_t vfs_open(vfs_node_t *node, const char *path)
     memset(node, 0, sizeof(*node));
     node->fd = -1;
 
-#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
-    int self_res = psx_vfs_try_open_self(node, path);
-    if (self_res < 0) {
-        return FTP_ERR_FILE_OPEN;
-    }
-    if (self_res > 0) {
-        return FTP_OK;
-    }
-#endif
+    /*
+     * PLATFORM PS4/PS5 — raw file transfer, NOT MAP_SELF
+     *
+     * Previous code tried psx_vfs_try_open_self() first.  If the file was a
+     * SELF (encrypted PS4/PS5 executable), the VFS node was set up with:
+     *   - node->size  = elf_size   (logical ELF bytes, much smaller than disk)
+     *   - node->caps  = VFS_CAP_STREAM_ONLY  (reads via MAP_SELF = decryption)
+     *
+     * This caused two combined defects for FTP downloads:
+     *
+     *   1. SIZE / MLSD reported elf_size (e.g. 419 MB) instead of st_size
+     *      (e.g. 12 GB).  FTP clients closed the connection after 419 MB,
+     *      believing the transfer was complete.
+     *
+     *   2. The bytes actually sent were the DECRYPTED ELF payload — not the
+     *      raw on-disk SELF container.  The received file is unusable for
+     *      backup, copying, or re-installation.
+     *
+     * zftpd is a file-transfer daemon.  Its job is to move bits from disk to
+     * the client exactly as they exist on storage.  It must never silently
+     * decrypt or transform file content.
+     *
+     * psx_vfs_try_open_self is intentionally NOT called here.  It remains
+     * available for platform-internal use (e.g. module loading) but must not
+     * be on the data-transfer path.
+     *
+     * @note The sendfile-safety check below (VFS_CAP_SENDFILE) still applies:
+     *       exFAT / nullfs / pfsmnt vnodes KP with sendfile(2) on PS5.
+     */
 
     int fd = pal_file_open(path, O_RDONLY, 0);
     if (fd < 0) {

@@ -377,26 +377,40 @@ ftp_error_t psx_vfs_stat(const char *path, vfs_stat_t *out)
         return err;
     }
 
-    out->mode = (uint32_t)st.st_mode;
+    out->mode  = (uint32_t)st.st_mode;
     out->mtime = (int64_t)st.st_mtime;
-    out->size = (uint64_t)st.st_size;
+    out->size  = (uint64_t)st.st_size;
 
-    int fd = pal_file_open(path, O_RDONLY, 0);
-    if (fd < 0) {
-        return FTP_OK;
-    }
-
-    self_head_t head;
-    uint64_t elf_off = 0U;
-    Elf64_Ehdr ehdr;
-    if (self_parse_headers(fd, &head, &elf_off, &ehdr) == 0) {
-        uint64_t elf_size = self_compute_elf_size(fd, elf_off, &ehdr);
-        if (elf_size > 0U) {
-            out->size = elf_size;
-        }
-    }
-
-    pal_file_close(fd);
+    /*
+     * DESIGN RATIONALE — why we do NOT override size with self_compute_elf_size()
+     *
+     * Previous code opened every file here and, when it detected a SELF header
+     * (PS4/PS5 encrypted executable), replaced out->size with the logical ELF
+     * size computed from the program-header table.
+     *
+     * This caused a critical file-transfer bug:
+     *
+     *   - A SELF container may be 12 GB on disk but its embedded ELF segments
+     *     occupy only ~419 MB (the rest is SELF metadata, signatures, and
+     *     encrypted padding).
+     *
+     *   - FTP clients use the size reported by SIZE / MLSD to determine how
+     *     many bytes constitute a complete file.  When they see 419 MB they
+     *     stop reading after 419 MB, even though the actual file is 12 GB.
+     *
+     *   - vfs_open() then opened the same file via psx_vfs_try_open_self
+     *     (MAP_SELF path), sending 419 MB of DECRYPTED ELF bytes instead of
+     *     the raw on-disk content.  The client receives a truncated, decrypted
+     *     file — useless for backup or copying.
+     *
+     * zftpd is a file-transfer daemon: it must report and transfer the ACTUAL
+     * bytes present on disk (st_size), not the logical ELF payload.  Anyone
+     * who needs to inspect the ELF structure should use platform tools.
+     *
+     * The self_parse_headers / self_compute_elf_size machinery is kept for
+     * psx_vfs_try_open_self (the MAP_SELF execution path) but must not
+     * influence size reporting for transfer purposes.
+     */
     return FTP_OK;
 }
 

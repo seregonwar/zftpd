@@ -64,6 +64,8 @@ static const char *status_text(http_status_t status) {
     return "Not Found";
   case HTTP_STATUS_405_METHOD_NOT_ALLOWED:
     return "Method Not Allowed";
+  case HTTP_STATUS_409_CONFLICT:
+    return "Conflict";
   /* 5xx */
   case HTTP_STATUS_500_INTERNAL_ERROR:
     return "Internal Server Error";

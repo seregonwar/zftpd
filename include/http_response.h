@@ -58,6 +58,7 @@ typedef enum {
   HTTP_STATUS_403_FORBIDDEN = 403,
   HTTP_STATUS_404_NOT_FOUND = 404,
   HTTP_STATUS_405_METHOD_NOT_ALLOWED = 405,
+  HTTP_STATUS_409_CONFLICT = 409,
 
   /*  5xx ── Server Error  */
   HTTP_STATUS_500_INTERNAL_ERROR = 500,
@@ -89,6 +90,17 @@ typedef struct {
   int sendfile_fd;       /**< File fd (-1 = not used)           */
   off_t sendfile_offset; /**< Current offset in file            */
   size_t sendfile_count; /**< Remaining bytes to send           */
+  int sendfile_safe;     /**< 1 = FS supports sendfile(2) safely;
+                          *   0 = must use pread()+send() fallback.
+                          *
+                          * On PS5/PS4 (FreeBSD), calling sendfile(2) on
+                          * certain filesystem types (exfatfs, msdosfs,
+                          * nullfs, pfsmnt, pfs) dereferences a null
+                          * function pointer inside the kernel vnode pager
+                          * and causes an IMMEDIATE KERNEL PANIC — errno
+                          * is never set, the process never returns.
+                          * The flag is checked in http_server.c BEFORE
+                          * the first call to pal_sendfile(). */
 
   /* Chunked directory streaming (for /api/list) */
   void *stream_dir;       /**< DIR* — NULL = not streaming       */

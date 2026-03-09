@@ -804,7 +804,7 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
               bytes_sent += (uint64_t)r_sent;
               session->last_activity = time(NULL);
               atomic_fetch_add(&session->stats.bytes_sent, (uint64_t)r_sent);
-#if defined(__linux__) && defined(POSIX_FADV_DONTNEED)
+#if defined(POSIX_FADV_DONTNEED)
               if (node.fd >= 0) {
                 off_t evict_start = offset - (off_t)r_sent;
                 if (evict_start >= 0) {
@@ -848,16 +848,21 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
          *   then spends increasing time on page reclaim, causing the
          *   observed monotonic throughput drop from 260 Mbps toward 0.
          *
-         *   POSIX_FADV_DONTNEED on Linux marks the just-sent pages as
-         *   eligible for immediate eviction (they remain accessible but
-         *   are freed under memory pressure before any other pages).
-         *   This keeps cache pressure flat regardless of file size.
+         *   POSIX_FADV_DONTNEED marks the just-sent pages as eligible for
+         *   immediate eviction (they remain accessible but are freed under
+         *   memory pressure before any other pages), keeping cache pressure
+         *   flat regardless of file size.
          *
-         *   Only safe on Linux here (the fadvise is on the source fd, not
-         *   a sendfile-internal mapping, so there is no conflict with the
-         *   PS5 sendfile vnode-pin concern described in pal_fileio.c).
+         *   Safe on Linux AND FreeBSD/PS5: posix_fadvise(DONTNEED) on a
+         *   read-only fd simply marks pages as low-priority — it does not
+         *   write data or invalidate valid mappings.  The previous guard
+         *   "#if defined(__linux__)" was an oversight; PS5 also supports
+         *   posix_fadvise(2) and benefits from the same eviction hint.
+         *   (The sendfile-internal mapping concern in pal_fileio.c is about
+         *   F_NOCACHE on the same fd being passed to sendfile(), which is
+         *   a different code path — it does not apply here.)
          */
-#if defined(__linux__) && defined(POSIX_FADV_DONTNEED)
+#if defined(POSIX_FADV_DONTNEED)
         if (node.fd >= 0) {
           off_t evict_start = offset - (off_t)sent;
           if (evict_start >= 0) {
@@ -927,7 +932,7 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
       session->last_activity = time(NULL);
 
       /* Evict pages already sent; same rationale as the sendfile path. */
-#if defined(__linux__) && defined(POSIX_FADV_DONTNEED)
+#if defined(POSIX_FADV_DONTNEED)
       if (node.fd >= 0) {
         off_t sent_end = (off_t)(file_size - (uint64_t)remaining);
         off_t evict_start = sent_end - (off_t)sent;

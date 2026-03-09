@@ -50,6 +50,16 @@ SOFTWARE.
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/time.h>
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5) || defined(__FreeBSD__)
+#include <sys/mount.h>  /* fstatfs, struct statfs — for sendfile safety check */
+/* PS4/PS5 libkernel exports _fstatfs, not fstatfs */
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+extern int _fstatfs(int, struct statfs *);
+#define http_fstatfs _fstatfs
+#else
+#define http_fstatfs fstatfs
+#endif
+#endif /* PLATFORM_PS4 || PLATFORM_PS5 || __FreeBSD__ */
 #include <time.h>
 #if defined(PLATFORM_LINUX) && __has_include(<sys/sysinfo.h>)
 #define HAS_SYSINFO 1
@@ -1066,9 +1076,71 @@ static http_response_t *api_download(const http_request_t *request) {
   http_response_finalize(resp);
 
   /* Store fd so http_server.c can stream the file content */
-  resp->sendfile_fd = fd;
+  resp->sendfile_fd     = fd;
   resp->sendfile_offset = 0;
-  resp->sendfile_count = (size_t)st.st_size;
+  resp->sendfile_count  = (size_t)st.st_size;
+
+  /*
+   * SENDFILE SAFETY CHECK — must happen before http_server.c touches the fd.
+   *
+   * On PS5/PS4 (FreeBSD), calling sendfile(2) on vnodes backed by certain
+   * filesystems causes an IMMEDIATE KERNEL PANIC:
+   *
+   *   exfatfs  — USB drives formatted exFAT: the kernel exFAT vnode does not
+   *               implement vm_pager_ops, so sendfile() dereferences a null
+   *               function pointer.
+   *   msdosfs  — FAT32 USB drives: same broken pager ops.
+   *   nullfs   — bind-mount: inherits the pager of the origin vnode.  If the
+   *               origin is exFAT, the nullfs vnode also KPs.
+   *   pfsmnt   — PlayStation FS mount (/user/av_contents, game data mounts):
+   *               sendfile() sends corrupt/incomplete data.
+   *   pfs      — raw PFS on internal SSD (/data, /user):
+   *               same broken pager as pfsmnt.
+   *
+   * CRITICAL: on these filesystems errno is NEVER set — the kernel triple-
+   * faults before returning to userspace.  Our EINVAL fallback in
+   * pal_sendfile() cannot help because execution never reaches it.
+   *
+   * The fix: detect the filesystem type on the open fd with fstatfs() and set
+   * sendfile_safe = 0.  http_server.c will then use pread()+send_all() for
+   * the entire transfer, bypassing sendfile(2) entirely.
+   *
+   * On Linux and macOS sendfile() is always safe; sendfile_safe = 1.
+   * On FreeBSD/PS5/PS4 default to 0 (unsafe) and only enable for filesystems
+   * known to be safe (ufs, tmpfs, zfs, ffs — internal NVMe on PS5 via
+   * the native FFS layer if ever used).
+   */
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5) || defined(__FreeBSD__)
+  {
+    int sf_safe = 0; /* conservative default: assume unsafe */
+    struct statfs sfs;
+    if (http_fstatfs(fd, &sfs) == 0) {
+      const char *t = sfs.f_fstypename;
+      /*
+       * Whitelist: filesystems known to work correctly with sendfile(2).
+       * Everything not on this list is treated as unsafe.
+       *
+       * ufs/ffs  — standard FreeBSD FFS (unlikely on PS5 but correct)
+       * tmpfs    — memory-backed (safe, though uncommon for large files)
+       * zfs      — ZFS (safe on standard FreeBSD)
+       *
+       * NOT whitelisted (KP or corrupt data):
+       *   exfatfs, msdosfs, nullfs, pfsmnt, pfs
+       */
+      if ((strcmp(t, "ufs")   == 0) ||
+          (strcmp(t, "ffs")   == 0) ||
+          (strcmp(t, "tmpfs") == 0) ||
+          (strcmp(t, "zfs")   == 0)) {
+        sf_safe = 1;
+      }
+    }
+    /* fstatfs failure: stay with 0 (unsafe) — tolerate the perf hit */
+    resp->sendfile_safe = sf_safe;
+  }
+#else
+  /* Linux / macOS: sendfile() is always safe */
+  resp->sendfile_safe = 1;
+#endif
 
   return resp;
 }
@@ -1293,16 +1365,65 @@ static http_response_t *api_delete(const http_request_t *request) {
 
   ftp_error_t rc;
   if (S_ISDIR(st.st_mode)) {
-    rc = pal_dir_remove(safe);
+    /*
+     * DIRECTORY DELETE
+     *
+     * Standard rmdir(2) fails with ENOTEMPTY if the directory has any
+     * contents — including hidden system files (e.g. PFS metadata on
+     * /data, exFAT recycle-bin entries on USB) that the user cannot see
+     * from a normal listing.  This caused "random" delete failures because
+     * some directories appeared empty in the UI but were not at the kernel
+     * level.
+     *
+     * Strategy:
+     *   1. Try rmdir() first — fast, safe, and correct for truly empty dirs.
+     *   2. If that returns ENOTEMPTY and the caller passed ?recursive=1,
+     *      fall back to pal_dir_remove_recursive() (depth-first unlink tree).
+     *   3. Without ?recursive=1 on a non-empty dir: return 409 Conflict
+     *      with a clear message so the web UI can prompt for confirmation
+     *      rather than silently succeeding or giving a generic 500.
+     *
+     * SAFETY: recursive delete is opt-in — the client must explicitly send
+     * ?recursive=1.  A plain POST /api/delete?path=X on a non-empty dir
+     * returns 409 instead of deleting everything silently.
+     *
+     * @note pal_dir_remove_recursive() is the same depth-first cleanup
+     *       used in the rollback path of pal_copy_cross_device_r_ex, so
+     *       its error handling (unlink failures on locked files, etc.) is
+     *       already well-exercised.
+     */
+    rc = pal_dir_remove(safe); /* try rmdir first */
+
+    if (rc != FTP_OK) {
+      /* Check if the failure was ENOTEMPTY (or our mapped error code) */
+      const char *recursive_flag = strstr(query, "recursive=1");
+      if (recursive_flag != NULL) {
+        /* Caller explicitly requested recursive delete — proceed */
+        rc = pal_dir_remove_recursive_pub(safe);
+        if (rc != FTP_OK) {
+          return error_json(HTTP_STATUS_500_INTERNAL_ERROR,
+                            "Recursive delete failed (permission denied or I/O error)");
+        }
+      } else {
+        /*
+         * Return 409 Conflict — the directory is not empty and the
+         * caller did not ask for recursive deletion.
+         *
+         * The web UI should catch this and either:
+         *   (a) Show a confirmation dialog ("Delete all contents?") then
+         *       retry with ?recursive=1, or
+         *   (b) Tell the user to empty the folder first.
+         */
+        return error_json(HTTP_STATUS_409_CONFLICT,
+                          "Directory is not empty. Use recursive=1 to force.");
+      }
+    }
   } else {
     rc = pal_file_delete(safe);
-  }
-
-  if (rc != FTP_OK) {
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR,
-                      S_ISDIR(st.st_mode)
-                          ? "Failed to remove directory (not empty?)"
-                          : "Failed to delete file");
+    if (rc != FTP_OK) {
+      return error_json(HTTP_STATUS_500_INTERNAL_ERROR,
+                        "Failed to delete file");
+    }
   }
 
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);

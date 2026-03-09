@@ -633,7 +633,52 @@ static int http_client_callback(int fd, uint32_t events, void *data) {
       }
 
       if ((got > 0U) && (conn->upload_fd >= 0)) {
-        if (pal_file_write_all(conn->upload_fd, rd_buf, got) < 0) {
+        /*
+         * DIRECT WRITE — bypass pal_file_write_all()
+         *
+         * pal_file_write_all() subdivides writes into PAL_FILE_WRITE_CHUNK_MAX
+         * (128 KB on PS5, 64 KB on PS4).  That limit exists for FTP STOR to
+         * prevent TCP recv-buffer stalls while the kernel is busy with a long
+         * write: the FTP STOR loop reads from the socket and writes to disk
+         * serially, so a slow 4 MB write would stall socket reads long enough
+         * to fill the TCP window and trigger a client inactivity timeout.
+         *
+         * HTTP upload is different:
+         *   - We already have the full chunk (up to 256 KB) in rd_buf.
+         *   - The socket read and the disk write are NOT interleaved inside a
+         *     single loop iteration, so TCP flow control is not a concern.
+         *   - Writing 256 KB in a single write() call instead of two 128 KB
+         *     calls halves the number of PFS AES-XTS context setups per MB.
+         *     This is the primary reason /data uploads were capped at ~25 MB/s
+         *     while USB (no encryption) reached 80 MB/s.
+         *
+         * We reproduce the same direct-write loop used by pal_file_copy_atomic
+         * (which bypasses pal_file_write_all for identical reasons) and handle
+         * the PS4/PS5 PFS silent-ENOSPC (write() == 0) quirk.
+         *
+         * @pre  rd_buf[0..got-1] contains valid data to write
+         * @pre  conn->upload_fd is a valid open writable file descriptor
+         */
+        const uint8_t *wr_p   = rd_buf;
+        size_t         wr_rem = got;
+        int            wr_ok  = 1;
+
+        while (wr_rem > 0U) {
+          ssize_t w = write(conn->upload_fd, wr_p, wr_rem);
+          if (w > 0) {
+            wr_p   += (size_t)w;
+            wr_rem -= (size_t)w;
+            continue;
+          }
+          if ((w < 0) && (errno == EINTR)) {
+            continue;
+          }
+          /* w == 0: PS4/PS5 PFS silent ENOSPC */
+          wr_ok = 0;
+          break;
+        }
+
+        if (wr_ok == 0) {
           http_close_connection(conn);
           return -1;
         }
@@ -969,69 +1014,86 @@ static int http_handle_request(http_connection_t *conn) {
    */
   if (response->sendfile_fd >= 0) {
     /*
-     * ZERO-COPY FILE TRANSFER via pal_sendfile()
+     * FILE DOWNLOAD — two paths based on filesystem safety
      *
-     * Previously this path used a userspace read()+send() loop through a
-     * static 1 MB buffer (g_sendfile_chunk), incurring two kernel↔userspace
-     * copies per chunk:
-     *   kernel page-cache → userspace buffer (read)
-     *   userspace buffer  → socket send-buffer (send)
+     * PATH A: sendfile_safe == 1  (Linux, macOS, FreeBSD ufs/zfs)
+     *   pal_sendfile() → zero-copy DMA from page-cache to NIC.
      *
-     * pal_sendfile() maps to the platform's native zero-copy primitive:
-     *   PS5/PS4/FreeBSD : sendfile(2) — DMA directly from page-cache to NIC
-     *   Linux           : sendfile(2) — splice between file and socket fds
-     *   Other           : falls back to pread()+send() (same as before)
+     * PATH B: sendfile_safe == 0  (PS5/PS4 exFAT, PFS, nullfs, msdosfs)
+     *   pread() + pal_send_all() — explicit userspace copy.
      *
-     * The chunk size (HTTP_SENDFILE_CHUNK_SIZE = 1 MB) is retained as the
-     * upper bound per pal_sendfile() call so the kernel call stays bounded
-     * and the offset is advanced incrementally (required by the FreeBSD
-     * sendfile(2) EAGAIN/EINTR semantics handled inside pal_sendfile).
+     *   WHY: On PS5/PS4 (FreeBSD), calling sendfile(2) on exFAT, msdosfs,
+     *   nullfs, pfsmnt or pfs vnodes dereferences a null pager function
+     *   pointer inside the kernel and causes an IMMEDIATE KERNEL PANIC.
+     *   errno is never set — execution never returns to userspace.
+     *   The EINVAL fallback in pal_sendfile() therefore never executes.
+     *   The ONLY safe solution is to never call sendfile() on these FSes.
      *
-     * @note g_sendfile_chunk is no longer used by this path but is kept
-     *       to avoid changing the static layout; it may be repurposed later.
+     *   api_download() (http_api.c) sets sendfile_safe via fstatfs() on
+     *   the open fd before returning the http_response_t to us.
      */
     off_t  sf_offset    = (off_t)response->sendfile_offset;
     size_t sf_remaining = response->sendfile_count;
 
-    while (sf_remaining > 0U) {
-      size_t chunk = sf_remaining;
-      if (chunk > (size_t)HTTP_SENDFILE_CHUNK_SIZE) {
-        chunk = (size_t)HTTP_SENDFILE_CHUNK_SIZE;
-      }
-
-      ssize_t sent = pal_sendfile(conn->fd,
-                                  response->sendfile_fd,
-                                  &sf_offset,
-                                  chunk);
-      if (sent < 0) {
-        /* Unrecoverable error (EIO, EBADF, ENOTSOCK, …) — abort */
-        break;
-      }
-      if (sent == 0) {
-        /*
-         * pal_sendfile() returns 0 in two distinct situations on
-         * FreeBSD/PS5 (errno is still set from the underlying syscall):
-         *
-         *   EINTR : sendfile(2) was interrupted by a signal before sending
-         *           any bytes.  The offset has NOT advanced.  Retry
-         *           immediately — this is a normal, transient condition.
-         *
-         *   EAGAIN: the socket send-buffer is full (non-blocking I/O or
-         *           kernel back-pressure).  Spinning here burns CPU and
-         *           starves other connections, which was the cause of the
-         *           throughput regression from 390 MB/s to 240 MB/s.
-         *           Break and let the caller (the event loop or the
-         *           blocking-socket path) handle flow control naturally.
-         *
-         *   Other / Linux EOF: treat as end-of-file or error — break.
-         */
-        if (errno == EINTR) {
-          continue;
+    if (response->sendfile_safe) {
+      /* PATH A: zero-copy sendfile */
+      while (sf_remaining > 0U) {
+        size_t chunk = sf_remaining;
+        if (chunk > (size_t)HTTP_SENDFILE_CHUNK_SIZE) {
+          chunk = (size_t)HTTP_SENDFILE_CHUNK_SIZE;
         }
-        break;
+        ssize_t sent = pal_sendfile(conn->fd, response->sendfile_fd,
+                                    &sf_offset, chunk);
+        if (sent < 0) { break; }
+        if (sent == 0) {
+          if (errno == EINTR) { continue; }
+          break;
+        }
+        sf_remaining -= (size_t)sent;
       }
 
-      sf_remaining -= (size_t)sent;
+    } else {
+      /* PATH B: pread + send_all (PS5/PS4 safe) */
+#ifndef HTTP_DOWNLOAD_PREAD_CHUNK
+#define HTTP_DOWNLOAD_PREAD_CHUNK (512U * 1024U)
+#endif
+      /*
+       * Heap-allocate the read buffer — 512 KB on the stack would
+       * overflow the event-loop thread's stack on PS5.
+       * On malloc failure, fall back to a small on-stack buffer so the
+       * transfer degrades in speed rather than aborting.
+       */
+      uint8_t  dl_stack[4096];
+      uint8_t *dl_buf = (uint8_t *)malloc(HTTP_DOWNLOAD_PREAD_CHUNK);
+      size_t   dl_cap = (dl_buf != NULL)
+                            ? (size_t)HTTP_DOWNLOAD_PREAD_CHUNK
+                            : sizeof(dl_stack);
+      if (dl_buf == NULL) {
+        dl_buf = dl_stack;
+      }
+
+      int dl_err = 0;
+      while (sf_remaining > 0U) {
+        size_t  want = (sf_remaining < dl_cap) ? sf_remaining : dl_cap;
+        ssize_t nr   = pread(response->sendfile_fd, dl_buf, want,
+                             sf_offset);
+        if (nr <= 0) {
+          if ((nr < 0) && (errno == EINTR)) { continue; }
+          dl_err = 1;
+          break;
+        }
+        if (pal_send_all(conn->fd, dl_buf, (size_t)nr, 0) < 0) {
+          dl_err = 1;
+          break;
+        }
+        sf_offset    += (off_t)nr;
+        sf_remaining -= (size_t)nr;
+      }
+      (void)dl_err;
+
+      if (dl_buf != dl_stack) {
+        free(dl_buf);
+      }
     }
 
     close(response->sendfile_fd);
