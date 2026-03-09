@@ -3848,6 +3848,11 @@
       });
       updCount(vis.length, en.length);
       if (S.view === 'details') { renderDetails(fl, vis) } else { vis.forEach(function (x) { fl.appendChild(buildCard(x)) }) }
+      /* fire lazy size fetch for all visible directories */
+      _dirSizeToken++;
+      var _tok = _dirSizeToken;
+      var visibleDirs = vis.filter(function (x) { return x.type === 'directory'; });
+      if (visibleDirs.length) { setTimeout(function () { fetchDirSizes(visibleDirs, _tok); }, 0); }
     }
 
     function stateCard(type, msg, isErr) {
@@ -3879,12 +3884,12 @@
       if (S.view === 'grid') {
         var meta = D.createElement('div'); meta.className = 'c-meta';
         if (!isDir && ex) { var eb = D.createElement('span'); eb.className = 'xb'; eb.textContent = ex; meta.appendChild(eb) }
-        var sb = D.createElement('span'); sb.className = 'sb'; sb.textContent = isDir ? 'Folder' : bytes(x.size); meta.appendChild(sb);
+        var sb = D.createElement('span'); sb.className = 'sb'; sb.textContent = bytes(x.size); if (isDir) { sb.setAttribute('data-dirpath', path); } meta.appendChild(sb);
         c.appendChild(ico); c.appendChild(nm); c.appendChild(meta);
       } else {
         var right = D.createElement('div'); right.className = 'c-right';
         if (!isDir && ex) { var eb2 = D.createElement('span'); eb2.className = 'xb'; eb2.textContent = ex; right.appendChild(eb2) }
-        var sb2 = D.createElement('span'); sb2.className = 'sb'; sb2.textContent = isDir ? 'Folder' : bytes(x.size); right.appendChild(sb2);
+        var sb2 = D.createElement('span'); sb2.className = 'sb'; sb2.textContent = bytes(x.size); if (isDir) { sb2.setAttribute('data-dirpath', path); } right.appendChild(sb2);
         if (x.modified) { var db = D.createElement('span'); db.className = 'db'; db.textContent = relDate(x.modified); right.appendChild(db) }
         c.appendChild(ico); c.appendChild(nm); c.appendChild(right);
       }
@@ -3943,7 +3948,7 @@
         var tdNm = D.createElement('td'); tdNm.className = 't-nm'; tdNm.textContent = x.name;
         var tdEx = D.createElement('td'); tdEx.className = 't-ex';
         if (ex) { var eb = D.createElement('span'); eb.className = 'xb'; eb.textContent = ex; tdEx.appendChild(eb) }
-        var tdSz = D.createElement('td'); tdSz.className = 't-sz'; tdSz.textContent = isDir ? '—' : bytes(x.size);
+        var tdSz = D.createElement('td'); tdSz.className = 't-sz'; tdSz.textContent = bytes(x.size); if (isDir) { tdSz.setAttribute('data-dirpath', path); }
         var tdTp = D.createElement('td'); tdTp.className = 't-tp'; tdTp.textContent = isDir ? 'Folder' : (ex.toUpperCase() || 'File');
         var tdDt = D.createElement('td'); tdDt.className = 't-dt'; tdDt.textContent = relDate(x.modified);
         tr.appendChild(tdIc); tr.appendChild(tdNm); tr.appendChild(tdEx); tr.appendChild(tdSz); tr.appendChild(tdTp); tr.appendChild(tdDt);
@@ -3954,6 +3959,29 @@
         tbody.appendChild(tr);
       });
       tbl.appendChild(tbody); fl.appendChild(tbl);
+    }
+
+    /* ── LAZY DIR SIZES ── */
+    var _dirSizeToken = 0;
+    function fetchDirSizes(dirs, token) {
+      if (!dirs || !dirs.length) return;
+      dirs.forEach(function (entry) {
+        var p = join(entry.name);
+        fetch('/api/dirsize?path=' + E(p))
+          .then(function (r) { return r.ok ? r.json() : null })
+          .then(function (d) {
+            if (!d || typeof d.size !== 'number') return;
+            if (token !== _dirSizeToken) return; /* stale render */
+            /* patch in-memory entry so sendTo() gets the real size */
+            for (var i = 0; i < S.entries.length; i++) {
+              if (S.entries[i].name === entry.name) { S.entries[i].size = d.size; break; }
+            }
+            /* update every size label for this path */
+            var els = D.querySelectorAll('[data-dirpath="' + p.replace(/"/g, '\\"') + '"]');
+            for (var j = 0; j < els.length; j++) { els[j].textContent = bytes(d.size); }
+          })
+          .catch(function () { /* ignore */ });
+      });
     }
 
     /* ── NAVIGATE ── */
@@ -4339,21 +4367,22 @@
     /* ── STATS ── */
     function refreshStats() {
       fetch('/api/stats?path=' + E(S.path)).then(function (r) { if (!r.ok) throw new Error(); return r.json() }).then(updateStats)
-        .catch(function () { updateStats({ disk_used: Math.floor(Math.random() * 30 + 15) * 1073741824, disk_total: 107374182400, cpu_temp: Math.floor(Math.random() * 20 + 38), uptime: Math.floor(Date.now() / 1000) - 86400 * 3 - 3600 * 7, items_in_dir: (S.entries || []).length, path: S.path }) });
+        .catch(function () { updateStats({ items_in_dir: (S.entries || []).length, path: S.path }) });
     }
     function updateStats(d) {
       if (!d || typeof d !== 'object') return;
-      var used = (typeof d.disk_used === 'number') ? d.disk_used : 0;
-      var total = (typeof d.disk_total === 'number' && d.disk_total > 0) ? d.disk_total : 1;
-      var free = Math.max(0, total - used), pct = Math.min(100, Math.floor(used / total * 100));
+      var hasDisk = (typeof d.disk_used === 'number') && (typeof d.disk_total === 'number') && d.disk_total > 0;
+      var used = hasDisk ? d.disk_used : 0;
+      var total = hasDisk ? d.disk_total : 1;
+      var free = Math.max(0, total - used), pct = hasDisk ? Math.min(100, Math.floor(used / total * 100)) : 0;
       var CIRC = 69.12, df = $('d-fill'), dp = $('d-pct');
-      if (df) { df.style.strokeDashoffset = String(CIRC - pct / 100 * CIRC); df.style.stroke = pct > 80 ? 'var(--wn)' : 'var(--ac)' }
-      if (dp) dp.textContent = pct + '%';
+      if (df) { df.style.strokeDashoffset = hasDisk ? String(CIRC - pct / 100 * CIRC) : String(CIRC); df.style.stroke = pct > 80 ? 'var(--wn)' : 'var(--ac)' }
+      if (dp) dp.textContent = hasDisk ? pct + '%' : '—';
       function set(id, v) { var el = $(id); if (el) el.textContent = v }
-      var sd = $('s-disk'); if (sd) { sd.textContent = bytes(used) + ' / ' + bytes(total); sd.title = sd.textContent + (typeof d.disk_path === 'string' && d.disk_path ? (' (' + d.disk_path + ')') : '') }
-      set('sp-du', bytes(used) + ' / ' + bytes(total));
-      set('sp-df', bytes(free));
-      set('sp-dt', bytes(total));
+      var sd = $('s-disk'); if (sd) { sd.textContent = hasDisk ? bytes(used) + ' / ' + bytes(total) : '—'; sd.title = hasDisk ? (sd.textContent + (typeof d.disk_path === 'string' && d.disk_path ? (' (' + d.disk_path + ')') : '')) : '' }
+      set('sp-du', hasDisk ? bytes(used) + ' / ' + bytes(total) : '—');
+      set('sp-df', hasDisk ? bytes(free) : '—');
+      set('sp-dt', hasDisk ? bytes(total) : '—');
       var sdb = $('sp-db'); if (sdb) { sdb.style.width = pct + '%'; sdb.className = 'sp-bf' + (pct > 80 ? ' full' : '') }
       if (typeof d.items_in_dir === 'number') { set('s-files', String(d.items_in_dir)); set('sp-fi', String(d.items_in_dir)) }
       if (typeof d.path === 'string') { set('sp-pt', d.path) }

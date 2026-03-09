@@ -1155,10 +1155,13 @@ static int http_handle_request(http_connection_t *conn) {
         buffer[pos++] = *p;
       }
 
+      long long entry_size = S_ISDIR(st.st_mode)
+                             ? (long long)st.st_blocks * 512LL
+                             : (long long)st.st_size;
       pos += (size_t)snprintf(buffer + pos, sizeof(buffer) - pos,
                               "\",\"type\":\"%s\",\"size\":%lld}",
                               S_ISDIR(st.st_mode) ? "directory" : "file",
-                              (long long)st.st_size);
+                              entry_size);
 
       /* Send chunk: <hex-len>\r\n<data>\r\n */
       char chunk_header[32];

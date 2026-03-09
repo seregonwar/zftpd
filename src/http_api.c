@@ -185,6 +185,7 @@ static int http_validate_and_confine(const char *input, const char *root,
  *===========================================================================*/
 
 static http_response_t *api_list(const http_request_t *request);
+static http_response_t *api_dirsize(const http_request_t *request);
 static http_response_t *api_download(const http_request_t *request);
 static http_response_t *api_stats(const http_request_t *request);
 static http_response_t *api_stats_ram(const http_request_t *request);
@@ -406,12 +407,30 @@ static int get_best_disk_stats(const char *hint_path, const char **out_path,
     return -1;
   }
 
+#if defined(PLATFORM_PS5) || defined(PS5)
+  /*
+   * On PS5 always report the /user partition — that is what the system
+   * Settings > Storage screen shows.  The "pick largest" heuristic used
+   * below selects /mnt (full SSD) which is much larger and does not match
+   * what the user expects.
+   */
+  (void)hint_path;
+  uint64_t t = 0U, u = 0U, f = 0U;
+  if (get_disk_stats_bytes("/user", &t, &u, &f) == 0) {
+    *out_path = "/user";
+    *total    = t;
+    *used     = u;
+    *free_b   = f;
+    return 0;
+  }
+  return -1;
+#else
   /* Ordered: real user data mounts first, then root fallback.
-   * macOS home and /Volumes entries come before PS4/PS5 paths. */
+   * macOS home and /Volumes entries come before PS4 paths. */
   const char *candidates[] = {
 #if defined(PLATFORM_MACOS) || defined(__APPLE__)
       "/Users", "/",
-#elif defined(PLATFORM_PS4) || defined(PLATFORM_PS5) || defined(PS4) || defined(PS5)
+#elif defined(PLATFORM_PS4) || defined(PS4)
       "/user", "/data", "/system_data", "/mnt/usb0", "/mnt/usb1", "/",
 #else
       "/home", "/",
@@ -456,6 +475,7 @@ static int get_best_disk_stats(const char *hint_path, const char **out_path,
   *used = best_used;
   *free_b = best_free;
   return 0;
+#endif
 }
 
 static int count_dir_items(const char *path, uint32_t *out_count) {
@@ -492,6 +512,65 @@ static int count_dir_items(const char *path, uint32_t *out_count) {
   closedir(dir);
   *out_count = count;
   return 0;
+}
+
+/**
+ * @brief Recursively sum the size of all regular files under a directory.
+ *
+ * @param path   Absolute path to the directory.
+ * @param depth  Current recursion depth (call with 0).
+ * @return       Total bytes of all regular files, or 0 on error.
+ */
+#define DIR_SIZE_MAX_DEPTH 32
+
+uint64_t http_dir_size_recursive(const char *path, int depth) {
+  if ((path == NULL) || (depth > DIR_SIZE_MAX_DEPTH)) {
+    return 0U;
+  }
+
+  DIR *dir = opendir(path);
+  if (dir == NULL) {
+    return 0U;
+  }
+
+  uint64_t total = 0U;
+
+  for (;;) {
+    errno = 0;
+    struct dirent *ent = readdir(dir);
+    if (ent == NULL) {
+      break;
+    }
+    if ((strcmp(ent->d_name, ".") == 0) || (strcmp(ent->d_name, "..") == 0)) {
+      continue;
+    }
+
+    char child[FTP_PATH_MAX];
+    int n;
+    if (strcmp(path, "/") == 0) {
+      n = snprintf(child, sizeof(child), "/%s", ent->d_name);
+    } else {
+      n = snprintf(child, sizeof(child), "%s/%s", path, ent->d_name);
+    }
+    if ((n < 0) || ((size_t)n >= sizeof(child))) {
+      continue;
+    }
+
+    struct stat st;
+    if (lstat(child, &st) != 0) {
+      continue;
+    }
+
+    if (S_ISREG(st.st_mode)) {
+      total += (uint64_t)st.st_blocks * 512U;
+    } else if (S_ISDIR(st.st_mode)) {
+      total += http_dir_size_recursive(child, depth + 1);
+    }
+    /* skip symlinks, devices, etc. */
+  }
+
+  closedir(dir);
+  return total;
 }
 
 static int get_boot_epoch_seconds(uint64_t *out_epoch) {
@@ -866,6 +945,11 @@ http_response_t *http_api_handle(const http_request_t *request) {
     return api_list(request);
   }
 
+  /*  /api/dirsize?path=...  */
+  if (strncmp(request->uri, "/api/dirsize", 12) == 0) {
+    return api_dirsize(request);
+  }
+
   /*  /api/download?path=...  */
   if (strncmp(request->uri, "/api/download", 13) == 0) {
     return api_download(request);
@@ -1013,6 +1097,57 @@ static http_response_t *api_list(const http_request_t *request) {
   strncpy(resp->stream_path, path, sizeof(resp->stream_path) - 1);
   resp->stream_path[sizeof(resp->stream_path) - 1] = '\0';
 
+  return resp;
+}
+
+/*===========================================================================*
+ * GET /api/dirsize?path=<dir> — Recursive directory size
+ *
+ *  Returns the total size in bytes of all regular files under path.
+ *  Called lazily by the frontend after the listing is already rendered,
+ *  so it does not block the initial directory load.
+ *
+ *  RESPONSE: {"path":"/some/dir","size":123456789}
+ *===========================================================================*/
+
+static http_response_t *api_dirsize(const http_request_t *request) {
+  const char *query = strchr(request->uri, '?');
+  char path[1024] = "/";
+
+  if (query != NULL) {
+    (void)parse_path_param(query, path, sizeof(path));
+  }
+
+  char safe[FTP_PATH_MAX];
+  if (!validate_path(path, safe, sizeof(safe))) {
+    return error_json(HTTP_STATUS_403_FORBIDDEN,
+                      "Path traversal attempt detected");
+  }
+
+  struct stat st;
+  if (stat(safe, &st) != 0 || !S_ISDIR(st.st_mode)) {
+    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Not a directory");
+  }
+
+  uint64_t sz = http_dir_size_recursive(safe, 0);
+
+  char body[256];
+  size_t pos = 0;
+  size_t cap = sizeof(body);
+
+  if (buf_append_cstr(body, cap, &pos, "{\"path\":\"") != 0 ||
+      json_escape_append(body, cap, &pos, path) != 0 ||
+      buf_append_cstr(body, cap, &pos, "\",\"size\":") != 0 ||
+      buf_append_u64(body, cap, &pos, sz) != 0 ||
+      buf_append_cstr(body, cap, &pos, "}") != 0) {
+    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+  }
+
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  http_response_add_header(resp, "Content-Type", "application/json");
+  http_response_add_header(resp, "Access-Control-Allow-Origin", "*");
+  http_response_add_header(resp, "Cache-Control", "no-store");
+  http_response_set_body(resp, body, pos);
   return resp;
 }
 

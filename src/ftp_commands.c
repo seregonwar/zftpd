@@ -804,7 +804,7 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
               bytes_sent += (uint64_t)r_sent;
               session->last_activity = time(NULL);
               atomic_fetch_add(&session->stats.bytes_sent, (uint64_t)r_sent);
-#if defined(POSIX_FADV_DONTNEED)
+#if defined(POSIX_FADV_DONTNEED) && !defined(PLATFORM_PS4) && !defined(PS4)
               if (node.fd >= 0) {
                 off_t evict_start = offset - (off_t)r_sent;
                 if (evict_start >= 0) {
@@ -862,7 +862,7 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
          *   F_NOCACHE on the same fd being passed to sendfile(), which is
          *   a different code path — it does not apply here.)
          */
-#if defined(POSIX_FADV_DONTNEED)
+#if defined(POSIX_FADV_DONTNEED) && !defined(PLATFORM_PS4) && !defined(PS4)
         if (node.fd >= 0) {
           off_t evict_start = offset - (off_t)sent;
           if (evict_start >= 0) {
@@ -932,7 +932,7 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
       session->last_activity = time(NULL);
 
       /* Evict pages already sent; same rationale as the sendfile path. */
-#if defined(POSIX_FADV_DONTNEED)
+#if defined(POSIX_FADV_DONTNEED) && !defined(PLATFORM_PS4) && !defined(PS4)
       if (node.fd >= 0) {
         off_t sent_end = (off_t)(file_size - (uint64_t)remaining);
         off_t evict_start = sent_end - (off_t)sent;

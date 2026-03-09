@@ -526,7 +526,7 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
      */
     (void)fcntl(src_fd, F_NOCACHE, 1);
 #endif
-#ifdef POSIX_FADV_SEQUENTIAL
+#if defined(POSIX_FADV_SEQUENTIAL) && !defined(PLATFORM_PS4) && !defined(PS4)
     (void)posix_fadvise(src_fd, 0, 0, POSIX_FADV_SEQUENTIAL);
 #endif
   }
@@ -1080,7 +1080,7 @@ copy_done:;
    * Safe on both Linux and FreeBSD/PS5: fadvise DONTNEED on a read-only fd
    * simply marks pages as low-priority; it never writes or invalidates data.
    */
-#if defined(POSIX_FADV_DONTNEED)
+#if defined(POSIX_FADV_DONTNEED) && !defined(PLATFORM_PS4) && !defined(PS4)
   if (src_fd >= 0) {
     (void)posix_fadvise(src_fd, 0, 0, POSIX_FADV_DONTNEED);
   }

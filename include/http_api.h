@@ -53,4 +53,13 @@ void http_api_set_root(const char *root);
  */
 const char *http_api_get_root(void);
 
+/**
+ * @brief Recursively compute the total size of all regular files under a directory.
+ *
+ * @param path   Absolute path to the directory.
+ * @param depth  Initial recursion depth (pass 0).
+ * @return       Total bytes of all regular files, or 0 on error / empty dir.
+ */
+uint64_t http_dir_size_recursive(const char *path, int depth);
+
 #endif /* HTTP_API_H */
