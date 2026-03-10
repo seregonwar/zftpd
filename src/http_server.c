@@ -954,7 +954,29 @@ static int http_client_callback(int fd, uint32_t events, void *data) {
 #endif
 
       if (content_length > 0U) {
-        if ((header_len + content_length) > (sizeof(conn->buffer) - 1U)) {
+        /*
+         * OVERFLOW-SAFE size check.
+         *
+         * WHY: a malicious client can send
+         *   Content-Length: 18446744073709551615  (SIZE_MAX on 64-bit)
+         * Without the pre-addition guard, (header_len + SIZE_MAX) wraps to
+         * (header_len - 1) via unsigned overflow, which is LESS than the
+         * buffer limit.  Both the "too large" rejection and the "wait for
+         * more data" guard would then pass silently, dispatching a request
+         * to the handler with a fabricated body pointer.
+         *
+         * Fix: reject if content_length alone already exceeds the available
+         * space before performing the addition.  This makes overflow
+         * impossible because after the guard content_length <=
+         * (sizeof(conn->buffer) - 1), and header_len is always < that same
+         * limit (we have already confirmed \r\n\r\n fits inside the buffer).
+         *
+         * @pre  header_len > 0 (guaranteed by the strstr("\r\n\r\n") check)
+         * @post content_length + header_len <= SIZE_MAX (no wrap possible)
+         */
+        const size_t buf_limit = sizeof(conn->buffer) - 1U;
+        if (content_length > buf_limit ||
+            (header_len + content_length) > buf_limit) {
           http_response_t *resp =
               http_response_create(HTTP_STATUS_400_BAD_REQUEST);
           if (resp != NULL) {

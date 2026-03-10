@@ -1195,6 +1195,22 @@ static http_response_t *api_download(const http_request_t *request) {
 
   /* Build response headers */
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  /*
+   * SAFETY: http_response_create() returns NULL when the response pool is
+   * exhausted (HTTP_MAX_CONNECTIONS concurrent responses already in flight).
+   * Without this check the subsequent struct-field assignments would
+   * dereference a NULL pointer, causing SIGSEGV.  The open fd must be closed
+   * here to prevent a file-descriptor leak — if we returned NULL without
+   * closing it, the fd would be lost forever because no other code path holds
+   * a reference to it.
+   *
+   * @pre  fd >= 0 and valid (opened above)
+   * @post On NULL return: fd is closed, no resources are leaked
+   */
+  if (resp == NULL) {
+    close(fd);
+    return NULL; /* http_handle_request() will synthesise a 500 response */
+  }
   http_response_add_header(resp, "Content-Type", "application/octet-stream");
   http_response_add_header(resp, "Access-Control-Allow-Origin", "*");
 
@@ -1207,8 +1223,19 @@ static http_response_t *api_download(const http_request_t *request) {
   snprintf(len_str, sizeof(len_str), "%lld", (long long)st.st_size);
   http_response_add_header(resp, "Content-Length", len_str);
 
-  /* Finalize headers (no body appended — file sent separately) */
-  http_response_finalize(resp);
+  /*
+   * Finalize headers (appends the blank \r\n line that separates headers
+   * from the body).  Failure here means the response buffer is full —
+   * destroy the response and close the fd rather than sending a malformed
+   * HTTP message with missing header terminator.
+   *
+   * @post On failure: fd is closed, resp is freed, no resources are leaked
+   */
+  if (http_response_finalize(resp) != 0) {
+    close(fd);
+    http_response_destroy(resp);
+    return NULL;
+  }
 
   /* Store fd so http_server.c can stream the file content */
   resp->sendfile_fd     = fd;

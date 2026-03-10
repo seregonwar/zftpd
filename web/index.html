@@ -3319,7 +3319,8 @@
     <div id="file-list" class="fl vg-grid"></div>
   </main>
 
-  <input id="file-input" type="file" multiple webkitdirectory style="display:none">
+  <input id="file-input" type="file" multiple style="display:none">
+  <input id="folder-input" type="file" multiple webkitdirectory style="display:none">
 
   <!-- DROP -->
   <div id="drop" class="drop">
@@ -4106,7 +4107,7 @@
       
       var activeUploads = 0, nextIdx = 0, completed = 0;
       var startT = Date.now();
-      var MAX_PARALLEL = 4;
+      var MAX_PARALLEL = 8;
       
       function startNextUpload() {
         if (nextIdx >= arr.length) return;
@@ -4218,6 +4219,7 @@
         addItem(m, ICO.newfolder, 'New Folder', false, mkDir);
         addSep(m);
         addItem(m, ICO.upload, 'Upload File', false, function () { $('file-input').click() });
+        addItem(m, ICO.upload, 'Upload Folder', false, function () { $('folder-input').click() });
         addSep(m);
         addItem(m, ICO.refresh, 'Refresh', false, function () { nav(S.path) });
       }
@@ -4577,6 +4579,7 @@
       var br = $('btn-ref'); if (br) br.onclick = function () { nav(S.path) };
       var sr = $('search'); if (sr) sr.oninput = function () { render(this.value) };
       var fi = $('file-input'); if (fi) fi.onchange = function (e) { upload(e.target.files); e.target.value = '' };
+      var fo = $('folder-input'); if (fo) fo.onchange = function (e) { upload(e.target.files); e.target.value = '' };
       var dc = $('drop-close'); if (dc) dc.onclick = function () { hideDrop() };
 
       ['grid', 'list', 'details'].forEach(function (v) { var b = $('vb-' + v); if (b) b.onclick = function () { setView(v) } });

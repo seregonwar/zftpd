@@ -120,7 +120,7 @@ SOFTWARE.
  *   Setting it higher than the system maximum is silently ignored.
  *---------------------------------------------------------------------------*/
 #ifndef HTTP_UPLOAD_CHUNK_SIZE
-#define HTTP_UPLOAD_CHUNK_SIZE    (256U * 1024U)   /* 256 KB per active upload */
+#define HTTP_UPLOAD_CHUNK_SIZE    (512U * 1024U)   /* 512 KB per active upload */
 #endif
 
 #ifndef HTTP_UPLOAD_RCVBUF_SIZE
