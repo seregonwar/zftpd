@@ -1588,6 +1588,14 @@ static http_response_t *api_delete(const http_request_t *request) {
     }
   }
 
+  /* POST-DELETE VERIFICATION: Ensure the path was actually deleted */
+  struct stat verify_st;
+  if (stat(safe, &verify_st) == 0) {
+    /* Path still exists — delete operation failed silently */
+    return error_json(HTTP_STATUS_500_INTERNAL_ERROR,
+                      "Delete operation failed: path still exists (permission denied or I/O error)");
+  }
+
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
   http_response_add_header(resp, "Content-Type", "application/json");
   http_response_add_header(resp, "Access-Control-Allow-Origin", "*");

@@ -885,12 +885,38 @@ static int http_client_callback(int fd, uint32_t events, void *data) {
           if (dir_len < sizeof(dir_buf)) {
             strncpy(dir_buf, full, dir_len);
             dir_buf[dir_len] = '\0';
-            (void)mkdir_recursive(dir_buf);
+            if (mkdir_recursive(dir_buf) != 0) {
+              /* Directory creation failed — send HTTP 500 error */
+              http_response_t *resp = http_response_create(HTTP_STATUS_500_INTERNAL_ERROR);
+              if (resp != NULL) {
+                http_response_add_header(resp, "Content-Type", "application/json");
+                http_response_add_header(resp, "Access-Control-Allow-Origin", "*");
+                const char *body = "{\"error\":\"Failed to create directory\"}";
+                http_response_set_body(resp, body, strlen(body));
+                if (resp->used > 0) {
+                  (void)write(conn->fd, resp->data, resp->used);
+                }
+                http_response_destroy(resp);
+              }
+              http_close_connection(conn);
+              return -1;
+            }
           }
         }
 
         int out_fd = pal_file_open(full, O_WRONLY | O_CREAT | O_TRUNC, 0666);
         if (out_fd < 0) {
+          http_response_t *resp = http_response_create(HTTP_STATUS_500_INTERNAL_ERROR);
+          if (resp != NULL) {
+            http_response_add_header(resp, "Content-Type", "application/json");
+            http_response_add_header(resp, "Access-Control-Allow-Origin", "*");
+            const char *body = "{\"error\":\"Failed to open file for writing\"}";
+            http_response_set_body(resp, body, strlen(body));
+            if (resp->used > 0) {
+              (void)write(conn->fd, resp->data, resp->used);
+            }
+            http_response_destroy(resp);
+          }
           http_close_connection(conn);
           return -1;
         }

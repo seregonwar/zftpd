@@ -4075,26 +4075,160 @@
       });
     }
 
+    /* ── CACHE HELPERS ── */
+    var _syncTimer = null;
+    function getCacheKey(path) { return 'zftpd_list_' + path }
+    function getCachedListing(path) {
+      try {
+        var cached = localStorage.getItem(getCacheKey(path));
+        if (!cached) return null;
+        var obj = JSON.parse(cached);
+        if (!obj || !Array.isArray(obj.entries)) return null;
+        return obj;
+      } catch (e) { return null }
+    }
+    function setCachedListing(path, data) {
+      try {
+        localStorage.setItem(getCacheKey(path), JSON.stringify(data));
+      } catch (e) {
+        /* quota exceeded, cleanup old entries and retry */
+        cleanupCache();
+        try {
+          localStorage.setItem(getCacheKey(path), JSON.stringify(data));
+        } catch (e2) { /* still full, give up */ }
+      }
+    }
+    function cleanupCache() {
+      try {
+        var keys = [];
+        for (var i = 0; i < localStorage.length; i++) {
+          var k = localStorage.key(i);
+          if (k && k.indexOf('zftpd_list_') === 0) {
+            keys.push(k);
+          }
+        }
+        /* Keep only the 50 most recent entries (FIFO removal) */
+        if (keys.length > 50) {
+          for (var j = 0; j < keys.length - 50; j++) {
+            localStorage.removeItem(keys[j]);
+          }
+        }
+      } catch (e) { /* ignore */ }
+    }
+    function mergeEntries(cached, fresh) {
+      if (!Array.isArray(fresh)) return cached;
+      var map = {};
+      for (var i = 0; i < fresh.length; i++) {
+        map[fresh[i].name] = fresh[i];
+      }
+      for (var j = 0; j < cached.length; j++) {
+        var name = cached[j].name;
+        if (map[name]) {
+          if (map[name].mtime !== cached[j].mtime || map[name].size !== cached[j].size) {
+            cached[j] = map[name];
+          }
+        }
+      }
+      for (var k in map) {
+        var found = false;
+        for (var m = 0; m < cached.length; m++) {
+          if (cached[m].name === k) { found = true; break }
+        }
+        if (!found) cached.push(map[k]);
+      }
+      cached.sort(function (a, b) { return (a.name || '').localeCompare(b.name || '') });
+      return cached;
+    }
+    function backgroundSync() {
+      var path = S.path;
+      if (!path) return;
+      var cached = getCachedListing(path);
+      if (!cached || !cached.entries) return;
+      
+      fetch('/api/list?path=' + E(path))
+        .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json() })
+        .then(function (d) {
+          if (!d || !Array.isArray(d.entries)) return;
+          var entries = mergeEntries(cached.entries, d.entries);
+          var changed = false;
+          for (var i = 0; i < entries.length; i++) {
+            if (entries[i].mtime !== (cached.entries[i] && cached.entries[i].mtime) ||
+                entries[i].size !== (cached.entries[i] && cached.entries[i].size)) {
+              changed = true;
+              break;
+            }
+          }
+          if (changed || entries.length !== cached.entries.length) {
+            S.entries = entries;
+            setCachedListing(path, { entries: entries });
+            render($('search').value);
+          }
+        })
+        .catch(function () { /* ignore background sync errors */ });
+    }
+
     /* ── NAVIGATE ── */
     function nav(path) {
       if (typeof path !== 'string') return;
       var prev = S.path, next = norm(path);
       var fl = $('file-list');
-      if (fl) { fl.className = 'fl vg-' + S.view; fl.innerHTML = '<div class="s-card"><div class="loader"></div><div>Loading\u2026</div></div>' }
+      var cached = getCachedListing(next);
+      
+      /* Clear previous sync timer */
+      if (_syncTimer) clearInterval(_syncTimer);
+      
+      /* Show cached data immediately if available */
+      if (cached && cached.entries) {
+        S.path = next;
+        var cp = $('current-path'); if (cp) cp.textContent = S.path;
+        var spt = $('sp-pt'); if (spt) spt.textContent = S.path;
+        S.entries = cached.entries;
+        renderBC(); render($('search').value); setStatus('Connected', true); refreshStats();
+        if (fl) fl.className = 'fl vg-' + S.view;
+      } else {
+        /* No cache, show loading spinner */
+        if (fl) { fl.className = 'fl vg-' + S.view; fl.innerHTML = '<div class="s-card"><div class="loader"></div><div>Loading\u2026</div></div>' }
+      }
       var fc = $('fl-cnt'); if (fc) fc.textContent = '';
+      
+      /* Fetch fresh data in background */
       fetch('/api/list?path=' + E(next))
         .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json() })
         .then(function (d) {
+          if (!d || !Array.isArray(d.entries)) throw new Error('Invalid response');
+          var entries = d.entries;
+          
+          /* Merge with cached data to preserve sorting/filtering */
+          if (cached && cached.entries) {
+            entries = mergeEntries(cached.entries, entries);
+          }
+          
+          /* Update state and cache */
           S.path = next;
           var cp = $('current-path'); if (cp) cp.textContent = S.path;
           var spt = $('sp-pt'); if (spt) spt.textContent = S.path;
-          S.entries = (d && Array.isArray(d.entries)) ? d.entries : [];
-          renderBC(); render($('search').value); setStatus('Connected', true); refreshStats()
+          S.entries = entries;
+          setCachedListing(next, { entries: entries });
+          
+          /* Render if not already rendered from cache */
+          if (!cached || !cached.entries) {
+            renderBC(); render($('search').value);
+          } else {
+            render($('search').value);
+          }
+          setStatus('Connected', true); refreshStats();
+          
+          /* Start background sync timer (every 30 seconds) */
+          if (_syncTimer) clearInterval(_syncTimer);
+          _syncTimer = setInterval(backgroundSync, 30000);
         })
         .catch(function (e) {
           if (e && e.message === 'HTTP 403') { toast('Directory bloccata per sicurezza', 'wn'); setStatus('Connected', true); nav(prev); return }
-          var fl2 = $('file-list'); if (fl2) { fl2.innerHTML = ''; fl2.appendChild(stateCard('error', 'Failed to load directory', true)) }
-          setStatus('Error', false); toast('Load failed: ' + e.message, 'er')
+          if (!cached || !cached.entries) {
+            var fl2 = $('file-list'); if (fl2) { fl2.innerHTML = ''; fl2.appendChild(stateCard('error', 'Failed to load directory', true)) }
+            setStatus('Error', false);
+          }
+          toast('Load failed: ' + e.message, 'er')
         });
     }
 
@@ -4156,14 +4290,19 @@
               startNextUpload();
             }
           } else {
-            setStatus('Error', false); toast('Upload failed: HTTP ' + xhr.status, 'er');
+            var errMsg = 'HTTP ' + xhr.status;
+            try {
+              var resp = JSON.parse(xhr.responseText);
+              if (resp && resp.error) errMsg = resp.error;
+            } catch (e) { }
+            setStatus('Error', false); toast('Upload failed: ' + errMsg + ' (' + relPath + ')', 'er');
             xferCardDone(card); setTimeout(hideDrop, 800);
           }
         };
         
         xhr.onerror = function () {
           activeUploads--;
-          setStatus('Error', false); toast('Upload failed', 'er');
+          setStatus('Error', false); toast('Upload failed: Network error (' + relPath + ')', 'er');
           xferCardDone(card); setTimeout(hideDrop, 800);
         };
         
@@ -4192,9 +4331,34 @@
         .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json() }).then(function () { nav(S.path); toast('Folder created: ' + n, 'ok') }).catch(function (e) { toast('Folder failed: ' + e.message, 'er') })
     }
     function del(p, n) {
-      if (!confirm('Delete "' + n + '"? This cannot be undone.')) return;
-      fetch('/api/delete?path=' + E(p), { method: 'POST', headers: { 'X-CSRF-Token': csrf() } })
-        .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json() }).then(function () { nav(S.path); toast('Deleted: ' + n, 'ok') }).catch(function (e) { toast('Delete failed: ' + e.message, 'er') })
+      /* Find entry to check if it's a directory */
+      var entry = null;
+      for (var i = 0; i < S.entries.length; i++) {
+        if (S.entries[i].name === n) { entry = S.entries[i]; break }
+      }
+      var isDir = entry && entry.type === 'dir';
+      
+      var msg = isDir ? 'Delete folder "' + n + '" and all contents? This cannot be undone.' : 'Delete "' + n + '"? This cannot be undone.';
+      if (!confirm(msg)) return;
+      
+      var url = '/api/delete?path=' + E(p);
+      if (isDir) url += '&recursive=1';
+      
+      fetch(url, { method: 'POST', headers: { 'X-CSRF-Token': csrf() } })
+        .then(function (r) {
+          if (r.status === 409) {
+            /* Non-empty directory without recursive flag — ask for confirmation */
+            if (confirm('Folder is not empty. Delete all contents?')) {
+              return fetch('/api/delete?path=' + E(p) + '&recursive=1', { method: 'POST', headers: { 'X-CSRF-Token': csrf() } });
+            } else {
+              throw new Error('Cancelled');
+            }
+          }
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.json();
+        })
+        .then(function () { nav(S.path); toast('Deleted: ' + n, 'ok') })
+        .catch(function (e) { if (e.message !== 'Cancelled') toast('Delete failed: ' + e.message, 'er') })
     }
     function ren(p, old) {
       var n = prompt('Rename to:', old); if (!n || n.trim() === old || !n.trim()) return; n = n.trim();
@@ -4571,6 +4735,7 @@
     /* ── INIT ── */
     D.addEventListener('DOMContentLoaded', function () {
       try { var sv = localStorage.getItem('zftpd_view'); if (sv) S.view = sv; var st = localStorage.getItem('zftpd_theme'); if (st) setTheme(st) } catch (e) { }
+      cleanupCache();
       setView(S.view); buildThemeDd();
 
       var bl = D.querySelector('.brand-logo'); if (bl) bl.src = 'zftpd-logo.png';
