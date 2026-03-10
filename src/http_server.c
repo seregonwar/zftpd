@@ -270,6 +270,48 @@ static int http_parse_basic_request(const char *buf, char *method,
 }
 
 #if ENABLE_WEB_UPLOAD
+
+/**
+ * @brief Recursively create directories for a given path.
+ *
+ * Creates all intermediate directories in the path if they don't exist.
+ * Returns 0 on success, -1 on error.
+ */
+static int mkdir_recursive(const char *path) {
+  if (path == NULL || path[0] == '\0') {
+    return -1;
+  }
+
+  char buf[1024];
+  size_t len = strlen(path);
+  if (len >= sizeof(buf)) {
+    return -1;
+  }
+  strcpy(buf, path);
+
+  for (size_t i = 1; i < len; i++) {
+    if (buf[i] == '/') {
+      buf[i] = '\0';
+      struct stat st;
+      if (stat(buf, &st) != 0) {
+        if (mkdir(buf, 0777) != 0 && errno != EEXIST) {
+          return -1;
+        }
+      }
+      buf[i] = '/';
+    }
+  }
+
+  struct stat st;
+  if (stat(buf, &st) != 0) {
+    if (mkdir(buf, 0777) != 0 && errno != EEXIST) {
+      return -1;
+    }
+  }
+
+  return 0;
+}
+
 static int url_decode_component(const char *in, char *out, size_t out_cap) {
   if ((in == NULL) || (out == NULL) || (out_cap < 2U)) {
     return -1;
@@ -832,6 +874,18 @@ static int http_client_callback(int fd, uint32_t events, void *data) {
                 return -1;
               }
             }
+          }
+        }
+
+        /* Create intermediate directories if needed (for folder uploads) */
+        char dir_buf[1024];
+        const char *last_slash = strrchr(full, '/');
+        if (last_slash != NULL && last_slash != full) {
+          size_t dir_len = (size_t)(last_slash - full);
+          if (dir_len < sizeof(dir_buf)) {
+            strncpy(dir_buf, full, dir_len);
+            dir_buf[dir_len] = '\0';
+            (void)mkdir_recursive(dir_buf);
           }
         }
 

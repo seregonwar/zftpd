@@ -1334,6 +1334,68 @@
       transition: width .1s ease
     }
 
+    .drop-close {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      background: none;
+      border: none;
+      color: var(--tx2);
+      font-size: 24px;
+      cursor: pointer;
+      padding: 0;
+      width: 28px;
+      height: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 6px;
+      transition: all .15s ease
+    }
+
+    .drop-close:hover {
+      background: var(--bd);
+      color: var(--tx)
+    }
+
+    .drop-card {
+      position: relative
+    }
+
+    .d-stats {
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid var(--bd);
+      text-align: left;
+      font-size: 12px
+    }
+
+    .d-stat-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+      gap: 12px
+    }
+
+    .d-stat-row:last-child {
+      margin-bottom: 0
+    }
+
+    .d-stat-label {
+      color: var(--tx2);
+      font-weight: 600;
+      min-width: 50px
+    }
+
+    .d-stat-val {
+      color: var(--tx);
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 500;
+      text-align: right;
+      flex: 1
+    }
+
     /* ══ TOAST ════════════════════════════════════════════════════════ */
     .toast {
       position: fixed;
@@ -3257,11 +3319,12 @@
     <div id="file-list" class="fl vg-grid"></div>
   </main>
 
-  <input id="file-input" type="file" multiple style="display:none">
+  <input id="file-input" type="file" multiple webkitdirectory style="display:none">
 
   <!-- DROP -->
   <div id="drop" class="drop">
     <div class="drop-card">
+      <button class="drop-close" id="drop-close" type="button">&times;</button>
       <div class="d-ico">
         <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"
           stroke-linecap="round">
@@ -3274,6 +3337,11 @@
       <div id="d-sub" class="d-sub">Release files to start uploading</div>
       <div class="d-bar">
         <div id="d-bf" class="d-bf"></div>
+      </div>
+      <div id="d-stats" class="d-stats" style="display:none">
+        <div class="d-stat-row"><span class="d-stat-label">To:</span> <span id="d-to" class="d-stat-val"></span></div>
+        <div class="d-stat-row"><span class="d-stat-label">Speed:</span> <span id="d-speed" class="d-stat-val"></span></div>
+        <div class="d-stat-row"><span class="d-stat-label">Time:</span> <span id="d-time" class="d-stat-val"></span></div>
       </div>
     </div>
   </div>
@@ -3803,8 +3871,30 @@
 
     /* ── DROP ── */
     var _dd = 0;
-    function showDrop(t, p) { if (typeof t === 'string') $('d-sub').textContent = t; if (typeof p === 'number') $('d-bf').style.width = Math.max(0, Math.min(100, p)) + '%'; $('drop').classList.add('on') }
-    function hideDrop() { $('drop').classList.remove('on'); $('d-sub').textContent = 'Release files to start uploading'; $('d-bf').style.width = '0%' }
+    var _dropStats = { to: '', speed: 0, time: 0 };
+    function showDrop(t, p, stats) {
+      if (typeof t === 'string') $('d-sub').textContent = t;
+      if (typeof p === 'number') $('d-bf').style.width = Math.max(0, Math.min(100, p)) + '%';
+      if (stats && typeof stats === 'object') {
+        _dropStats = stats;
+        var dStats = $('d-stats');
+        if (dStats) {
+          $('d-to').textContent = stats.to || '';
+          $('d-speed').textContent = stats.speed > 0 ? (stats.speed / 1024 / 1024).toFixed(2) + ' MB/s' : '—';
+          var mins = Math.floor(stats.time / 60), secs = Math.floor(stats.time % 60);
+          $('d-time').textContent = mins > 0 ? mins + 'm ' + secs + 's' : secs + 's';
+          dStats.style.display = 'block';
+        }
+      }
+      $('drop').classList.add('on');
+    }
+    function hideDrop() {
+      $('drop').classList.remove('on');
+      $('d-sub').textContent = 'Release files to start uploading';
+      $('d-bf').style.width = '0%';
+      var dStats = $('d-stats');
+      if (dStats) dStats.style.display = 'none';
+    }
 
     /* ── BREADCRUMB ── */
     function renderBC() {
@@ -4007,44 +4097,86 @@
         });
     }
 
-    /* ── UPLOAD (with transfer card) ── */
+    /* ── UPLOAD (with transfer card, parallel) ── */
     function upload(files) {
       if (!files || !files.length) return;
-      var arr = Array.prototype.slice.call(files), i = 0;
-      function next() {
-        if (i >= arr.length) { hideDrop(); nav(S.path); toast('Uploaded ' + arr.length + ' file(s)', 'ok'); return }
-        var f = arr[i++]; setStatus('Uploading\u2026', false); showDrop('Uploading ' + f.name + ' (' + i + '/' + arr.length + ')', 0);
-        var xhr = new XMLHttpRequest(); xhr.open('POST', '/api/upload?path=' + E(S.path) + '&name=' + E(f.name), true);
+      var arr = Array.prototype.slice.call(files);
+      var totalSize = 0, totalLoaded = 0;
+      for (var i = 0; i < arr.length; i++) { totalSize += arr[i].size; }
+      
+      var activeUploads = 0, nextIdx = 0, completed = 0;
+      var startT = Date.now();
+      var MAX_PARALLEL = 4;
+      
+      function startNextUpload() {
+        if (nextIdx >= arr.length) return;
+        if (activeUploads >= MAX_PARALLEL) return;
+        
+        activeUploads++;
+        var idx = nextIdx++;
+        var f = arr[idx];
+        
+        /* Extract directory and filename from webkitRelativePath (for folder uploads) */
+        var relPath = f.webkitRelativePath || f.name;
+        var lastSlash = relPath.lastIndexOf('/');
+        var dirPart = lastSlash > 0 ? relPath.substring(0, lastSlash) : '';
+        var namePart = lastSlash > 0 ? relPath.substring(lastSlash + 1) : relPath;
+        var uploadPath = dirPart ? (S.path === '/' ? '/' + dirPart : S.path + '/' + dirPart) : S.path;
+        
+        var xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/upload?path=' + E(uploadPath) + '&name=' + E(namePart), true);
         var tok = csrf(); if (tok) xhr.setRequestHeader('X-CSRF-Token', tok);
+        
         /* ─── transfer card ─── */
-        var card = xferCardCreate('UPLOADING\u2026', f.name, f.size);
-        var startT = Date.now(), lastBytes = 0;
+        var card = xferCardCreate('UPLOADING\u2026', relPath, f.size);
+        var fileLoaded = 0;
+        
         xhr.upload.onprogress = function (ev) {
           if (!ev.lengthComputable) return;
-          var pct = Math.floor(ev.loaded / ev.total * 100);
-          showDrop(null, pct);
+          var delta = ev.loaded - fileLoaded;
+          fileLoaded = ev.loaded;
+          totalLoaded += delta;
+          var pct = totalSize > 0 ? Math.floor(totalLoaded / totalSize * 100) : 0;
           var elapsed = (Date.now() - startT) / 1000;
-          var speed = elapsed > 0 ? ev.loaded / elapsed : 0;
-          xferCardUpdate(card, pct, speed, elapsed);
-          lastBytes = ev.loaded;
+          var speed = elapsed > 0 ? totalLoaded / elapsed : 0;
+          showDrop(null, pct, { to: S.path, speed: speed, time: elapsed });
+          xferCardUpdate(card, Math.floor(ev.loaded / ev.total * 100), speed, elapsed);
         };
+        
         xhr.onload = function () {
+          activeUploads--;
           if (xhr.status >= 200 && xhr.status < 300) {
             xferCardUpdate(card, 100, 0, 0);
-            xferCardDone(card); next();
+            xferCardDone(card);
+            completed++;
+            if (completed === arr.length) {
+              hideDrop(); nav(S.path); toast('Uploaded ' + arr.length + ' file(s)', 'ok');
+            } else {
+              startNextUpload();
+            }
           } else {
             setStatus('Error', false); toast('Upload failed: HTTP ' + xhr.status, 'er');
             xferCardDone(card); setTimeout(hideDrop, 800);
           }
         };
+        
         xhr.onerror = function () {
+          activeUploads--;
           setStatus('Error', false); toast('Upload failed', 'er');
           xferCardDone(card); setTimeout(hideDrop, 800);
         };
-        /* pause / cancel wiring */
-        card._xhr = xhr; card._paused = false; card._file = f; card._idx = i - 1;
+        
+        card._xhr = xhr; card._paused = false; card._file = f; card._idx = idx;
         xhr.send(f);
-      } next();
+        
+        /* Start next upload if we haven't reached MAX_PARALLEL yet */
+        if (activeUploads < MAX_PARALLEL && nextIdx < arr.length) {
+          startNextUpload();
+        }
+      }
+      
+      setStatus('Uploading\u2026', false);
+      startNextUpload();
     }
 
     /* ── FILE OPS ── */
@@ -4445,6 +4577,7 @@
       var br = $('btn-ref'); if (br) br.onclick = function () { nav(S.path) };
       var sr = $('search'); if (sr) sr.oninput = function () { render(this.value) };
       var fi = $('file-input'); if (fi) fi.onchange = function (e) { upload(e.target.files); e.target.value = '' };
+      var dc = $('drop-close'); if (dc) dc.onclick = function () { hideDrop() };
 
       ['grid', 'list', 'details'].forEach(function (v) { var b = $('vb-' + v); if (b) b.onclick = function () { setView(v) } });
 
