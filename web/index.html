@@ -625,8 +625,36 @@
       flex-shrink: 0
     }
 
-    .td-item.active .td-ck {
-      opacity: 1
+    .theme-dd .td-item.active .td-ck {
+      display: block
+    }
+
+    .theme-select-mobile {
+      display: none;
+      background: var(--sf2);
+      color: var(--tx);
+      border: 1px solid var(--bd);
+      border-radius: 8px;
+      padding: 8px 32px 8px 12px;
+      font-size: 13px;
+      font-family: 'JetBrains Mono', monospace;
+      appearance: none;
+      width: 160px;
+    }
+
+    .theme-select-mobile:focus {
+      outline: 2px solid var(--ac);
+      outline-offset: 2px;
+    }
+
+    @media (hover: none) and (pointer: coarse) {
+      .theme-btn {
+        display: none;
+      }
+
+      .theme-select-mobile {
+        display: block;
+      }
     }
 
     /* ══ TOOLBAR ══════════════════════════════════════════════════════ */
@@ -3246,6 +3274,7 @@
         <div class="theme-dd" id="theme-dd">
           <div class="td-hd">Select Theme</div>
         </div>
+        <select id="theme-select" class="theme-select-mobile" aria-label="Theme"></select>
       </div>
       <!-- Status -->
       <div id="status" class="status-pill status-ok"><span class="sdot"></span>Connected</div>
@@ -4436,10 +4465,8 @@
 
     function showSendToModal(entry, srcPath) {
       _smSrc = { entry: entry, srcPath: srcPath };
-      /* Fix #6: default to root ("/") instead of the current directory.
-       * Using S.path caused files to land in the same folder by accident
-       * when the user forgot to navigate before clicking "Send Here". */
-      _smPath = '/';
+      /* Default to current directory to avoid loading entire system root */
+      _smPath = S.path || '/';
       $('send-modal').classList.add('on');
       smNav(_smPath);
     }
@@ -4743,8 +4770,22 @@
       var t = THEMES.filter(function (x) { return x.id === theme })[0] || THEMES[0];
       var sw = $('t-sw'); if (sw) sw.style.background = t.sw;
       var tn = $('t-nm'); if (tn) tn.textContent = t.name;
+      var ts = $('theme-select'); if (ts) ts.value = theme;
       buildThemeDd();
       try { localStorage.setItem('zftpd_theme', theme) } catch (e) { }
+    }
+    function buildThemeSelect() {
+      var sel = $('theme-select'); if (!sel) return;
+      sel.innerHTML = '';
+      THEMES.forEach(function (t) {
+        var opt = D.createElement('option');
+        opt.value = t.id;
+        opt.textContent = t.name;
+        sel.appendChild(opt);
+      });
+      var cur = D.documentElement.getAttribute('data-theme') || 'ps5';
+      sel.value = cur;
+      sel.onchange = function () { setTheme(this.value); };
     }
     function closeThemeDd() { var dd = $('theme-dd'), btn = $('theme-btn'); if (dd) dd.classList.remove('show'); if (btn) btn.classList.remove('open') }
     function toggleThemeDd() { var dd = $('theme-dd'), btn = $('theme-btn'); buildThemeDd(); dd.classList.toggle('show'); btn.classList.toggle('open', dd.classList.contains('show')) }
@@ -4753,7 +4794,7 @@
     D.addEventListener('DOMContentLoaded', function () {
       try { var sv = localStorage.getItem('zftpd_view'); if (sv) S.view = sv; var st = localStorage.getItem('zftpd_theme'); if (st) setTheme(st) } catch (e) { }
       cleanupCache();
-      setView(S.view); buildThemeDd();
+      setView(S.view); buildThemeDd(); buildThemeSelect();
 
       var bl = D.querySelector('.brand-logo'); if (bl) bl.src = 'zftpd-logo.png';
 
@@ -4809,6 +4850,7 @@
       D.addEventListener('keydown', function (e) { if (e.key === 'Escape') { hideCtx(); closeThemeDd(); hideSendToModal(); var sp3 = $('stats-panel'); if (sp3) sp3.classList.remove('show') } });
 
       S.statsTimer = setInterval(refreshStats, 15000);
+      S.path = '/';
       nav('/');
 
     });
