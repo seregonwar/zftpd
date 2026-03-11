@@ -1694,7 +1694,22 @@
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      margin-bottom: 6px
+      margin-bottom: 2px
+    }
+
+    .xc-dest {
+      font-size: 11px;
+      color: var(--tx2);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      margin-bottom: 6px;
+      opacity: .75
+    }
+
+    .xc-dest .xc-arrow {
+      color: var(--ac);
+      font-weight: 700
     }
 
     .xc-bar {
@@ -3380,8 +3395,10 @@
       </div>
       <div id="d-stats" class="d-stats" style="display:none">
         <div class="d-stat-row"><span class="d-stat-label">To:</span> <span id="d-to" class="d-stat-val"></span></div>
-        <div class="d-stat-row"><span class="d-stat-label">Speed:</span> <span id="d-speed" class="d-stat-val"></span></div>
-        <div class="d-stat-row"><span class="d-stat-label">Time:</span> <span id="d-time" class="d-stat-val"></span></div>
+        <div class="d-stat-row"><span class="d-stat-label">Speed:</span> <span id="d-speed" class="d-stat-val"></span>
+        </div>
+        <div class="d-stat-row"><span class="d-stat-label">Time:</span> <span id="d-time" class="d-stat-val"></span>
+        </div>
       </div>
     </div>
   </div>
@@ -4117,7 +4134,7 @@
         /* Show loading spinner while fetching size */
         var els = D.querySelectorAll('[data-dirpath="' + p.replace(/"/g, '\\"') + '"]');
         for (var j = 0; j < els.length; j++) { els[j].textContent = '⟳'; els[j].style.opacity = '0.6'; }
-        
+
         fetch('/api/dirsize?path=' + E(p))
           .then(function (r) { return r.ok ? r.json() : null })
           .then(function (d) {
@@ -4131,7 +4148,7 @@
             var els = D.querySelectorAll('[data-dirpath="' + p.replace(/"/g, '\\"') + '"]');
             for (var j = 0; j < els.length; j++) { els[j].textContent = bytes(d.size); els[j].style.opacity = '1'; }
           })
-          .catch(function () { 
+          .catch(function () {
             /* On error, show "—" instead of spinner */
             var els = D.querySelectorAll('[data-dirpath="' + p.replace(/"/g, '\\"') + '"]');
             for (var j = 0; j < els.length; j++) { els[j].textContent = '—'; els[j].style.opacity = '1'; }
@@ -4212,7 +4229,7 @@
       if (!path) return;
       var cached = getCachedListing(path);
       if (!cached || !cached.entries) return;
-      
+
       fetch('/api/list?path=' + E(path))
         .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json() })
         .then(function (d) {
@@ -4221,7 +4238,7 @@
           var changed = false;
           for (var i = 0; i < entries.length; i++) {
             if (entries[i].mtime !== (cached.entries[i] && cached.entries[i].mtime) ||
-                entries[i].size !== (cached.entries[i] && cached.entries[i].size)) {
+              entries[i].size !== (cached.entries[i] && cached.entries[i].size)) {
               changed = true;
               break;
             }
@@ -4242,10 +4259,10 @@
       var prev = S.path, next = norm(path);
       var fl = $('file-list');
       var cached = getCachedListing(next);
-      
+
       /* Clear previous sync timer */
       if (_syncTimer) clearInterval(_syncTimer);
-      
+
       /* Show cached data immediately if available */
       if (cached && cached.entries) {
         S.path = next;
@@ -4259,26 +4276,26 @@
         if (fl) { fl.className = 'fl vg-' + S.view; fl.innerHTML = '<div class="s-card"><div class="loader"></div><div>Loading\u2026</div></div>' }
       }
       var fc = $('fl-cnt'); if (fc) fc.textContent = '';
-      
+
       /* Fetch fresh data in background */
       fetch('/api/list?path=' + E(next))
         .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json() })
         .then(function (d) {
           if (!d || !Array.isArray(d.entries)) throw new Error('Invalid response');
           var entries = d.entries;
-          
+
           /* Merge with cached data to preserve sorting/filtering */
           if (cached && cached.entries) {
             entries = mergeEntries(cached.entries, entries);
           }
-          
+
           /* Update state and cache */
           S.path = next;
           var cp = $('current-path'); if (cp) cp.textContent = S.path;
           var spt = $('sp-pt'); if (spt) spt.textContent = S.path;
           S.entries = entries;
           setCachedListing(next, { entries: entries });
-          
+
           /* Render if not already rendered from cache */
           if (!cached || !cached.entries) {
             renderBC(); render($('search').value);
@@ -4286,7 +4303,7 @@
             render($('search').value);
           }
           setStatus('Connected', true); refreshStats();
-          
+
           /* Start background sync timer (every 30 seconds) */
           if (_syncTimer) clearInterval(_syncTimer);
           _syncTimer = setInterval(backgroundSync, 30000);
@@ -4309,34 +4326,34 @@
       var arr = Array.prototype.slice.call(files);
       var totalSize = 0, totalLoaded = 0;
       for (var i = 0; i < arr.length; i++) { totalSize += arr[i].size; }
-      
+
       var activeUploads = 0, nextIdx = 0, completed = 0;
       var startT = Date.now();
       var MAX_PARALLEL = 8;
-      
+
       function startNextUpload() {
         if (nextIdx >= arr.length) return;
         if (activeUploads >= MAX_PARALLEL) return;
-        
+
         activeUploads++;
         var idx = nextIdx++;
         var f = arr[idx];
-        
+
         /* Extract directory and filename from webkitRelativePath (for folder uploads) */
         var relPath = f.webkitRelativePath || f.name;
         var lastSlash = relPath.lastIndexOf('/');
         var dirPart = lastSlash > 0 ? relPath.substring(0, lastSlash) : '';
         var namePart = lastSlash > 0 ? relPath.substring(lastSlash + 1) : relPath;
         var uploadPath = dirPart ? (S.path === '/' ? '/' + dirPart : S.path + '/' + dirPart) : S.path;
-        
+
         var xhr = new XMLHttpRequest();
         xhr.open('POST', '/api/upload?path=' + E(uploadPath) + '&name=' + E(namePart), true);
         var tok = csrf(); if (tok) xhr.setRequestHeader('X-CSRF-Token', tok);
-        
+
         /* ─── transfer card ─── */
-        var card = xferCardCreate('UPLOADING\u2026', relPath, f.size);
+        var card = xferCardCreate('UPLOADING\u2026', relPath, f.size, uploadPath);
         var fileLoaded = 0;
-        
+
         xhr.upload.onprogress = function (ev) {
           if (!ev.lengthComputable) return;
           var delta = ev.loaded - fileLoaded;
@@ -4348,7 +4365,7 @@
           showDrop(null, pct, { to: S.path, speed: speed, time: elapsed });
           xferCardUpdate(card, Math.floor(ev.loaded / ev.total * 100), speed, elapsed);
         };
-        
+
         xhr.onload = function () {
           activeUploads--;
           if (xhr.status >= 200 && xhr.status < 300) {
@@ -4370,22 +4387,22 @@
             xferCardDone(card); setTimeout(hideDrop, 800);
           }
         };
-        
+
         xhr.onerror = function () {
           activeUploads--;
           setStatus('Error', false); setTransferActive(false); toast('Upload failed: Network error (' + relPath + ')', 'er');
           xferCardDone(card); setTimeout(hideDrop, 800);
         };
-        
+
         card._xhr = xhr; card._paused = false; card._file = f; card._idx = idx;
         xhr.send(f);
-        
+
         /* Start next upload if we haven't reached MAX_PARALLEL yet */
         if (activeUploads < MAX_PARALLEL && nextIdx < arr.length) {
           startNextUpload();
         }
       }
-      
+
       setStatus('Uploading\u2026', false);
       startNextUpload();
     }
@@ -4408,13 +4425,13 @@
         if (S.entries[i].name === n) { entry = S.entries[i]; break }
       }
       var isDir = entry && entry.type === 'dir';
-      
+
       var msg = isDir ? 'Delete folder "' + n + '" and all contents? This cannot be undone.' : 'Delete "' + n + '"? This cannot be undone.';
       if (!confirm(msg)) return;
-      
+
       var url = '/api/delete?path=' + E(p);
       if (isDir) url += '&recursive=1';
-      
+
       fetch(url, { method: 'POST', headers: { 'X-CSRF-Token': csrf() } })
         .then(function (r) {
           if (r.status === 409) {
@@ -4495,8 +4512,8 @@
 
     function showSendToModal(entry, srcPath) {
       _smSrc = { entry: entry, srcPath: srcPath };
-      /* Default to current directory to avoid loading entire system root */
-      _smPath = S.path || '/';
+      /* Always start browsing from root so the user sees the full tree */
+      _smPath = '/';
       $('send-modal').classList.add('on');
       smNav(_smPath);
     }
@@ -4570,7 +4587,8 @@
       if (norm(dest) === norm(src)) { toast('Source and destination are the same', 'wn'); return }
 
       /* Save data BEFORE closing the modal (which nullifies _smSrc) */
-      var card = xferCardCreate('COPYING\u2026', name, totalBytes);
+      var card = xferCardCreate('COPYING\u2026', name, totalBytes, destDir);
+      card._isServerCopy = true;
       hideSendToModal();
       setTransferActive(true);
 
@@ -4602,12 +4620,16 @@
                   if (d.error) {
                     xferCardDone(card);
                     setTransferActive(false);
-                    var errReason = (function(c, en) {
-                      var m = { '-2':'Out of memory', '-10':'Cannot open file', '-11':'Read error (USB)',
-                                '-12':'Write error', '-13':'Stat failed', '-14':'Cannot open dir',
-                                '-17':'Source not found', '-18':'Permission denied', '-99':'Unknown error' };
-                      var enoMap = { '1':'EPERM', '2':'ENOENT', '5':'EIO', '12':'ENOMEM', '13':'EACCES',
-                                     '17':'EEXIST', '22':'EINVAL', '28':'ENOSPC', '30':'EROFS' };
+                    var errReason = (function (c, en) {
+                      var m = {
+                        '-2': 'Out of memory', '-10': 'Cannot open file', '-11': 'Read error (USB)',
+                        '-12': 'Write error', '-13': 'Stat failed', '-14': 'Cannot open dir',
+                        '-17': 'Source not found', '-18': 'Permission denied', '-99': 'Unknown error'
+                      };
+                      var enoMap = {
+                        '1': 'EPERM', '2': 'ENOENT', '5': 'EIO', '12': 'ENOMEM', '13': 'EACCES',
+                        '17': 'EEXIST', '22': 'EINVAL', '28': 'ENOSPC', '30': 'EROFS'
+                      };
                       /* Show specific human-readable reason for common cases */
                       if (c === -12 && en === 28) return 'Disk full \u2014 not enough space on destination';
                       if (c === -12 && en === 12) return 'Out of memory \u2014 system low on RAM';
@@ -4655,9 +4677,13 @@
      *  └──────────────────────────────────────┘
      * ═══════════════════════════════════════════════════════════════ */
 
-    function xferCardCreate(opLabel, fileName, totalBytes) {
+    function xferCardCreate(opLabel, fileName, totalBytes, destPath) {
       var tray = $('xfer-tray');
       var card = D.createElement('div'); card.className = 'xfer-card';
+      /* Destination info: show where the file/folder is going */
+      var destHtml = destPath
+        ? '<div class="xc-dest"><span class="xc-arrow">\u2192</span> ' + destPath + '</div>'
+        : '';
       card.innerHTML =
         '<div class="xc-top">' +
         '<span class="xc-op">' + opLabel + '</span>' +
@@ -4666,32 +4692,55 @@
         '<span class="xc-pct">0%</span>' +
         '</div>' +
         '<div class="xc-name">' + fileName + '</div>' +
+        destHtml +
         '<div class="xc-bar"><div class="xc-bf" style="width:0%"></div></div>' +
         '<div class="xc-btns">' +
         '<button class="xc-btn pause">' + ICO.pause + ' Pause</button>' +
         '<button class="xc-btn cancel">' + ICO.xcancel + ' Cancel</button>' +
         '</div>';
       card._totalBytes = totalBytes;
-      /* Pause button — for uploads (XHR) or server-side copy */
+      card._isPaused = false;
+      /* Pause button — server-side copy: POST /api/copy_pause (toggle) */
       var pauseBtn = card.querySelector('.xc-btn.pause');
       pauseBtn.onclick = function () {
-        if (card._cancelFn) {
-          /* Server-side copy: no true pause, cancel instead */
-          card._cancelFn();
-          pauseBtn.innerHTML = ICO.pause + ' Cancelling\u2026';
-          pauseBtn.style.opacity = '0.5';
+        if (card._isServerCopy) {
+          /* Toggle pause via server API */
+          fetch('/api/copy_pause', { method: 'POST', headers: { 'X-CSRF-Token': csrf() } })
+            .then(function (r) { return r.json() })
+            .then(function (d) {
+              if (d && d.ok) {
+                card._isPaused = !!d.paused;
+                if (card._isPaused) {
+                  pauseBtn.innerHTML = ICO.pause + ' Resume';
+                  pauseBtn.classList.add('active');
+                  var opEl = card.querySelector('.xc-op');
+                  if (opEl) opEl.textContent = 'PAUSED';
+                  toast('Transfer paused', 'wn');
+                } else {
+                  pauseBtn.innerHTML = ICO.pause + ' Pause';
+                  pauseBtn.classList.remove('active');
+                  var opEl2 = card.querySelector('.xc-op');
+                  if (opEl2) opEl2.textContent = 'COPYING\u2026';
+                  toast('Transfer resumed', 'ok');
+                }
+              }
+            })
+            .catch(function () { toast('Pause failed', 'er') });
         } else if (card._xhr) {
           card._xhr.abort();
-          card._paused = true;
+          card._isPaused = true;
           pauseBtn.innerHTML = ICO.pause + ' Paused';
           pauseBtn.style.opacity = '0.5';
-          toast('Transfer paused (browser limitation: cannot resume)', 'wn');
+          toast('Upload aborted (browser cannot pause uploads)', 'wn');
         }
       };
       /* Cancel button */
       card.querySelector('.xc-btn.cancel').onclick = function () {
-        if (card._cancelFn) { card._cancelFn(); }
-        else if (card._xhr) { card._xhr.abort(); }
+        if (card._isServerCopy) {
+          fetch('/api/copy_cancel', { method: 'POST', headers: { 'X-CSRF-Token': csrf() } })
+            .catch(function () { });
+        }
+        if (card._xhr) { card._xhr.abort(); }
         xferCardDone(card);
         toast('Transfer cancelled', 'wn');
       };
@@ -4709,7 +4758,16 @@
       var speedEl = card.querySelector('.xc-speed');
       if (speedEl && speedBps > 0) speedEl.textContent = bytes(speedBps) + '/s';
       var timeEl = card.querySelector('.xc-time');
-      if (timeEl && elapsedSec > 0) timeEl.textContent = Math.floor(elapsedSec) + 's';
+      if (timeEl && elapsedSec > 0) {
+        var s = Math.floor(elapsedSec);
+        if (s >= 3600) {
+          timeEl.textContent = Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+        } else if (s >= 60) {
+          timeEl.textContent = Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+        } else {
+          timeEl.textContent = s + 's';
+        }
+      }
     }
 
     /* Remove card after a short delay */
@@ -4839,7 +4897,7 @@
       var fi = $('file-input'); if (fi) fi.onchange = function (e) { upload(e.target.files); e.target.value = '' };
       var fo = $('folder-input'); if (fo) fo.onchange = function (e) { upload(e.target.files); e.target.value = '' };
       var dc = $('drop-close'); if (dc) dc.onclick = function () { hideDrop() };
-      
+
       /* Preload root directory to avoid slowdowns on first navigation */
       fetch('/api/list?path=/')
         .then(function (r) { return r.ok ? r.json() : null })
@@ -4893,32 +4951,32 @@
     /* ══════════════════════════════════════════════════════════════
      *  STATS MONITOR MODAL  (namespace: smo)
      * ══════════════════════════════════════════════════════════════ */
-    ;(function () {
+    ; (function () {
       'use strict';
 
       /* ── State ── */
       var _open = false;
-      var _tab  = 'ram';
+      var _tab = 'ram';
       var _polls = [];           /* active setInterval IDs */
       var _focusTrap = null;
 
       /* RAM history ring-buffer (60 points) */
-      var _ramHist  = [];
+      var _ramHist = [];
       var _tempHist = [];
-      var _RAM_MAX  = 60;
+      var _RAM_MAX = 60;
 
       /* Disk treemap */
-      var _tmPath  = '/';
+      var _tmPath = '/';
       var _tmStack = [];
-      var _tmData  = null;
+      var _tmData = null;
 
       /* Processes */
-      var _procs      = [];
-      var _procPage   = 20;
+      var _procs = [];
+      var _procPage = 20;
       var _procOffset = 0;
-      var _procSort   = 'cpu';
-      var _procSortAsc= false;
-      var _procQuery  = '';
+      var _procSort = 'cpu';
+      var _procSortAsc = false;
+      var _procQuery = '';
 
       /* Kill confirm */
       var _killTarget = null;
@@ -4931,24 +4989,24 @@
       function smoBytes(b) {
         if (typeof b !== 'number' || b < 0) return '—';
         if (b === 0) return '0 B';
-        var u = ['B','KB','MB','GB','TB'], i = Math.min(Math.floor(Math.log(b)/Math.log(1024)),4);
-        return (b/Math.pow(1024,i)).toFixed(i>0?1:0)+' '+u[i];
+        var u = ['B', 'KB', 'MB', 'GB', 'TB'], i = Math.min(Math.floor(Math.log(b) / Math.log(1024)), 4);
+        return (b / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + u[i];
       }
       function smoBps(b) {
-        return smoBytes(b)+'/s';
+        return smoBytes(b) + '/s';
       }
       function smoUptime(s) {
         s = Math.max(0, Math.floor(s));
-        var d = Math.floor(s/86400), h = Math.floor((s%86400)/3600), m = Math.floor((s%3600)/60);
+        var d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
         var parts = [];
-        if (d) parts.push(d+' day'+(d!==1?'s':''));
-        if (h) parts.push(h+'h');
-        parts.push(m+'m');
+        if (d) parts.push(d + ' day' + (d !== 1 ? 's' : ''));
+        if (h) parts.push(h + 'h');
+        parts.push(m + 'm');
         return parts.join(', ');
       }
       function smoFmt(ts) {
         if (!ts) return '—';
-        var d = new Date(ts*1000);
+        var d = new Date(ts * 1000);
         if (isNaN(d)) return '—';
         return d.toLocaleString();
       }
@@ -4960,8 +5018,8 @@
       function smoToast(msg, type) {
         var wrap = smo$('smo-toast-wrap'); if (!wrap) return;
         var el = document.createElement('div');
-        el.className = 'smo-toast ' + (type||'');
-        el.textContent = (type==='ok'?'✓ ':type==='er'?'✕ ':'') + msg;
+        el.className = 'smo-toast ' + (type || '');
+        el.textContent = (type === 'ok' ? '✓ ' : type === 'er' ? '✕ ' : '') + msg;
         wrap.appendChild(el);
         setTimeout(function () {
           el.style.animation = 'smToastOut .2s ease forwards';
@@ -4988,7 +5046,7 @@
         if (focusable.length) focusable[0].focus();
       }
 
-      window.smoOpen = function() { smoOpen(); };
+      window.smoOpen = function () { smoOpen(); };
 
       function smoClose() {
         if (!_open) return;
@@ -5014,9 +5072,9 @@
           if (!focusable.length) return;
           var idx = focusable.indexOf(document.activeElement);
           if (e.shiftKey) {
-            if (idx <= 0) { e.preventDefault(); focusable[focusable.length-1].focus(); }
+            if (idx <= 0) { e.preventDefault(); focusable[focusable.length - 1].focus(); }
           } else {
-            if (idx === focusable.length-1) { e.preventDefault(); focusable[0].focus(); }
+            if (idx === focusable.length - 1) { e.preventDefault(); focusable[0].focus(); }
           }
         }
       }
@@ -5025,17 +5083,17 @@
       function smoSwitchTab(tab) {
         _tab = tab;
         var tabs = document.querySelectorAll('.smo-tab');
-        for (var i=0;i<tabs.length;i++) {
+        for (var i = 0; i < tabs.length; i++) {
           var t = tabs[i];
-          t.classList.toggle('smo-tab-active', t.getAttribute('data-tab')===tab);
+          t.classList.toggle('smo-tab-active', t.getAttribute('data-tab') === tab);
         }
         var secs = document.querySelectorAll('.smo-section');
-        for (var j=0;j<secs.length;j++) {
-          secs[j].classList.toggle('smo-active', secs[j].id==='smo-tab-'+tab);
+        for (var j = 0; j < secs.length; j++) {
+          secs[j].classList.toggle('smo-active', secs[j].id === 'smo-tab-' + tab);
         }
         /* Trigger immediate data fetch for tab-specific data */
-        if (tab==='disk' && !_tmData) smoLoadDiskTree(_tmPath);
-        if (tab==='proc' && _open) smoFetchProcs();
+        if (tab === 'disk' && !_tmData) smoLoadDiskTree(_tmPath);
+        if (tab === 'proc' && _open) smoFetchProcs();
       }
 
       /* ── Polling management ── */
@@ -5044,7 +5102,7 @@
         _polls.push(setInterval(smoFetchAll, 3000));
       }
       function smoStopPolls() {
-        for (var i=0;i<_polls.length;i++) clearInterval(_polls[i]);
+        for (var i = 0; i < _polls.length; i++) clearInterval(_polls[i]);
         _polls = [];
       }
       function smoFetchAll() {
@@ -5058,39 +5116,39 @@
       /* ══ TAB 1: RAM ══════════════════════════════════════════════ */
       function smoFetchRAM() {
         fetch('/api/stats/ram')
-          .then(function(r){ return r.ok ? r.json() : Promise.reject(r.status); })
+          .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
           .then(smoUpdateRAM)
-          .catch(function() { /* placeholder values already shown */ });
+          .catch(function () { /* placeholder values already shown */ });
       }
 
       function smoUpdateRAM(d) {
         if (!d) return;
-        var used    = d.used    || 0;
-        var cached  = (d.cached || 0) + (d.buffers || 0);
-        var free    = d.free    || 0;
-        var total   = d.total   || (used + cached + free) || 1;
-        var pct     = Math.min(100, Math.round(used / total * 100));
+        var used = d.used || 0;
+        var cached = (d.cached || 0) + (d.buffers || 0);
+        var free = d.free || 0;
+        var total = d.total || (used + cached + free) || 1;
+        var pct = Math.min(100, Math.round(used / total * 100));
         var cachedPct = Math.min(100 - pct, Math.round(cached / total * 100));
         var CIRC = 314.16;
 
         /* Gauge */
         var arc = smo$('smo-ram-arc');
         if (arc) {
-          arc.style.strokeDashoffset = String(CIRC - pct/100*CIRC);
+          arc.style.strokeDashoffset = String(CIRC - pct / 100 * CIRC);
           arc.style.stroke = pct > 80 ? 'var(--er)' : pct > 60 ? 'var(--wn)' : 'var(--ac)';
         }
         var pctEl = smo$('smo-ram-pct'); if (pctEl) pctEl.textContent = pct + '%';
 
         /* Segmented bar */
-        var su = smo$('smo-ram-seg-used');  if (su) su.style.width = pct+'%';
-        var sc = smo$('smo-ram-seg-cache'); if (sc) sc.style.width = cachedPct+'%';
+        var su = smo$('smo-ram-seg-used'); if (su) su.style.width = pct + '%';
+        var sc = smo$('smo-ram-seg-cache'); if (sc) sc.style.width = cachedPct + '%';
 
         /* Metrics */
-        var ru = smo$('smo-ram-used');   if (ru) ru.textContent = smoBytes(used);
-        var rc = smo$('smo-ram-cache');  if (rc) rc.textContent = smoBytes(cached);
-        var rf = smo$('smo-ram-free');   if (rf) rf.textContent = smoBytes(free);
-        var rt = smo$('smo-ram-total');  if (rt) rt.textContent = smoBytes(total);
-        var rsub = smo$('smo-ram-used-sub'); if (rsub) rsub.textContent = pct+'% of total';
+        var ru = smo$('smo-ram-used'); if (ru) ru.textContent = smoBytes(used);
+        var rc = smo$('smo-ram-cache'); if (rc) rc.textContent = smoBytes(cached);
+        var rf = smo$('smo-ram-free'); if (rf) rf.textContent = smoBytes(free);
+        var rt = smo$('smo-ram-total'); if (rt) rt.textContent = smoBytes(total);
+        var rsub = smo$('smo-ram-used-sub'); if (rsub) rsub.textContent = pct + '% of total';
 
         /* History */
         _ramHist.push(pct);
@@ -5101,25 +5159,25 @@
       /* ══ TAB 2: DISK ════════════════════════════════════════════ */
       function smoFetchDiskInfo() {
         fetch('/api/disk/info')
-          .then(function(r){ return r.ok ? r.json() : Promise.reject(r.status); })
+          .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
           .then(smoUpdateDiskInfo)
-          .catch(function() {});
+          .catch(function () { });
       }
 
       function smoUpdateDiskInfo(d) {
         if (!d) return;
-        var used  = d.used  || 0;
-        var free  = d.free  || 0;
+        var used = d.used || 0;
+        var free = d.free || 0;
         var total = d.total || (used + free) || 1;
-        var pct   = Math.min(100, Math.round(used / total * 100));
-        var cls   = pct > 85 ? 'cr' : pct > 70 ? 'wn' : '';
+        var pct = Math.min(100, Math.round(used / total * 100));
+        var cls = pct > 85 ? 'cr' : pct > 70 ? 'wn' : '';
 
-        var du = smo$('smo-disk-used');  if (du) du.textContent = smoBytes(used);
-        var df = smo$('smo-disk-free');  if (df) df.textContent = smoBytes(free);
+        var du = smo$('smo-disk-used'); if (du) du.textContent = smoBytes(used);
+        var df = smo$('smo-disk-free'); if (df) df.textContent = smoBytes(free);
         var dt = smo$('smo-disk-total'); if (dt) dt.textContent = smoBytes(total);
-        var dp = smo$('smo-disk-path');  if (dp && d.path) dp.textContent = d.path;
+        var dp = smo$('smo-disk-path'); if (dp && d.path) dp.textContent = d.path;
         var bf = smo$('smo-disk-bar-fill');
-        if (bf) { bf.style.width = pct+'%'; bf.className = 'smo-disk-bar-fill'+(cls?' '+cls:''); }
+        if (bf) { bf.style.width = pct + '%'; bf.className = 'smo-disk-bar-fill' + (cls ? ' ' + cls : ''); }
       }
 
       function smoLoadDiskTree(path) {
@@ -5127,14 +5185,14 @@
         smoRenderTmBreadcrumb();
         var tm = smo$('smo-treemap'); if (!tm) return;
         tm.innerHTML = '<div style="padding:40px;text-align:center;color:var(--tx3);font-size:11px">Loading tree…</div>';
-        fetch('/api/disk/tree?path='+encodeURIComponent(path))
-          .then(function(r){ return r.ok ? r.json() : Promise.reject(r.status); })
-          .then(function(data) {
+        fetch('/api/disk/tree?path=' + encodeURIComponent(path))
+          .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+          .then(function (data) {
             _tmData = data;
             smoRenderTreemap(data, path);
             smoRenderTop10(data);
           })
-          .catch(function() {
+          .catch(function () {
             var tm2 = smo$('smo-treemap'); if (!tm2) return;
             tm2.innerHTML = '<div style="padding:40px;text-align:center;color:var(--tx3);font-size:11px">— Tree unavailable —</div>';
           });
@@ -5144,40 +5202,42 @@
         var bc = smo$('smo-tm-breadcrumb'); if (!bc) return;
         bc.innerHTML = '';
         var crumb = document.createElement('span');
-        crumb.className = 'smo-crumb' + (_tmStack.length===0 ? ' smo-crumb-act' : '');
+        crumb.className = 'smo-crumb' + (_tmStack.length === 0 ? ' smo-crumb-act' : '');
         crumb.textContent = '/';
-        crumb.onclick = function() { _tmStack=[]; smoLoadDiskTree('/'); };
+        crumb.onclick = function () { _tmStack = []; smoLoadDiskTree('/'); };
         bc.appendChild(crumb);
-        for (var i=0; i<_tmStack.length; i++) {
-          var sep = document.createElement('span'); sep.className='smo-crumb-sep'; sep.textContent='/'; bc.appendChild(sep);
+        for (var i = 0; i < _tmStack.length; i++) {
+          var sep = document.createElement('span'); sep.className = 'smo-crumb-sep'; sep.textContent = '/'; bc.appendChild(sep);
           var seg = document.createElement('span');
-          seg.className = 'smo-crumb' + (i===_tmStack.length-1 ? ' smo-crumb-act' : '');
+          seg.className = 'smo-crumb' + (i === _tmStack.length - 1 ? ' smo-crumb-act' : '');
           seg.textContent = _tmStack[i].name;
-          (function(idx){ seg.onclick = function() {
-            _tmStack = _tmStack.slice(0, idx+1);
-            smoLoadDiskTree(_tmStack.map(function(x){return x.path}).join(''));
-          }; }(i));
+          (function (idx) {
+            seg.onclick = function () {
+              _tmStack = _tmStack.slice(0, idx + 1);
+              smoLoadDiskTree(_tmStack.map(function (x) { return x.path }).join(''));
+            };
+          }(i));
           bc.appendChild(seg);
         }
       }
 
       var TM_COLORS = {
-        dir:   '#4da6ff',
+        dir: '#4da6ff',
         video: '#ff8a65',
         image: '#ce93d8',
-        arch:  '#ffb74d',
-        code:  '#80cbc4',
-        doc:   '#90caf9',
+        arch: '#ffb74d',
+        code: '#80cbc4',
+        doc: '#90caf9',
         other: '#546e7a'
       };
       function smoFileColor(name) {
         if (!name) return TM_COLORS.other;
         var e = name.split('.').pop().toLowerCase();
-        if ({mp4:1,mkv:1,avi:1,mov:1,webm:1,flv:1}[e]) return TM_COLORS.video;
-        if ({png:1,jpg:1,jpeg:1,gif:1,svg:1,webp:1,bmp:1}[e]) return TM_COLORS.image;
-        if ({zip:1,tar:1,gz:1,bz2:1,xz:1,rar:1,'7z':1}[e]) return TM_COLORS.arch;
-        if ({js:1,ts:1,py:1,c:1,cpp:1,go:1,rs:1,sh:1,php:1}[e]) return TM_COLORS.code;
-        if ({md:1,txt:1,pdf:1,doc:1,docx:1}[e]) return TM_COLORS.doc;
+        if ({ mp4: 1, mkv: 1, avi: 1, mov: 1, webm: 1, flv: 1 }[e]) return TM_COLORS.video;
+        if ({ png: 1, jpg: 1, jpeg: 1, gif: 1, svg: 1, webp: 1, bmp: 1 }[e]) return TM_COLORS.image;
+        if ({ zip: 1, tar: 1, gz: 1, bz2: 1, xz: 1, rar: 1, '7z': 1 }[e]) return TM_COLORS.arch;
+        if ({ js: 1, ts: 1, py: 1, c: 1, cpp: 1, go: 1, rs: 1, sh: 1, php: 1 }[e]) return TM_COLORS.code;
+        if ({ md: 1, txt: 1, pdf: 1, doc: 1, docx: 1 }[e]) return TM_COLORS.doc;
         return TM_COLORS.other;
       }
 
@@ -5191,54 +5251,54 @@
         }
 
         /* Manual squarified treemap (no D3 required) */
-        var total = data.size || data.children.reduce(function(a,c){ return a+(c.size||0); },0) || 1;
-        var nodes = data.children.slice().sort(function(a,b){ return (b.size||0)-(a.size||0); });
+        var total = data.size || data.children.reduce(function (a, c) { return a + (c.size || 0); }, 0) || 1;
+        var nodes = data.children.slice().sort(function (a, b) { return (b.size || 0) - (a.size || 0); });
         var rects = smoSquarify(nodes, total, 0, 0, W, H);
 
-        var svg = document.createElementNS('http://www.w3.org/2000/svg','svg');
+        var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
         svg.setAttribute('width', W); svg.setAttribute('height', H);
-        svg.style.display='block';
+        svg.style.display = 'block';
 
         var tip = smo$('smo-tm-tip');
 
-        rects.forEach(function(r) {
+        rects.forEach(function (r) {
           var isDir = r.node.type === 'directory' || (r.node.children && r.node.children.length);
-          var col   = isDir ? TM_COLORS.dir : smoFileColor(r.node.name);
-          var g = document.createElementNS('http://www.w3.org/2000/svg','g');
+          var col = isDir ? TM_COLORS.dir : smoFileColor(r.node.name);
+          var g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
           g.className.baseVal = 'smo-tm-node';
-          var rect = document.createElementNS('http://www.w3.org/2000/svg','rect');
-          rect.setAttribute('x', r.x+1); rect.setAttribute('y', r.y+1);
-          rect.setAttribute('width', Math.max(0,r.w-2)); rect.setAttribute('height', Math.max(0,r.h-2));
+          var rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+          rect.setAttribute('x', r.x + 1); rect.setAttribute('y', r.y + 1);
+          rect.setAttribute('width', Math.max(0, r.w - 2)); rect.setAttribute('height', Math.max(0, r.h - 2));
           rect.setAttribute('rx', 4);
           rect.setAttribute('fill', col);
           rect.setAttribute('fill-opacity', '0.85');
           g.appendChild(rect);
           if (r.w > 40 && r.h > 22) {
-            var txt = document.createElementNS('http://www.w3.org/2000/svg','text');
-            txt.setAttribute('x', r.x + r.w/2); txt.setAttribute('y', r.y + r.h/2 + 4);
-            txt.setAttribute('text-anchor','middle'); txt.setAttribute('font-size', Math.min(11, r.w/10+5));
-            txt.setAttribute('fill','rgba(255,255,255,.9)'); txt.setAttribute('pointer-events','none');
-            var label = r.node.name.length > 18 ? r.node.name.slice(0,16)+'…' : r.node.name;
+            var txt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            txt.setAttribute('x', r.x + r.w / 2); txt.setAttribute('y', r.y + r.h / 2 + 4);
+            txt.setAttribute('text-anchor', 'middle'); txt.setAttribute('font-size', Math.min(11, r.w / 10 + 5));
+            txt.setAttribute('fill', 'rgba(255,255,255,.9)'); txt.setAttribute('pointer-events', 'none');
+            var label = r.node.name.length > 18 ? r.node.name.slice(0, 16) + '…' : r.node.name;
             txt.textContent = label;
             g.appendChild(txt);
           }
           /* Hover tooltip */
-          g.addEventListener('mouseenter', function(e) {
+          g.addEventListener('mouseenter', function (e) {
             if (!tip) return;
-            var pct = Math.round((r.node.size||0)/total*100);
-            smo$('smo-tm-tip-name').textContent = (isDir?'[DIR] ':'[FILE] ')+r.node.name;
-            smo$('smo-tm-tip-size').textContent = smoBytes(r.node.size||0);
-            smo$('smo-tm-tip-pct').textContent  = pct+'% of total';
+            var pct = Math.round((r.node.size || 0) / total * 100);
+            smo$('smo-tm-tip-name').textContent = (isDir ? '[DIR] ' : '[FILE] ') + r.node.name;
+            smo$('smo-tm-tip-size').textContent = smoBytes(r.node.size || 0);
+            smo$('smo-tm-tip-pct').textContent = pct + '% of total';
             var hint = smo$('smo-tm-tip-hint'); if (hint) hint.style.display = isDir ? '' : 'none';
             tip.classList.add('visible');
           });
-          g.addEventListener('mousemove', function(e) {
+          g.addEventListener('mousemove', function (e) {
             if (!tip) return;
-            tip.style.left = (e.clientX+14)+'px'; tip.style.top = (e.clientY-10)+'px';
+            tip.style.left = (e.clientX + 14) + 'px'; tip.style.top = (e.clientY - 10) + 'px';
           });
-          g.addEventListener('mouseleave', function() { if (tip) tip.classList.remove('visible'); });
+          g.addEventListener('mouseleave', function () { if (tip) tip.classList.remove('visible'); });
           /* Click → drill down */
-          g.addEventListener('click', function() {
+          g.addEventListener('click', function () {
             if (!isDir) return;
             var newPath = rootPath === '/' ? '/' + r.node.name : rootPath + '/' + r.node.name;
             _tmStack.push({ name: r.node.name, path: newPath });
@@ -5254,16 +5314,16 @@
         var results = [];
         var remaining = total;
         var cx = x, cy = y, cw = w, ch = h;
-        nodes.forEach(function(n, i) {
+        nodes.forEach(function (n, i) {
           var sz = n.size || 0;
           var frac = sz / (remaining || 1);
           var horizontal = cw >= ch;
           var rw, rh;
           if (horizontal) { rw = Math.round(frac * cw); rh = ch; }
-          else             { rh = Math.round(frac * ch); rw = cw; }
+          else { rh = Math.round(frac * ch); rw = cw; }
           results.push({ node: n, x: cx, y: cy, w: rw, h: rh });
           if (horizontal) { cx += rw; cw -= rw; }
-          else            { cy += rh; ch -= rh; }
+          else { cy += rh; ch -= rh; }
           remaining -= sz;
         });
         return results;
@@ -5274,16 +5334,16 @@
         var tbody = tbl.querySelector('tbody'); if (!tbody) return;
         tbody.innerHTML = '';
         if (!data || !data.children) return;
-        var items = data.children.slice().sort(function(a,b){ return (b.size||0)-(a.size||0); }).slice(0,10);
-        var maxSz = items.length ? (items[0].size||1) : 1;
-        items.forEach(function(item, i) {
-          var pct = Math.round((item.size||0)/maxSz*100);
+        var items = data.children.slice().sort(function (a, b) { return (b.size || 0) - (a.size || 0); }).slice(0, 10);
+        var maxSz = items.length ? (items[0].size || 1) : 1;
+        items.forEach(function (item, i) {
+          var pct = Math.round((item.size || 0) / maxSz * 100);
           var tr = document.createElement('tr');
           tr.innerHTML =
-            '<td class="smo-top-num">'+(i+1)+'</td>'+
-            '<td class="smo-top-name" title="'+item.name+'">'+item.name+'</td>'+
-            '<td class="smo-top-size">'+smoBytes(item.size||0)+'</td>'+
-            '<td class="smo-top-bar"><div class="smo-top-bar-inner" style="width:'+pct+'%"></div></td>';
+            '<td class="smo-top-num">' + (i + 1) + '</td>' +
+            '<td class="smo-top-name" title="' + item.name + '">' + item.name + '</td>' +
+            '<td class="smo-top-size">' + smoBytes(item.size || 0) + '</td>' +
+            '<td class="smo-top-bar"><div class="smo-top-bar-inner" style="width:' + pct + '%"></div></td>';
           tbody.appendChild(tr);
         });
       }
@@ -5291,9 +5351,9 @@
       /* ══ TAB 3: PROCESSES ═══════════════════════════════════════ */
       function smoFetchProcs() {
         fetch('/api/processes')
-          .then(function(r){ return r.ok ? r.json() : Promise.reject(r.status); })
+          .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
           .then(smoUpdateProcs)
-          .catch(function() {});
+          .catch(function () { });
       }
 
       function smoUpdateProcs(arr) {
@@ -5305,17 +5365,17 @@
 
       function smoRenderProcs() {
         var q = _procQuery.toLowerCase();
-        var filtered = _procs.filter(function(p) {
-          return !q || (p.name||'').toLowerCase().indexOf(q) >= 0;
+        var filtered = _procs.filter(function (p) {
+          return !q || (p.name || '').toLowerCase().indexOf(q) >= 0;
         });
 
         /* Sort */
-        filtered.sort(function(a, b) {
+        filtered.sort(function (a, b) {
           var av = a[_procSort], bv = b[_procSort];
           if (typeof av === 'number' && typeof bv === 'number') {
-            return _procSortAsc ? av-bv : bv-av;
+            return _procSortAsc ? av - bv : bv - av;
           }
-          av = String(av||''); bv = String(bv||'');
+          av = String(av || ''); bv = String(bv || '');
           return _procSortAsc ? av.localeCompare(bv) : bv.localeCompare(av);
         });
 
@@ -5324,42 +5384,42 @@
         var tbody = smo$('smo-proc-tbody'); if (!tbody) return;
         tbody.innerHTML = '';
         var slice = filtered.slice(0, _procOffset + 20);
-        slice.forEach(function(p) {
-          var hot = (p.cpu||0) > 80 || (p.mem_mb||0) > 500;
+        slice.forEach(function (p) {
+          var hot = (p.cpu || 0) > 80 || (p.mem_mb || 0) > 500;
           var status = p.status || 'running';
           var statusCls = status === 'zombie' ? 'smo-status-zombie' : status === 'sleep' ? 'smo-status-sleep' : 'smo-status-running';
           var tr = document.createElement('tr');
           if (hot) tr.className = 'smo-row-hot';
-          var cpuCls = (p.cpu||0) > 80 ? ' hot' : '';
+          var cpuCls = (p.cpu || 0) > 80 ? ' hot' : '';
 
           /* Action badge */
           var actionHtml;
           if (status === 'zombie') {
             actionHtml = '<span class="smo-badge smo-badge-zmb">⚠ ZMB</span>';
           } else if (p.killable) {
-            actionHtml = '<button class="smo-badge smo-badge-kill" data-pid="'+p.pid+'" data-name="'+(p.name||'')
-              +'" data-user="'+(p.user||'')+'">Kill ✕</button>';
+            actionHtml = '<button class="smo-badge smo-badge-kill" data-pid="' + p.pid + '" data-name="' + (p.name || '')
+              + '" data-user="' + (p.user || '') + '">Kill ✕</button>';
           } else {
             actionHtml = '<span class="smo-badge smo-badge-sys">🔒 SYS</span>';
           }
 
           tr.innerHTML =
-            '<td class="smo-pid">'+p.pid+'</td>'+
-            '<td class="smo-name" title="'+(p.name||'')+'">'+( (p.name||'') )+'</td>'+
-            '<td class="smo-user">'+(p.user||'—')+'</td>'+
-            '<td class="smo-cpu'+cpuCls+'">'+(p.cpu!=null?p.cpu.toFixed(1)+'%':'—')+'</td>'+
-            '<td class="smo-mem">'+(p.mem_mb!=null?p.mem_mb+' MB':'—')+'</td>'+
-            '<td class="smo-stat"><span class="'+statusCls+'">'+status+'</span></td>'+
-            '<td class="smo-act">'+actionHtml+'</td>';
+            '<td class="smo-pid">' + p.pid + '</td>' +
+            '<td class="smo-name" title="' + (p.name || '') + '">' + ((p.name || '')) + '</td>' +
+            '<td class="smo-user">' + (p.user || '—') + '</td>' +
+            '<td class="smo-cpu' + cpuCls + '">' + (p.cpu != null ? p.cpu.toFixed(1) + '%' : '—') + '</td>' +
+            '<td class="smo-mem">' + (p.mem_mb != null ? p.mem_mb + ' MB' : '—') + '</td>' +
+            '<td class="smo-stat"><span class="' + statusCls + '">' + status + '</span></td>' +
+            '<td class="smo-act">' + actionHtml + '</td>';
 
           tbody.appendChild(tr);
         });
 
         /* Wire kill buttons */
         var btns = tbody.querySelectorAll('.smo-badge-kill');
-        for (var i=0;i<btns.length;i++) {
-          (function(btn) {
-            btn.onclick = function(e) {
+        for (var i = 0; i < btns.length; i++) {
+          (function (btn) {
+            btn.onclick = function (e) {
               e.stopPropagation();
               smoShowKill({ pid: +btn.getAttribute('data-pid'), name: btn.getAttribute('data-name'), user: btn.getAttribute('data-user'), row: btn.closest('tr') });
             };
@@ -5375,7 +5435,7 @@
       function smoShowKill(target) {
         _killTarget = target;
         var kn = smo$('smo-kill-name'); if (kn) kn.textContent = target.name;
-        var kp = smo$('smo-kill-pid');  if (kp) kp.textContent = target.pid;
+        var kp = smo$('smo-kill-pid'); if (kp) kp.textContent = target.pid;
         var ku = smo$('smo-kill-user'); if (ku) ku.textContent = target.user;
         var kov = smo$('smo-kill-overlay'); if (kov) kov.classList.add('on');
       }
@@ -5389,35 +5449,35 @@
         smoHideKill();
         fetch('/api/process/kill', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': (function(){ var m=document.querySelector('meta[name="csrf-token"]'); return m?m.content:''; })() },
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': (function () { var m = document.querySelector('meta[name="csrf-token"]'); return m ? m.content : ''; })() },
           body: JSON.stringify({ pid: tgt.pid })
         })
-        .then(function(r){ return r.json(); })
-        .then(function(d) {
-          if (d && d.success) {
-            smoToast('Process '+tgt.name+' ('+tgt.pid+') terminated', 'ok');
-            /* Animate row removal */
-            if (tgt.row) {
-              tgt.row.classList.add('smo-row-dying');
-              setTimeout(function() { if (tgt.row.parentNode) tgt.row.parentNode.removeChild(tgt.row); }, 320);
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            if (d && d.success) {
+              smoToast('Process ' + tgt.name + ' (' + tgt.pid + ') terminated', 'ok');
+              /* Animate row removal */
+              if (tgt.row) {
+                tgt.row.classList.add('smo-row-dying');
+                setTimeout(function () { if (tgt.row.parentNode) tgt.row.parentNode.removeChild(tgt.row); }, 320);
+              }
+              /* Remove from local list */
+              _procs = _procs.filter(function (p) { return p.pid !== tgt.pid; });
+            } else {
+              smoToast('Error: ' + ((d && d.message) || 'permission denied') + ' for PID ' + tgt.pid, 'er');
             }
-            /* Remove from local list */
-            _procs = _procs.filter(function(p){ return p.pid !== tgt.pid; });
-          } else {
-            smoToast('Error: ' + ((d&&d.message)||'permission denied') + ' for PID '+tgt.pid, 'er');
-          }
-        })
-        .catch(function(e) {
-          smoToast('Kill failed: '+e.message, 'er');
-        });
+          })
+          .catch(function (e) {
+            smoToast('Kill failed: ' + e.message, 'er');
+          });
       }
 
       /* ══ TAB 4: SYSTEM ══════════════════════════════════════════ */
       function smoFetchSystem() {
         fetch('/api/stats/system')
-          .then(function(r){ return r.ok ? r.json() : Promise.reject(r.status); })
+          .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
           .then(smoUpdateSystem)
-          .catch(function() {});
+          .catch(function () { });
       }
 
       function smoUpdateSystem(d) {
@@ -5459,12 +5519,12 @@
         /* Network (optional) */
         if (typeof d.net_up_bps === 'number' && typeof d.net_down_bps === 'number') {
           var nc = smo$('smo-net-card'); if (nc) nc.style.display = '';
-          var nu = smo$('smo-net-up');   if (nu) nu.textContent = smoBps(d.net_up_bps);
+          var nu = smo$('smo-net-up'); if (nu) nu.textContent = smoBps(d.net_up_bps);
           var nd = smo$('smo-net-down'); if (nd) nd.textContent = smoBps(d.net_down_bps);
           _netPeak = Math.max(_netPeak, d.net_up_bps, d.net_down_bps, 1);
-          var nub = smo$('smo-net-up-bar');   if (nub) nub.style.width = Math.min(100, d.net_up_bps/_netPeak*100)+'%';
-          var ndb = smo$('smo-net-down-bar'); if (ndb) ndb.style.width = Math.min(100, d.net_down_bps/_netPeak*100)+'%';
-          if (d.net_iface) { var ni = smo$('smo-net-iface'); if (ni) ni.textContent = 'Interface: '+d.net_iface+(d.net_ip?' — IP: '+d.net_ip:''); }
+          var nub = smo$('smo-net-up-bar'); if (nub) nub.style.width = Math.min(100, d.net_up_bps / _netPeak * 100) + '%';
+          var ndb = smo$('smo-net-down-bar'); if (ndb) ndb.style.width = Math.min(100, d.net_down_bps / _netPeak * 100) + '%';
+          if (d.net_iface) { var ni = smo$('smo-net-iface'); if (ni) ni.textContent = 'Interface: ' + d.net_iface + (d.net_ip ? ' — IP: ' + d.net_ip : ''); }
         }
       }
 
@@ -5479,65 +5539,65 @@
         var N = data.length;
         if (!N) return;
 
-        var pts = data.map(function(v, i) {
-          var x = N < 2 ? W/2 : i/(N-1)*W;
-          var y = H - (Math.min(max, Math.max(min, v)) - min)/range * H;
+        var pts = data.map(function (v, i) {
+          var x = N < 2 ? W / 2 : i / (N - 1) * W;
+          var y = H - (Math.min(max, Math.max(min, v)) - min) / range * H;
           return [x, y];
         });
 
-        var polyline = pts.map(function(p){ return p[0]+','+p[1]; }).join(' ');
+        var polyline = pts.map(function (p) { return p[0] + ',' + p[1]; }).join(' ');
         /* area fill path */
-        var area = 'M'+pts[0][0]+','+H+' L'+polyline+' L'+pts[pts.length-1][0]+','+H+' Z';
+        var area = 'M' + pts[0][0] + ',' + H + ' L' + polyline + ' L' + pts[pts.length - 1][0] + ',' + H + ' Z';
 
         var ns = 'http://www.w3.org/2000/svg';
-        var svg = document.createElementNS(ns,'svg');
-        svg.setAttribute('width',W); svg.setAttribute('height',H);
-        svg.setAttribute('viewBox','0 0 '+W+' '+H);
-        svg.style.display='block';
+        var svg = document.createElementNS(ns, 'svg');
+        svg.setAttribute('width', W); svg.setAttribute('height', H);
+        svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+        svg.style.display = 'block';
 
         /* Grid lines */
-        for (var g=0;g<=4;g++) {
-          var gy = Math.round(H/4*g);
-          var gl = document.createElementNS(ns,'line');
-          gl.setAttribute('x1',0); gl.setAttribute('y1',gy);
-          gl.setAttribute('x2',W); gl.setAttribute('y2',gy);
-          gl.setAttribute('stroke','var(--bd)'); gl.setAttribute('stroke-width','1');
+        for (var g = 0; g <= 4; g++) {
+          var gy = Math.round(H / 4 * g);
+          var gl = document.createElementNS(ns, 'line');
+          gl.setAttribute('x1', 0); gl.setAttribute('y1', gy);
+          gl.setAttribute('x2', W); gl.setAttribute('y2', gy);
+          gl.setAttribute('stroke', 'var(--bd)'); gl.setAttribute('stroke-width', '1');
           svg.appendChild(gl);
         }
 
         /* Area */
-        var pathEl = document.createElementNS(ns,'path');
+        var pathEl = document.createElementNS(ns, 'path');
         pathEl.setAttribute('d', area);
         pathEl.setAttribute('fill', color);
-        pathEl.setAttribute('fill-opacity','0.12');
+        pathEl.setAttribute('fill-opacity', '0.12');
         svg.appendChild(pathEl);
 
         /* Line */
-        var lineEl = document.createElementNS(ns,'polyline');
+        var lineEl = document.createElementNS(ns, 'polyline');
         lineEl.setAttribute('points', polyline);
-        lineEl.setAttribute('fill','none');
+        lineEl.setAttribute('fill', 'none');
         lineEl.setAttribute('stroke', color);
-        lineEl.setAttribute('stroke-width','2');
-        lineEl.setAttribute('stroke-linecap','round');
-        lineEl.setAttribute('stroke-linejoin','round');
+        lineEl.setAttribute('stroke-width', '2');
+        lineEl.setAttribute('stroke-linecap', 'round');
+        lineEl.setAttribute('stroke-linejoin', 'round');
         svg.appendChild(lineEl);
 
         /* Current value dot */
         if (pts.length) {
-          var last = pts[pts.length-1];
-          var dot = document.createElementNS(ns,'circle');
-          dot.setAttribute('cx',last[0]); dot.setAttribute('cy',last[1]); dot.setAttribute('r','3');
+          var last = pts[pts.length - 1];
+          var dot = document.createElementNS(ns, 'circle');
+          dot.setAttribute('cx', last[0]); dot.setAttribute('cy', last[1]); dot.setAttribute('r', '3');
           dot.setAttribute('fill', color);
           svg.appendChild(dot);
         }
 
         /* Y-axis labels */
-        [0,50,100].forEach(function(v) {
-          var ly = H - (v-min)/range*H;
-          var lbl = document.createElementNS(ns,'text');
-          lbl.setAttribute('x',3); lbl.setAttribute('y',ly-2);
-          lbl.setAttribute('font-size','8'); lbl.setAttribute('fill','var(--tx3)');
-          lbl.textContent = v+'%';
+        [0, 50, 100].forEach(function (v) {
+          var ly = H - (v - min) / range * H;
+          var lbl = document.createElementNS(ns, 'text');
+          lbl.setAttribute('x', 3); lbl.setAttribute('y', ly - 2);
+          lbl.setAttribute('font-size', '8'); lbl.setAttribute('fill', 'var(--tx3)');
+          lbl.textContent = v + '%';
           svg.appendChild(lbl);
         });
 
@@ -5546,12 +5606,12 @@
       }
 
       /* ══ Init bindings ══════════════════════════════════════════ */
-      document.addEventListener('DOMContentLoaded', function() {
+      document.addEventListener('DOMContentLoaded', function () {
         /* Tabs */
         var tabs = document.querySelectorAll('.smo-tab');
-        for (var i=0;i<tabs.length;i++) {
-          (function(tab) {
-            tab.onclick = function() { smoSwitchTab(tab.getAttribute('data-tab')); };
+        for (var i = 0; i < tabs.length; i++) {
+          (function (tab) {
+            tab.onclick = function () { smoSwitchTab(tab.getAttribute('data-tab')); };
           }(tabs[i]));
         }
 
@@ -5560,44 +5620,44 @@
 
         /* Overlay click */
         var ov = smo$('smo-overlay');
-        if (ov) ov.addEventListener('click', function(e) { if (e.target === ov) smoClose(); });
+        if (ov) ov.addEventListener('click', function (e) { if (e.target === ov) smoClose(); });
 
         /* Popout */
         var po = smo$('smo-popout');
-        if (po) po.onclick = function() { window.open(location.href+'#sysmon','_blank','width=1100,height=700'); };
+        if (po) po.onclick = function () { window.open(location.href + '#sysmon', '_blank', 'width=1100,height=700'); };
 
         /* Refresh now */
         var rb = smo$('smo-refresh-btn'); if (rb) rb.onclick = smoFetchAll;
 
         /* Process search */
         var pq = smo$('smo-proc-q');
-        if (pq) pq.oninput = function() { _procQuery = this.value; _procOffset=0; smoRenderProcs(); };
+        if (pq) pq.oninput = function () { _procQuery = this.value; _procOffset = 0; smoRenderProcs(); };
 
         /* Process sort select */
         var ps = smo$('smo-proc-sort');
-        if (ps) ps.onchange = function() { _procSort = this.value; _procSortAsc=this.value==='name'; smoRenderProcs(); };
+        if (ps) ps.onchange = function () { _procSort = this.value; _procSortAsc = this.value === 'name'; smoRenderProcs(); };
 
         /* Load more */
         var lm = smo$('smo-proc-more');
-        if (lm) lm.onclick = function() { _procOffset += 20; smoRenderProcs(); };
+        if (lm) lm.onclick = function () { _procOffset += 20; smoRenderProcs(); };
 
         /* Process table header sort */
         var ths = document.querySelectorAll('#smo-proc-table thead th[data-col]');
-        for (var j=0;j<ths.length;j++) {
-          (function(th) {
-            th.onclick = function() {
+        for (var j = 0; j < ths.length; j++) {
+          (function (th) {
+            th.onclick = function () {
               var col = th.getAttribute('data-col');
               if (_procSort === col) { _procSortAsc = !_procSortAsc; }
-              else { _procSort = col; _procSortAsc = col==='name'; }
+              else { _procSort = col; _procSortAsc = col === 'name'; }
               /* update sort select */
               var selEl = smo$('smo-proc-sort');
-              if (selEl && ['cpu','mem_mb','pid','name'].indexOf(col)>=0) selEl.value = col;
+              if (selEl && ['cpu', 'mem_mb', 'pid', 'name'].indexOf(col) >= 0) selEl.value = col;
               /* update header arrows */
               var allThs = document.querySelectorAll('#smo-proc-table thead th');
-              for (var k=0;k<allThs.length;k++) allThs[k].classList.remove('sort-active');
+              for (var k = 0; k < allThs.length; k++) allThs[k].classList.remove('sort-active');
               th.classList.add('sort-active');
-              th.innerHTML = th.textContent.replace(/[▲▼]/g,'').trim()
-                + ' <span style="font-size:9px">' + (_procSortAsc?'▲':'▼') + '</span>';
+              th.innerHTML = th.textContent.replace(/[▲▼]/g, '').trim()
+                + ' <span style="font-size:9px">' + (_procSortAsc ? '▲' : '▼') + '</span>';
               smoRenderProcs();
             };
           }(ths[j]));
@@ -5605,9 +5665,9 @@
 
         /* Kill confirm modal */
         var kc = smo$('smo-kill-cancel'); if (kc) kc.onclick = smoHideKill;
-        var kd = smo$('smo-kill-do');     if (kd) kd.onclick = smoDoKill;
+        var kd = smo$('smo-kill-do'); if (kd) kd.onclick = smoDoKill;
         var kov = smo$('smo-kill-overlay');
-        if (kov) kov.addEventListener('click', function(e){ if (e.target===kov) smoHideKill(); });
+        if (kov) kov.addEventListener('click', function (e) { if (e.target === kov) smoHideKill(); });
       });
 
     }()); /* end IIFE */

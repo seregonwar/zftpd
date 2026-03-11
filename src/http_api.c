@@ -35,11 +35,11 @@ SOFTWARE.
 
 #include "http_api.h"
 #include "ftp_path.h"
-#include "ftp_server.h"    /* ftp_server_context_t — for network reset endpoint */
-#include "pal_network.h"   /* pal_network_reset_ftp_stack() */
-#include "pal_notification.h" /* pal_notification_send() — fallback notify */
+#include "ftp_server.h" /* ftp_server_context_t — for network reset endpoint */
 #include "http_config.h"
 #include "pal_fileio.h"
+#include "pal_network.h"      /* pal_network_reset_ftp_stack() */
+#include "pal_notification.h" /* pal_notification_send() — fallback notify */
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -54,7 +54,7 @@ SOFTWARE.
 #include <sys/statvfs.h>
 #include <sys/time.h>
 #if defined(PLATFORM_PS4) || defined(PLATFORM_PS5) || defined(__FreeBSD__)
-#include <sys/mount.h>  /* fstatfs, struct statfs — for sendfile safety check */
+#include <sys/mount.h> /* fstatfs, struct statfs — for sendfile safety check */
 /* PS4/PS5 libkernel exports _fstatfs, not fstatfs */
 #if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
 extern int _fstatfs(int, struct statfs *);
@@ -118,7 +118,7 @@ static ftp_server_context_t *g_ftp_server_ctx = NULL;
  * @param ctx  Pointer to the initialized FTP server context, or NULL to clear.
  */
 void http_api_set_server_ctx(ftp_server_context_t *ctx) {
-    g_ftp_server_ctx = ctx;
+  g_ftp_server_ctx = ctx;
 }
 
 void http_api_set_root(const char *root) {
@@ -228,6 +228,7 @@ static http_response_t *api_rename(const http_request_t *request);
 static http_response_t *api_copy(const http_request_t *request);
 static http_response_t *api_copy_progress(const http_request_t *request);
 static http_response_t *api_copy_cancel(const http_request_t *request);
+static http_response_t *api_copy_pause(const http_request_t *request);
 #endif
 static http_response_t *api_network_reset(const http_request_t *request);
 static http_response_t *error_json(http_status_t code, const char *message);
@@ -445,9 +446,9 @@ static int get_best_disk_stats(const char *hint_path, const char **out_path,
   uint64_t t = 0U, u = 0U, f = 0U;
   if (get_disk_stats_bytes("/user", &t, &u, &f) == 0) {
     *out_path = "/user";
-    *total    = t;
-    *used     = u;
-    *free_b   = f;
+    *total = t;
+    *used = u;
+    *free_b = f;
     return 0;
   }
   return -1;
@@ -456,11 +457,13 @@ static int get_best_disk_stats(const char *hint_path, const char **out_path,
    * macOS home and /Volumes entries come before PS4 paths. */
   const char *candidates[] = {
 #if defined(PLATFORM_MACOS) || defined(__APPLE__)
-      "/Users", "/",
+      "/Users",
+      "/",
 #elif defined(PLATFORM_PS4) || defined(PS4)
       "/user", "/data", "/system_data", "/mnt/usb0", "/mnt/usb1", "/",
 #else
-      "/home", "/",
+      "/home",
+      "/",
 #endif
       NULL,
   };
@@ -618,8 +621,9 @@ static int get_boot_epoch_seconds(uint64_t *out_epoch) {
   uint64_t up_u = (uint64_t)info.uptime;
   *out_epoch = (now_u >= up_u) ? (now_u - up_u) : 0U;
   return 0;
-#elif defined(PLATFORM_MACOS) || defined(__APPLE__) || defined(PLATFORM_PS4) \
-    || defined(PLATFORM_PS5) || defined(PS4) || defined(PS5)
+#elif defined(PLATFORM_MACOS) || defined(__APPLE__) ||                         \
+    defined(PLATFORM_PS4) || defined(PLATFORM_PS5) || defined(PS4) ||          \
+    defined(PS5)
   struct timeval bt;
   size_t sz = sizeof(bt);
   if (sysctlbyname("kern.boottime", &bt, &sz, NULL, 0) != 0) {
@@ -1040,6 +1044,9 @@ http_response_t *http_api_handle(const http_request_t *request) {
   if (strncmp(request->uri, "/api/copy_cancel", 16) == 0) {
     return api_copy_cancel(request);
   }
+  if (strncmp(request->uri, "/api/copy_pause", 15) == 0) {
+    return api_copy_pause(request);
+  }
   if (strncmp(request->uri, "/api/copy", 9) == 0) {
     return api_copy(request);
   }
@@ -1270,9 +1277,9 @@ static http_response_t *api_download(const http_request_t *request) {
   }
 
   /* Store fd so http_server.c can stream the file content */
-  resp->sendfile_fd     = fd;
+  resp->sendfile_fd = fd;
   resp->sendfile_offset = 0;
-  resp->sendfile_count  = (size_t)st.st_size;
+  resp->sendfile_count = (size_t)st.st_size;
 
   /*
    * SENDFILE SAFETY CHECK — must happen before http_server.c touches the fd.
@@ -1321,10 +1328,8 @@ static http_response_t *api_download(const http_request_t *request) {
        * NOT whitelisted (KP or corrupt data):
        *   exfatfs, msdosfs, nullfs, pfsmnt, pfs
        */
-      if ((strcmp(t, "ufs")   == 0) ||
-          (strcmp(t, "ffs")   == 0) ||
-          (strcmp(t, "tmpfs") == 0) ||
-          (strcmp(t, "zfs")   == 0)) {
+      if ((strcmp(t, "ufs") == 0) || (strcmp(t, "ffs") == 0) ||
+          (strcmp(t, "tmpfs") == 0) || (strcmp(t, "zfs") == 0)) {
         sf_safe = 1;
       }
     }
@@ -1595,8 +1600,9 @@ static http_response_t *api_delete(const http_request_t *request) {
         /* Caller explicitly requested recursive delete — proceed */
         rc = pal_dir_remove_recursive_pub(safe);
         if (rc != FTP_OK) {
-          return error_json(HTTP_STATUS_500_INTERNAL_ERROR,
-                            "Recursive delete failed (permission denied or I/O error)");
+          return error_json(
+              HTTP_STATUS_500_INTERNAL_ERROR,
+              "Recursive delete failed (permission denied or I/O error)");
         }
       } else {
         /*
@@ -1625,7 +1631,8 @@ static http_response_t *api_delete(const http_request_t *request) {
   if (stat(safe, &verify_st) == 0) {
     /* Path still exists — delete operation failed silently */
     return error_json(HTTP_STATUS_500_INTERNAL_ERROR,
-                      "Delete operation failed: path still exists (permission denied or I/O error)");
+                      "Delete operation failed: path still exists (permission "
+                      "denied or I/O error)");
   }
 
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
@@ -1745,11 +1752,12 @@ static http_response_t *api_rename(const http_request_t *request) {
 typedef struct {
   _Atomic uint64_t bytes_copied;
   _Atomic uint64_t total_bytes;
-  _Atomic int active;     /* 1 while copy thread is running  */
-  _Atomic int done;       /* 1 when copy finished             */
-  _Atomic int error;      /* 1 if copy failed                 */
-  _Atomic int cancel;     /* 1 to request cancellation        */
-  _Atomic int error_code; /* ftp_error_t value on failure     */
+  _Atomic int active;      /* 1 while copy thread is running  */
+  _Atomic int done;        /* 1 when copy finished             */
+  _Atomic int error;       /* 1 if copy failed                 */
+  _Atomic int cancel;      /* 1 to request cancellation        */
+  _Atomic int paused;      /* 1 to pause, 0 to resume          */
+  _Atomic int error_code;  /* ftp_error_t value on failure     */
   _Atomic int error_errno; /* errno captured at failure point */
 } copy_progress_t;
 
@@ -1758,6 +1766,16 @@ static copy_progress_t g_copy_progress = {0};
 static int copy_progress_cb(uint64_t bytes_copied, void *user_data) {
   (void)user_data;
   atomic_store(&g_copy_progress.bytes_copied, bytes_copied);
+
+  /* Pause: spin-wait in 100 ms increments while the flag is set.
+   * Check cancel each iteration so the user can abort while paused. */
+  while (atomic_load(&g_copy_progress.paused) != 0) {
+    if (atomic_load(&g_copy_progress.cancel) != 0) {
+      return -1;
+    }
+    usleep(100000); /* 100 ms */
+  }
+
   /* Check cancellation flag — return -1 to abort copy */
   return (atomic_load(&g_copy_progress.cancel) != 0) ? -1 : 0;
 }
@@ -1766,16 +1784,16 @@ static int copy_progress_cb(uint64_t bytes_copied, void *user_data) {
 typedef struct {
   char src[FTP_PATH_MAX];
   char dst[FTP_PATH_MAX];
-  int *out_errno; /* points to g_copy_progress.error_errno storage (unused; errno captured inside) */
+  int *out_errno; /* points to g_copy_progress.error_errno storage (unused;
+                     errno captured inside) */
 } copy_thread_args_t;
 
 static void *copy_thread_fn(void *arg) {
   copy_thread_args_t *a = (copy_thread_args_t *)arg;
 
   int saved_errno = 0;
-  ftp_error_t rc =
-      pal_file_copy_recursive_ex(a->src, a->dst, 1, copy_progress_cb,
-                                 NULL, &saved_errno);
+  ftp_error_t rc = pal_file_copy_recursive_ex(
+      a->src, a->dst, 1, copy_progress_cb, NULL, &saved_errno);
   if ((rc != FTP_OK) || (atomic_load(&g_copy_progress.cancel) != 0)) {
     atomic_store(&g_copy_progress.error, 1);
     atomic_store(&g_copy_progress.error_code, (int)rc);
@@ -1800,14 +1818,18 @@ static http_response_t *api_copy_progress(const http_request_t *request) {
   int err_code = atomic_load(&g_copy_progress.error_code);
   int err_errno = atomic_load(&g_copy_progress.error_errno);
 
+  int is_paused = atomic_load(&g_copy_progress.paused);
+
   char body[320];
   int len =
       snprintf(body, sizeof(body),
-               "{\"active\":%s,\"done\":%s,\"error\":%s,\"error_code\":%d,"
+               "{\"active\":%s,\"done\":%s,\"error\":%s,\"paused\":%s,"
+               "\"error_code\":%d,"
                "\"error_errno\":%d,"
                "\"bytes_copied\":%" PRIu64 ",\"total_bytes\":%" PRIu64 "}",
                active ? "true" : "false", done ? "true" : "false",
-               err ? "true" : "false", err_code, err_errno, copied, total);
+               err ? "true" : "false", is_paused ? "true" : "false", err_code,
+               err_errno, copied, total);
 
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
   http_response_add_header(resp, "Content-Type", "application/json");
@@ -1826,6 +1848,24 @@ static http_response_t *api_copy_cancel(const http_request_t *request) {
   http_response_add_header(resp, "Access-Control-Allow-Origin", "*");
   const char *body = "{\"ok\":true}";
   http_response_set_body(resp, body, strlen(body));
+  return resp;
+}
+
+/*  POST /api/copy_pause — toggle pause/resume  */
+static http_response_t *api_copy_pause(const http_request_t *request) {
+  (void)request;
+  int cur = atomic_load(&g_copy_progress.paused);
+  int next = (cur != 0) ? 0 : 1;
+  atomic_store(&g_copy_progress.paused, next);
+
+  char body[64];
+  int len = snprintf(body, sizeof(body), "{\"ok\":true,\"paused\":%s}",
+                     next ? "true" : "false");
+
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  http_response_add_header(resp, "Content-Type", "application/json");
+  http_response_add_header(resp, "Access-Control-Allow-Origin", "*");
+  http_response_set_body(resp, body, (size_t)len);
   return resp;
 }
 
@@ -2016,6 +2056,7 @@ static http_response_t *api_copy(const http_request_t *request) {
     atomic_store(&g_copy_progress.error_code, 0);
     atomic_store(&g_copy_progress.error_errno, 0);
     atomic_store(&g_copy_progress.cancel, 0);
+    atomic_store(&g_copy_progress.paused, 0);
   }
 
   /* Spawn background copy thread so event loop stays responsive */
@@ -2060,7 +2101,11 @@ static int get_ram_stats(uint64_t *used, uint64_t *cached, uint64_t *buffers,
   if (!used || !cached || !buffers || !free_b || !total) {
     return -1;
   }
-  *used = 0; *cached = 0; *buffers = 0; *free_b = 0; *total = 0;
+  *used = 0;
+  *cached = 0;
+  *buffers = 0;
+  *free_b = 0;
+  *total = 0;
 
 #if defined(HAS_SYSINFO)
   struct sysinfo si;
@@ -2068,12 +2113,13 @@ static int get_ram_stats(uint64_t *used, uint64_t *cached, uint64_t *buffers,
     return -1;
   }
   uint64_t unit = (uint64_t)si.mem_unit;
-  *total   = (uint64_t)si.totalram   * unit;
-  *free_b  = (uint64_t)si.freeram    * unit;
-  *buffers = (uint64_t)si.bufferram  * unit;
-  *cached  = 0; /* not in sysinfo; /proc/meminfo would give it */
-  *used    = (*total > *free_b + *buffers + *cached)
-               ? (*total - *free_b - *buffers - *cached) : 0U;
+  *total = (uint64_t)si.totalram * unit;
+  *free_b = (uint64_t)si.freeram * unit;
+  *buffers = (uint64_t)si.bufferram * unit;
+  *cached = 0; /* not in sysinfo; /proc/meminfo would give it */
+  *used = (*total > *free_b + *buffers + *cached)
+              ? (*total - *free_b - *buffers - *cached)
+              : 0U;
   /* Try /proc/meminfo for Cached */
   FILE *fp = fopen("/proc/meminfo", "r");
   if (fp) {
@@ -2114,13 +2160,14 @@ static int get_ram_stats(uint64_t *used, uint64_t *cached, uint64_t *buffers,
     return -1;
   }
 
-  *free_b  = (uint64_t)vmstat.free_count        * (uint64_t)page_sz;
-  *used    = (uint64_t)(vmstat.active_count +
-                        vmstat.wire_count)       * (uint64_t)page_sz;
-  *cached  = (uint64_t)vmstat.inactive_count     * (uint64_t)page_sz;
-  *buffers = (uint64_t)vmstat.speculative_count  * (uint64_t)page_sz;
+  *free_b = (uint64_t)vmstat.free_count * (uint64_t)page_sz;
+  *used =
+      (uint64_t)(vmstat.active_count + vmstat.wire_count) * (uint64_t)page_sz;
+  *cached = (uint64_t)vmstat.inactive_count * (uint64_t)page_sz;
+  *buffers = (uint64_t)vmstat.speculative_count * (uint64_t)page_sz;
   return 0;
-#elif defined(PLATFORM_PS4) || defined(PLATFORM_PS5) || defined(PS4) || defined(PS5)
+#elif defined(PLATFORM_PS4) || defined(PLATFORM_PS5) || defined(PS4) ||        \
+    defined(PS5)
   /* PS4/PS5 FreeBSD-derived kernel */
   uint64_t physmem = 0;
   size_t psz = sizeof(physmem);
@@ -2134,17 +2181,17 @@ static int get_ram_stats(uint64_t *used, uint64_t *cached, uint64_t *buffers,
 
   uint32_t v_free = 0, v_active = 0, v_inactive = 0, v_wire = 0;
   psz = sizeof(v_free);
-  sysctlbyname("vm.stats.vm.v_free_count",     &v_free,     &psz, NULL, 0);
+  sysctlbyname("vm.stats.vm.v_free_count", &v_free, &psz, NULL, 0);
   psz = sizeof(v_active);
-  sysctlbyname("vm.stats.vm.v_active_count",   &v_active,   &psz, NULL, 0);
+  sysctlbyname("vm.stats.vm.v_active_count", &v_active, &psz, NULL, 0);
   psz = sizeof(v_inactive);
   sysctlbyname("vm.stats.vm.v_inactive_count", &v_inactive, &psz, NULL, 0);
   psz = sizeof(v_wire);
-  sysctlbyname("vm.stats.vm.v_wire_count",     &v_wire,     &psz, NULL, 0);
+  sysctlbyname("vm.stats.vm.v_wire_count", &v_wire, &psz, NULL, 0);
 
-  *free_b  = (uint64_t)v_free     * page_sz;
-  *used    = (uint64_t)(v_active + v_wire) * page_sz;
-  *cached  = (uint64_t)v_inactive * page_sz;
+  *free_b = (uint64_t)v_free * page_sz;
+  *used = (uint64_t)(v_active + v_wire) * page_sz;
+  *cached = (uint64_t)v_inactive * page_sz;
   *buffers = 0;
   return 0;
 #else
@@ -2159,9 +2206,10 @@ static http_response_t *api_stats_ram(const http_request_t *request) {
 
   char body[256];
   int len = snprintf(body, sizeof(body),
-    "{\"used\":%" PRIu64 ",\"cached\":%" PRIu64 ",\"buffers\":%" PRIu64
-    ",\"free\":%" PRIu64 ",\"total\":%" PRIu64 "}",
-    used, cached, buffers, free_b, total);
+                     "{\"used\":%" PRIu64 ",\"cached\":%" PRIu64
+                     ",\"buffers\":%" PRIu64 ",\"free\":%" PRIu64
+                     ",\"total\":%" PRIu64 "}",
+                     used, cached, buffers, free_b, total);
 
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
   http_response_add_header(resp, "Content-Type", "application/json");
@@ -2200,8 +2248,8 @@ static http_response_t *api_stats_system(const http_request_t *request) {
 
   pos += (size_t)snprintf(body + pos, cap - pos, "{");
   if (temp_ok == 0) {
-    pos += (size_t)snprintf(body + pos, cap - pos,
-                            "\"cpu_temp\":%" PRId32, temp_c);
+    pos += (size_t)snprintf(body + pos, cap - pos, "\"cpu_temp\":%" PRId32,
+                            temp_c);
   } else {
     pos += (size_t)snprintf(body + pos, cap - pos, "\"cpu_temp\":null");
   }
@@ -2240,8 +2288,9 @@ static http_response_t *api_disk_info(const http_request_t *request) {
   size_t pos = 0;
   size_t cap = sizeof(body);
   pos += (size_t)snprintf(body + pos, cap - pos,
-    "{\"used\":%" PRIu64 ",\"free\":%" PRIu64 ",\"total\":%" PRIu64 ",\"path\":\"",
-    used, free_b, total);
+                          "{\"used\":%" PRIu64 ",\"free\":%" PRIu64
+                          ",\"total\":%" PRIu64 ",\"path\":\"",
+                          used, free_b, total);
   (void)json_escape_append(body, cap, &pos, disk_path ? disk_path : "/");
   pos += (size_t)snprintf(body + pos, cap - pos, "\"}");
 
@@ -2256,7 +2305,8 @@ static http_response_t *api_disk_info(const http_request_t *request) {
  * GET /api/disk/tree?path=X  — Directory tree (1 level deep, with sizes)
  *
  *  RESPONSE: { "name": "dirname", "type": "directory",
- *               "size": N, "children": [ { "name":..., "type":..., "size":... }, ...] }
+ *               "size": N, "children": [ { "name":..., "type":..., "size":...
+ *}, ...] }
  *===========================================================================*/
 
 #define DISK_TREE_MAX_CHILDREN 512
@@ -2349,8 +2399,9 @@ static http_response_t *api_disk_tree(const http_request_t *request) {
     size_t name_start = pos;
     pos += (size_t)snprintf(body + pos, cap - pos, "{\"name\":\"");
     (void)json_escape_append(body, cap, &pos, ent->d_name);
-    pos += (size_t)snprintf(body + pos, cap - pos,
-                            "\",\"type\":\"%s\",\"size\":%" PRIu64 "}", type, sz);
+    pos +=
+        (size_t)snprintf(body + pos, cap - pos,
+                         "\",\"type\":\"%s\",\"size\":%" PRIu64 "}", type, sz);
 
     /* Safety: if we are getting close to buffer limit, stop */
     if (pos + 256 >= cap) {
@@ -2365,8 +2416,8 @@ static http_response_t *api_disk_tree(const http_request_t *request) {
   }
   closedir(dir);
 
-  pos += (size_t)snprintf(body + pos, cap - pos,
-                          "],\"size\":%" PRIu64 "}", dir_total);
+  pos += (size_t)snprintf(body + pos, cap - pos, "],\"size\":%" PRIu64 "}",
+                          dir_total);
 
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
   http_response_add_header(resp, "Content-Type", "application/json");
@@ -2388,8 +2439,8 @@ static http_response_t *api_disk_tree(const http_request_t *request) {
 #include <signal.h>
 
 #if defined(PLATFORM_MACOS) || defined(__APPLE__)
-#include <sys/sysctl.h>
 #include <sys/proc.h>
+#include <sys/sysctl.h>
 #endif
 
 static http_response_t *api_processes(const http_request_t *request) {
@@ -2420,7 +2471,8 @@ static http_response_t *api_processes(const http_request_t *request) {
         for (int i = 0; i < n; i++) {
           struct kinfo_proc *kp = &procs[i];
           pid_t pid = kp->kp_proc.p_pid;
-          if (pid <= 0) continue;
+          if (pid <= 0)
+            continue;
 
           char name[MAXCOMLEN + 1];
           strncpy(name, kp->kp_proc.p_comm, sizeof(name) - 1);
@@ -2430,27 +2482,32 @@ static http_response_t *api_processes(const http_request_t *request) {
 
           /* p_stat: SSLEEP=1, SWAIT=2, SRUN=3, SIDL=4, SZOMB=5, SSTOP=6 */
           const char *status = "running";
-          if (kp->kp_proc.p_stat == 1 || kp->kp_proc.p_stat == 2) status = "sleep";
-          else if (kp->kp_proc.p_stat == 5) status = "zombie";
+          if (kp->kp_proc.p_stat == 1 || kp->kp_proc.p_stat == 2)
+            status = "sleep";
+          else if (kp->kp_proc.p_stat == 5)
+            status = "zombie";
 
           /* RSS from e_vm — not always available, use 0 as fallback */
           uint64_t mem_mb = 0;
 
           int killable = (uid != 0) ? 1 : 0;
 
-          if (!first && pos + 2 < cap) { body[pos++] = ','; }
+          if (!first && pos + 2 < cap) {
+            body[pos++] = ',';
+          }
           first = 0;
 
           pos += (size_t)snprintf(body + pos, cap - pos,
-            "{\"pid\":%d,\"name\":\"", (int)pid);
+                                  "{\"pid\":%d,\"name\":\"", (int)pid);
           (void)json_escape_append(body, cap, &pos, name);
-          pos += (size_t)snprintf(body + pos, cap - pos,
-            "\",\"user\":\"%u\",\"cpu\":0.0,\"mem_mb\":%" PRIu64
-            ",\"status\":\"%s\",\"killable\":%s}",
-            uid, mem_mb, status,
-            killable ? "true" : "false");
+          pos += (size_t)snprintf(
+              body + pos, cap - pos,
+              "\",\"user\":\"%u\",\"cpu\":0.0,\"mem_mb\":%" PRIu64
+              ",\"status\":\"%s\",\"killable\":%s}",
+              uid, mem_mb, status, killable ? "true" : "false");
 
-          if (pos + 512 >= cap) break;
+          if (pos + 512 >= cap)
+            break;
         }
       }
       free(procs);
@@ -2467,17 +2524,23 @@ static http_response_t *api_processes(const http_request_t *request) {
       int pid = 0;
       int is_pid = 1;
       for (const char *c = ent->d_name; *c; c++) {
-        if (*c < '0' || *c > '9') { is_pid = 0; break; }
+        if (*c < '0' || *c > '9') {
+          is_pid = 0;
+          break;
+        }
       }
-      if (!is_pid || ent->d_name[0] == '\0') continue;
+      if (!is_pid || ent->d_name[0] == '\0')
+        continue;
       pid = atoi(ent->d_name);
-      if (pid <= 0) continue;
+      if (pid <= 0)
+        continue;
 
       /* /proc/<pid>/stat */
       char stat_path[64];
       snprintf(stat_path, sizeof(stat_path), "/proc/%d/stat", pid);
       FILE *f = fopen(stat_path, "r");
-      if (!f) continue;
+      if (!f)
+        continue;
 
       char comm[256] = "";
       char state = '?';
@@ -2507,36 +2570,44 @@ static http_response_t *api_processes(const http_request_t *request) {
           /* format: pid (comm) state ppid ... utime stime ... rss */
           char *p = strrchr(tmp, ')');
           if (p) {
-            sscanf(p + 2, " %c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u "
-                          "%*lu %*lu %*d %*d %*d %*d %*d %*d %*u %*u %ld",
+            sscanf(p + 2,
+                   " %c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u "
+                   "%*lu %*lu %*d %*d %*d %*d %*d %*d %*u %*u %ld",
                    &state, &rss);
           }
         }
       }
       fclose(f);
 
-      if (comm[0] == '\0') snprintf(comm, sizeof(comm), "pid%d", pid);
+      if (comm[0] == '\0')
+        snprintf(comm, sizeof(comm), "pid%d", pid);
 
-      uint64_t mem_mb = (uint64_t)((rss > 0 ? rss : 0) * 4096UL / (1024UL * 1024UL));
+      uint64_t mem_mb =
+          (uint64_t)((rss > 0 ? rss : 0) * 4096UL / (1024UL * 1024UL));
       const char *status_str = "running";
-      if (state == 'S' || state == 'D') status_str = "sleep";
-      else if (state == 'Z') status_str = "zombie";
+      if (state == 'S' || state == 'D')
+        status_str = "sleep";
+      else if (state == 'Z')
+        status_str = "zombie";
       double cpu_pct = 0.0; /* snapshot only */
       int killable = (uid != 0) ? 1 : 0;
 
-      if (!first && pos + 2 < cap) { body[pos++] = ','; }
+      if (!first && pos + 2 < cap) {
+        body[pos++] = ',';
+      }
       first = 0;
 
-      pos += (size_t)snprintf(body + pos, cap - pos,
-        "{\"pid\":%d,\"name\":\"", pid);
+      pos += (size_t)snprintf(body + pos, cap - pos, "{\"pid\":%d,\"name\":\"",
+                              pid);
       (void)json_escape_append(body, cap, &pos, comm);
-      pos += (size_t)snprintf(body + pos, cap - pos,
-        "\",\"user\":\"%u\",\"cpu\":%.1f,\"mem_mb\":%" PRIu64
-        ",\"status\":\"%s\",\"killable\":%s}",
-        uid, cpu_pct, mem_mb, status_str,
-        killable ? "true" : "false");
+      pos += (size_t)snprintf(
+          body + pos, cap - pos,
+          "\",\"user\":\"%u\",\"cpu\":%.1f,\"mem_mb\":%" PRIu64
+          ",\"status\":\"%s\",\"killable\":%s}",
+          uid, cpu_pct, mem_mb, status_str, killable ? "true" : "false");
 
-      if (pos + 512 >= cap) break;
+      if (pos + 512 >= cap)
+        break;
     }
     closedir(proc_dir);
   }
@@ -2548,7 +2619,7 @@ static http_response_t *api_processes(const http_request_t *request) {
 
   if (pos + 2 < cap) {
     body[pos++] = ']';
-    body[pos]   = '\0';
+    body[pos] = '\0';
   }
 
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
@@ -2568,15 +2639,21 @@ static http_response_t *api_processes(const http_request_t *request) {
  *===========================================================================*/
 
 static int parse_pid_from_body(const char *body, size_t len, int *out_pid) {
-  if (!body || len == 0 || !out_pid) return -1;
+  if (!body || len == 0 || !out_pid)
+    return -1;
   const char *p = strstr(body, "\"pid\"");
-  if (!p) p = strstr(body, "\"pid\":");
-  if (!p) return -1;
+  if (!p)
+    p = strstr(body, "\"pid\":");
+  if (!p)
+    return -1;
   p += 5; /* skip "pid" */
-  while (*p == ':' || *p == ' ' || *p == '\t') p++;
-  if (*p == '\0') return -1;
+  while (*p == ':' || *p == ' ' || *p == '\t')
+    p++;
+  if (*p == '\0')
+    return -1;
   int v = atoi(p);
-  if (v <= 0) return -1;
+  if (v <= 0)
+    return -1;
   *out_pid = v;
   return 0;
 }
@@ -2584,7 +2661,8 @@ static int parse_pid_from_body(const char *body, size_t len, int *out_pid) {
 static http_response_t *api_process_kill(const http_request_t *request) {
 #if ENABLE_WEB_UPLOAD
   if (http_csrf_validate(request) != 0) {
-    return error_json(HTTP_STATUS_403_FORBIDDEN, "Invalid or missing CSRF token");
+    return error_json(HTTP_STATUS_403_FORBIDDEN,
+                      "Invalid or missing CSRF token");
   }
 #endif
   if (request->method != HTTP_METHOD_POST) {
@@ -2730,57 +2808,57 @@ static http_response_t *error_json(http_status_t code, const char *message) {
  *       pal_network_reset_ftp_stack() is safe to call from any thread
  *       provided no session is in the middle of accept().
  */
-static http_response_t *api_network_reset(const http_request_t *request)
-{
-    if (request == NULL) {
-        return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Null request");
-    }
+static http_response_t *api_network_reset(const http_request_t *request) {
+  if (request == NULL) {
+    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Null request");
+  }
 
-    /* Only POST is accepted */
-    if (request->method != HTTP_METHOD_POST) {
-        return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED,
-                          "Use POST /api/network/reset");
-    }
+  /* Only POST is accepted */
+  if (request->method != HTTP_METHOD_POST) {
+    return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED,
+                      "Use POST /api/network/reset");
+  }
 
-    char body[128];
-    http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
-    if (resp == NULL) {
-        return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "OOM");
-    }
-    http_response_add_header(resp, "Content-Type", "application/json");
-    http_response_add_header(resp, "Cache-Control", "no-store");
+  char body[128];
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  if (resp == NULL) {
+    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "OOM");
+  }
+  http_response_add_header(resp, "Content-Type", "application/json");
+  http_response_add_header(resp, "Cache-Control", "no-store");
 
-    if (g_ftp_server_ctx == NULL) {
-        /*
-         * HTTP server running without an attached FTP context (unlikely in
-         * production, but handle it gracefully).  Send a PAL notification so
-         * the user knows what happened, then return a soft failure.
-         */
-        pal_notification_send("zftpd: network reset unavailable (no FTP ctx)");
-        (void)snprintf(body, sizeof(body),
-                       "{\"ok\":false,\"message\":\"FTP context not attached\"}");
-        http_response_set_body(resp, body, strlen(body));
-        return resp;
-    }
-
-    int rc = pal_network_reset_ftp_stack(g_ftp_server_ctx->sessions,
-                                         FTP_MAX_SESSIONS);
-
-    if (rc == 0) {
-        pal_notification_send("zftpd: network stack reset OK");
-        (void)snprintf(body, sizeof(body),
-                       "{\"ok\":true,\"message\":\"Network stack reset (%u sessions)\"}",
-                       (unsigned)FTP_MAX_SESSIONS);
-    } else {
-        /*
-         * Partial failure (invalid args) — fall back to notification so the
-         * user is still informed, even if the UI reset failed.
-         */
-        pal_notification_send("zftpd: network reset partial failure");
-        (void)snprintf(body, sizeof(body),
-                       "{\"ok\":false,\"message\":\"Reset partial — check logs\"}");
-    }
-
+  if (g_ftp_server_ctx == NULL) {
+    /*
+     * HTTP server running without an attached FTP context (unlikely in
+     * production, but handle it gracefully).  Send a PAL notification so
+     * the user knows what happened, then return a soft failure.
+     */
+    pal_notification_send("zftpd: network reset unavailable (no FTP ctx)");
+    (void)snprintf(body, sizeof(body),
+                   "{\"ok\":false,\"message\":\"FTP context not attached\"}");
     http_response_set_body(resp, body, strlen(body));
     return resp;
+  }
+
+  int rc =
+      pal_network_reset_ftp_stack(g_ftp_server_ctx->sessions, FTP_MAX_SESSIONS);
+
+  if (rc == 0) {
+    pal_notification_send("zftpd: network stack reset OK");
+    (void)snprintf(
+        body, sizeof(body),
+        "{\"ok\":true,\"message\":\"Network stack reset (%u sessions)\"}",
+        (unsigned)FTP_MAX_SESSIONS);
+  } else {
+    /*
+     * Partial failure (invalid args) — fall back to notification so the
+     * user is still informed, even if the UI reset failed.
+     */
+    pal_notification_send("zftpd: network reset partial failure");
+    (void)snprintf(body, sizeof(body),
+                   "{\"ok\":false,\"message\":\"Reset partial — check logs\"}");
+  }
+
+  http_response_set_body(resp, body, strlen(body));
+  return resp;
 }

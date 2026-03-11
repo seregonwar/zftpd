@@ -208,6 +208,11 @@ SOURCES += src/ftp_log.c
 SOURCES += src/ftp_crypto.c
 SOURCES += src/main.c
 
+# PS5-specific modules
+ifeq ($(TARGET),ps5)
+SOURCES += src/ps5_net_filter.c
+endif
+
 #============================================================================
 # ZHTTPD (Web File Explorer) — compile-time toggle
 # Enabled by default on consoles (PS4/PS5), disabled on PC
@@ -273,6 +278,68 @@ DEPENDS := $(patsubst $(OBJ_DIR)/%.o,$(DEP_DIR)/%.d,$(OBJECTS))
 
 .PHONY: all clean distclean install test help bin deploy deploy-i deploy-nc doctor-ps4
 .PHONY: all-platforms release-all debug-all ffi ffi-java ffi-rust ffi-python resources
+.PHONY: ps5-hook-blob
+
+# ============================================================================
+# PS5 NET FILTER HOOK — Kernel-safe compilation pipeline
+#
+# The hook functions (src/ps5_net_filter_hook.c) run in ring-0 (kernel mode)
+# and require special compiler flags that differ from the normal build.
+#
+# Pipeline:
+#   1. Compile hook with kernel-safe flags → ps5_net_filter_hook.o
+#   2. Extract .text.hook_connect and .text.hook_sendto sections → .bin
+#   3. Generate C byte-array header → ps5_net_filter_hook_blob.h
+#
+# The blob header is included by ps5_net_filter.c to replace the placeholder
+# byte arrays (g_hook_connect_code[], g_hook_sendto_code[]).
+#
+# Run manually before the PS5 build:
+#   make ps5-hook-blob
+# ============================================================================
+
+ifeq ($(TARGET),ps5)
+
+HOOK_OBJ      := $(OBJ_DIR)/ps5_net_filter_hook.o
+HOOK_BIN      := $(OBJ_DIR)/ps5_net_filter_hook.bin
+HOOK_BLOB_H   := src/ps5_net_filter_hook_blob.h
+
+# Kernel-safe compiler flags (MUST differ from normal CFLAGS)
+HOOK_CFLAGS   := \
+    -DPS5_HOOK_BUILD \
+    -DPLATFORM_PS5 \
+    -std=c11 \
+    -O2 \
+    -fno-stack-protector \
+    -mno-red-zone \
+    -fPIC \
+    -mcmodel=large \
+    -fno-plt \
+    -fno-common \
+    -fno-builtin \
+    -fno-exceptions \
+    -fomit-frame-pointer \
+    -I include/
+
+ps5-hook-blob: $(HOOK_BLOB_H)
+	@echo "  [BLOB] $< generated ($(shell wc -c < $(HOOK_BIN) 2>/dev/null || echo '?') bytes)"
+
+$(HOOK_BLOB_H): $(HOOK_BIN)
+	@echo "  [XXD]  $@"
+	@xxd -i $< > $@
+
+$(HOOK_BIN): $(HOOK_OBJ)
+	@echo "  [OBJCOPY] $@"
+	@$(OBJCOPY) -O binary \
+	    --only-section=.text.hook_connect \
+	    --only-section=.text.hook_sendto \
+	    $< $@
+
+$(HOOK_OBJ): src/ps5_net_filter_hook.c | $(OBJ_DIR)
+	@echo "  [HOOK-CC] $<"
+	@$(CC) $(HOOK_CFLAGS) -c $< -o $@
+
+endif # TARGET=ps5
 
 resources:
 	@echo "  [GEN] src/http_resources.c"

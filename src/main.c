@@ -41,6 +41,7 @@ SOFTWARE.
 #include "pal_notification.h"
 #include <errno.h>
 #include <getopt.h>
+#include <inttypes.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -383,6 +384,7 @@ int main(void) {
 #elif defined(PLATFORM_PS5)
 
 #include <ps5/kernel.h>
+#include "ps5_net_filter.h"
 
 /**
  * @brief Escalate privileges and spoof AuthID to bypass PPR
@@ -466,6 +468,35 @@ int main(void) {
 
   /* Apply kernel patches/jailbreak immediately */
   ps5_jailbreak();
+
+  /*
+   * Install outbound connection filter.
+   *
+   * PURPOSE: Sony system daemons (ScePatchChecker, PFAuthClient, etc.)
+   * enter aggressive retry loops when their servers are unreachable via
+   * DNS blocking.  Each retry generates real packets that saturate the
+   * available bandwidth, reducing FTP transfer throughput by up to 40%.
+   *
+   * This filter intercepts connect(2) and sendto(2) at the kernel sysent
+   * level and returns ENETUNREACH immediately for connections to known
+   * Sony CDN/PSN IP ranges.  The daemons interpret this as a local hardware
+   * error and cease retrying — no packets are generated.
+   *
+   * FAILURE IS NON-FATAL: if install fails (unsupported firmware, kernel
+   * write error, etc.) we log a warning and continue.  The FTP server
+   * operates normally; bandwidth saturation will continue to occur.
+   */
+  {
+    ps5_net_filter_config_t filter_cfg = PS5_NET_FILTER_CONFIG_DEFAULT;
+    int filter_rc = ps5_net_filter_install(&filter_cfg);
+
+    if (filter_rc == PS5_NET_FILTER_OK) {
+      printf("[zftpd - ps5] Net filter: installed (Sony retry suppression active)\n");
+    } else {
+      printf("[zftpd - ps5] Net filter: not installed (%s) — FTP will still work\n",
+             ps5_net_filter_strerror(filter_rc));
+    }
+  }
 
   install_signal_handlers();
 
@@ -564,10 +595,39 @@ int main(void) {
       if (active > 0U) {
         printf("[zftpd - ps5] Active sessions: %u\n", active);
       }
+
+      /* Log net filter statistics every 60 seconds if active */
+      if (ps5_net_filter_is_active()) {
+        ps5_net_filter_stats_t fstats;
+        if (ps5_net_filter_get_stats(&fstats) == PS5_NET_FILTER_OK) {
+          printf("[net_filter] calls=%" PRIu64 " blocked=%" PRIu64
+                 " self=%" PRIu64 " local=%" PRIu64 " other=%" PRIu64 "\n",
+                 fstats.hook_calls_total,
+                 fstats.blocked_total,
+                 fstats.allowed_self,
+                 fstats.allowed_local,
+                 fstats.allowed_other);
+        }
+      }
     }
   }
 
   printf("\n[zftpd - ps5] Shutting down...\n");
+
+  /* Uninstall net filter before tearing down the server.
+   * CRITICAL: must happen before exit — the hook page is freed here.
+   * If the payload exits with the sysent still patched, the kernel
+   * will jump to freed memory on the next connect() syscall. */
+  if (ps5_net_filter_is_active()) {
+    int urc = ps5_net_filter_uninstall();
+    if (urc != PS5_NET_FILTER_OK) {
+      printf("[zftpd - ps5] WARNING: net filter uninstall failed: %s\n",
+             ps5_net_filter_strerror(urc));
+      /* Log but continue shutdown — we've done our best. */
+    } else {
+      printf("[zftpd - ps5] Net filter: uninstalled\n");
+    }
+  }
 
 #if ENABLE_ZHTTPD
   if (g_event_loop != NULL) {
