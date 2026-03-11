@@ -4127,33 +4127,48 @@
 
     /* ── LAZY DIR SIZES ── */
     var _dirSizeToken = 0;
+    /**
+     * Fetch directory sizes with concurrency limit (max 2 parallel)
+     * to avoid overwhelming the server on deep USB/exFAT trees.
+     * Stops if the user navigates away (stale token check).
+     * Partial sizes (server hit time/entry budget) shown with ~ prefix.
+     */
+    var DIR_SIZE_CONCURRENCY = 2;
     function fetchDirSizes(dirs, token) {
       if (!dirs || !dirs.length) return;
-      dirs.forEach(function (entry) {
-        var p = join(entry.name);
-        /* Show loading spinner while fetching size */
-        var els = D.querySelectorAll('[data-dirpath="' + p.replace(/"/g, '\\"') + '"]');
-        for (var j = 0; j < els.length; j++) { els[j].textContent = '⟳'; els[j].style.opacity = '0.6'; }
+      var idx = 0, active = 0;
 
-        fetch('/api/dirsize?path=' + E(p))
-          .then(function (r) { return r.ok ? r.json() : null })
-          .then(function (d) {
-            if (!d || typeof d.size !== 'number') return;
-            if (token !== _dirSizeToken) return; /* stale render */
-            /* patch in-memory entry so sendTo() gets the real size */
-            for (var i = 0; i < S.entries.length; i++) {
-              if (S.entries[i].name === entry.name) { S.entries[i].size = d.size; break; }
-            }
-            /* update every size label for this path */
-            var els = D.querySelectorAll('[data-dirpath="' + p.replace(/"/g, '\\"') + '"]');
-            for (var j = 0; j < els.length; j++) { els[j].textContent = bytes(d.size); els[j].style.opacity = '1'; }
-          })
-          .catch(function () {
-            /* On error, show "—" instead of spinner */
-            var els = D.querySelectorAll('[data-dirpath="' + p.replace(/"/g, '\\"') + '"]');
-            for (var j = 0; j < els.length; j++) { els[j].textContent = '—'; els[j].style.opacity = '1'; }
-          });
-      });
+      function next() {
+        while (active < DIR_SIZE_CONCURRENCY && idx < dirs.length) {
+          if (token !== _dirSizeToken) return;
+          (function (entry) {
+            var p = join(entry.name);
+            var sel = '[data-dirpath="' + p.replace(/"/g, '\\"') + '"]';
+            var els = D.querySelectorAll(sel);
+            for (var j = 0; j < els.length; j++) { els[j].textContent = '\u27F3'; els[j].style.opacity = '0.6'; }
+
+            active++;
+            fetch('/api/dirsize?path=' + E(p))
+              .then(function (r) { return r.ok ? r.json() : null })
+              .then(function (d) {
+                if (!d || typeof d.size !== 'number') return;
+                if (token !== _dirSizeToken) return;
+                for (var i = 0; i < S.entries.length; i++) {
+                  if (S.entries[i].name === entry.name) { S.entries[i].size = d.size; break; }
+                }
+                var label = d.partial ? ('~' + bytes(d.size)) : bytes(d.size);
+                var els2 = D.querySelectorAll(sel);
+                for (var j = 0; j < els2.length; j++) { els2[j].textContent = label; els2[j].style.opacity = '1'; }
+              })
+              .catch(function () {
+                var els3 = D.querySelectorAll(sel);
+                for (var j = 0; j < els3.length; j++) { els3[j].textContent = '\u2014'; els3[j].style.opacity = '1'; }
+              })
+              .then(function () { active--; next(); });
+          })(dirs[idx++]);
+        }
+      }
+      next();
     }
 
     /* ── CACHE HELPERS ── */

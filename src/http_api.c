@@ -547,14 +547,59 @@ static int count_dir_items(const char *path, uint32_t *out_count) {
 /**
  * @brief Recursively sum the size of all regular files under a directory.
  *
- * @param path   Absolute path to the directory.
- * @param depth  Current recursion depth (call with 0).
- * @return       Total bytes of all regular files, or 0 on error.
+ * Uses a shared context to enforce:
+ *   - Time budget  (DIR_SIZE_TIMEOUT_MS) — bail out after ~200 ms
+ *   - Entry limit  (DIR_SIZE_MAX_ENTRIES) — bail after 10 000 stat() calls
+ *   - Depth limit  (DIR_SIZE_MAX_DEPTH)   — max 8 levels deep
+ *
+ * On slow USB/exFAT media with deeply nested trees the scan returns
+ * a partial result instead of blocking the HTTP server for seconds.
+ *
+ *   ┌──────────────────────────────────────────────┐
+ *   │  200 ms budget ──► partial=true, ~size       │
+ *   │  10 000 entries ──► partial=true, ~size      │
+ *   │  depth > 8      ──► skip subtree             │
+ *   │  otherwise      ──► full scan, partial=false │
+ *   └──────────────────────────────────────────────┘
  */
-#define DIR_SIZE_MAX_DEPTH 32
+#define DIR_SIZE_MAX_DEPTH    8
+#define DIR_SIZE_MAX_ENTRIES  10000
+#define DIR_SIZE_TIMEOUT_MS   200
 
-uint64_t http_dir_size_recursive(const char *path, int depth) {
+typedef struct {
+  struct timeval deadline;  /* absolute wallclock deadline */
+  uint32_t      entries;   /* stat() calls so far         */
+  int           partial;   /* set to 1 if limits exceeded */
+} dir_size_ctx_t;
+
+/* Return 1 if the context limits have been exceeded. */
+static int dir_size_exceeded(dir_size_ctx_t *ctx) {
+  if (ctx->partial) {
+    return 1;
+  }
+  if (ctx->entries >= DIR_SIZE_MAX_ENTRIES) {
+    ctx->partial = 1;
+    return 1;
+  }
+  /* Check clock every 64 entries to minimise gettimeofday overhead */
+  if ((ctx->entries & 63U) == 0U) {
+    struct timeval now;
+    gettimeofday(&now, NULL);
+    if ((now.tv_sec > ctx->deadline.tv_sec) ||
+        (now.tv_sec == ctx->deadline.tv_sec &&
+         now.tv_usec >= ctx->deadline.tv_usec)) {
+      ctx->partial = 1;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static uint64_t dir_size_walk(const char *path, int depth, dir_size_ctx_t *ctx) {
   if ((path == NULL) || (depth > DIR_SIZE_MAX_DEPTH)) {
+    return 0U;
+  }
+  if (dir_size_exceeded(ctx)) {
     return 0U;
   }
 
@@ -566,6 +611,10 @@ uint64_t http_dir_size_recursive(const char *path, int depth) {
   uint64_t total = 0U;
 
   for (;;) {
+    if (dir_size_exceeded(ctx)) {
+      break;
+    }
+
     errno = 0;
     struct dirent *ent = readdir(dir);
     if (ent == NULL) {
@@ -590,17 +639,54 @@ uint64_t http_dir_size_recursive(const char *path, int depth) {
     if (lstat(child, &st) != 0) {
       continue;
     }
+    ctx->entries++;
 
     if (S_ISREG(st.st_mode)) {
       total += (uint64_t)st.st_blocks * 512U;
     } else if (S_ISDIR(st.st_mode)) {
-      total += http_dir_size_recursive(child, depth + 1);
+      total += dir_size_walk(child, depth + 1, ctx);
     }
     /* skip symlinks, devices, etc. */
   }
 
   closedir(dir);
   return total;
+}
+
+uint64_t http_dir_size_recursive(const char *path, int depth) {
+  dir_size_ctx_t ctx;
+  gettimeofday(&ctx.deadline, NULL);
+  ctx.deadline.tv_usec += DIR_SIZE_TIMEOUT_MS * 1000;
+  if (ctx.deadline.tv_usec >= 1000000) {
+    ctx.deadline.tv_sec  += ctx.deadline.tv_usec / 1000000;
+    ctx.deadline.tv_usec  = ctx.deadline.tv_usec % 1000000;
+  }
+  ctx.entries = 0;
+  ctx.partial = 0;
+
+  return dir_size_walk(path, depth, &ctx);
+}
+
+/**
+ * @brief Same as http_dir_size_recursive but also reports whether
+ *        the scan was truncated by the time/entry budget.
+ */
+static uint64_t http_dir_size_with_partial(const char *path, int *out_partial) {
+  dir_size_ctx_t ctx;
+  gettimeofday(&ctx.deadline, NULL);
+  ctx.deadline.tv_usec += DIR_SIZE_TIMEOUT_MS * 1000;
+  if (ctx.deadline.tv_usec >= 1000000) {
+    ctx.deadline.tv_sec  += ctx.deadline.tv_usec / 1000000;
+    ctx.deadline.tv_usec  = ctx.deadline.tv_usec % 1000000;
+  }
+  ctx.entries = 0;
+  ctx.partial = 0;
+
+  uint64_t sz = dir_size_walk(path, 0, &ctx);
+  if (out_partial != NULL) {
+    *out_partial = ctx.partial;
+  }
+  return sz;
 }
 
 static int get_boot_epoch_seconds(uint64_t *out_epoch) {
@@ -1168,7 +1254,8 @@ static http_response_t *api_dirsize(const http_request_t *request) {
     return error_json(HTTP_STATUS_400_BAD_REQUEST, "Not a directory");
   }
 
-  uint64_t sz = http_dir_size_recursive(safe, 0);
+  int partial = 0;
+  uint64_t sz = http_dir_size_with_partial(safe, &partial);
 
   char body[256];
   size_t pos = 0;
@@ -1178,7 +1265,9 @@ static http_response_t *api_dirsize(const http_request_t *request) {
       json_escape_append(body, cap, &pos, path) != 0 ||
       buf_append_cstr(body, cap, &pos, "\",\"size\":") != 0 ||
       buf_append_u64(body, cap, &pos, sz) != 0 ||
-      buf_append_cstr(body, cap, &pos, "}") != 0) {
+      buf_append_cstr(body, cap, &pos,
+                      partial ? ",\"partial\":true}"
+                              : ",\"partial\":false}") != 0) {
     return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
   }
 
