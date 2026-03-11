@@ -629,17 +629,23 @@
       display: block
     }
 
+    .theme-switcher {
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+
     .theme-select-mobile {
       display: none;
       background: var(--sf2);
       color: var(--tx);
       border: 1px solid var(--bd);
       border-radius: 8px;
-      padding: 8px 32px 8px 12px;
-      font-size: 13px;
+      padding: 6px 28px 6px 10px;
+      font-size: 12px;
       font-family: 'JetBrains Mono', monospace;
       appearance: none;
-      width: 160px;
+      width: 120px;
     }
 
     .theme-select-mobile:focus {
@@ -654,6 +660,10 @@
 
       .theme-select-mobile {
         display: block;
+      }
+
+      .theme-switcher {
+        margin-left: auto;
       }
     }
 
@@ -3262,7 +3272,7 @@
         </div>
       </div>
       <!-- Theme dropdown -->
-      <div style="position:relative">
+      <div class="theme-switcher">
         <button class="theme-btn" id="theme-btn" type="button">
           <span class="t-swatch" id="t-sw" style="background:#2b8cff"></span>
           <span id="t-nm">PS5</span>
@@ -3895,6 +3905,23 @@
     function extOf(n) { if (!n || typeof n !== 'string') return ''; var p = n.split('.'); return p.length < 2 ? '' : p[p.length - 1].toLowerCase() }
 
     /* ── STATUS / TOAST ── */
+    var _transferActive = 0;
+    function setTransferActive(active) {
+      _transferActive = active ? 1 : 0;
+      if (_transferActive) {
+        window.onbeforeunload = function () { return 'Transfer in progress'; };
+      } else {
+        window.onbeforeunload = null;
+      }
+    }
+    function ensureTransferIdle(action) {
+      if (_transferActive) {
+        toast('Wait until the transfer is complete', 'wn');
+        if (typeof action === 'function') action();
+        return false;
+      }
+      return true;
+    }
     function setStatus(t, ok) { var x = $('status'); if (!x) return; x.innerHTML = '<span class="sdot"></span>' + t; x.className = 'status-pill ' + (ok ? 'status-ok' : 'status-bad') }
     var _nt = null;
     function toast(m, t) { var o = D.querySelector('.toast'); if (o) o.remove(); var el = D.createElement('div'); el.className = 'toast ' + (t || ''); el.textContent = (t === 'ok' ? '✓ ' : t === 'er' ? '✕ ' : '') + m; D.body.appendChild(el); clearTimeout(_nt); _nt = setTimeout(function () { if (el.parentNode) el.remove() }, 3000) }
@@ -4210,6 +4237,7 @@
 
     /* ── NAVIGATE ── */
     function nav(path) {
+      if (_transferActive) { toast('Wait until the transfer is complete', 'wn'); return; }
       if (typeof path !== 'string') return;
       var prev = S.path, next = norm(path);
       var fl = $('file-list');
@@ -4276,6 +4304,8 @@
     /* ── UPLOAD (with transfer card, parallel) ── */
     function upload(files) {
       if (!files || !files.length) return;
+      if (!ensureTransferIdle()) return;
+      setTransferActive(true);
       var arr = Array.prototype.slice.call(files);
       var totalSize = 0, totalLoaded = 0;
       for (var i = 0; i < arr.length; i++) { totalSize += arr[i].size; }
@@ -4326,7 +4356,7 @@
             xferCardDone(card);
             completed++;
             if (completed === arr.length) {
-              hideDrop(); invalidateCache(S.path); nav(S.path); toast('Uploaded ' + arr.length + ' file(s)', 'ok');
+              hideDrop(); invalidateCache(S.path); setTransferActive(false); nav(S.path); toast('Uploaded ' + arr.length + ' file(s)', 'ok');
             } else {
               startNextUpload();
             }
@@ -4336,14 +4366,14 @@
               var resp = JSON.parse(xhr.responseText);
               if (resp && resp.error) errMsg = resp.error;
             } catch (e) { }
-            setStatus('Error', false); toast('Upload failed: ' + errMsg + ' (' + relPath + ')', 'er');
+            setStatus('Error', false); setTransferActive(false); toast('Upload failed: ' + errMsg + ' (' + relPath + ')', 'er');
             xferCardDone(card); setTimeout(hideDrop, 800);
           }
         };
         
         xhr.onerror = function () {
           activeUploads--;
-          setStatus('Error', false); toast('Upload failed: Network error (' + relPath + ')', 'er');
+          setStatus('Error', false); setTransferActive(false); toast('Upload failed: Network error (' + relPath + ')', 'er');
           xferCardDone(card); setTimeout(hideDrop, 800);
         };
         
@@ -4531,6 +4561,7 @@
     /* Execute the move */
     function sendTo() {
       if (!_smSrc) return;
+      if (!ensureTransferIdle()) return;
       var src = _smSrc.srcPath;
       var destDir = _smPath;
       var name = _smSrc.entry.name;
@@ -4541,6 +4572,7 @@
       /* Save data BEFORE closing the modal (which nullifies _smSrc) */
       var card = xferCardCreate('COPYING\u2026', name, totalBytes);
       hideSendToModal();
+      setTransferActive(true);
 
       var startT = Date.now();
 
@@ -4569,6 +4601,7 @@
                   clearInterval(pollTimer);
                   if (d.error) {
                     xferCardDone(card);
+                    setTransferActive(false);
                     var errReason = (function(c, en) {
                       var m = { '-2':'Out of memory', '-10':'Cannot open file', '-11':'Read error (USB)',
                                 '-12':'Write error', '-13':'Stat failed', '-14':'Cannot open dir',
@@ -4589,6 +4622,7 @@
                     xferCardDone(card);
                     invalidateCache(S.path);
                     invalidateCache(destDir);
+                    setTransferActive(false);
                     nav(S.path); toast('Copied: ' + name, 'ok');
                   }
                   return;
@@ -4605,6 +4639,7 @@
         })
         .catch(function (e) {
           xferCardDone(card);
+          setTransferActive(false);
           toast('Copy failed: ' + e.message, 'er');
         });
     }
