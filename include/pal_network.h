@@ -397,3 +397,28 @@ ftp_error_t pal_make_sockaddr(const char *ip, uint16_t port,
                               struct sockaddr_in *addr);
 
 #endif /* PAL_NETWORK_H */
+
+/*===========================================================================*
+ * NETWORK STACK RESET (Issues #3, #4, #7)
+ *===========================================================================*/
+
+#include "ftp_types.h"
+#include <stddef.h>
+
+/**
+ * @brief Reset TCP buffer accounting for idle FTP sessions.
+ *
+ * Flushes kernel SO_SNDBUF / SO_RCVBUF accounting and closes orphaned data
+ * sockets.  Addresses progressive throughput degradation after large transfers
+ * to the internal SSD or M.2 on PS4/PS5.
+ *
+ * @param sessions  Pointer to the server session pool (ftp_server_context_t.sessions)
+ * @param count     Pool size (FTP_MAX_SESSIONS)
+ *
+ * @return 0 on success, -1 if sessions/count invalid
+ *
+ * @note Thread-safety: Do NOT call while a session is mid-accept.
+ *       Safe to call from the HTTP API handler thread.
+ * @note Does NOT interrupt active (TRANSFERRING) sessions.
+ */
+int pal_network_reset_ftp_stack(ftp_session_t *sessions, size_t count);

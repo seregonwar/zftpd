@@ -318,6 +318,8 @@ int main(void) {
   if (http_csrf_init() != 0) {
     ftp_log_line(FTP_LOG_WARN, "CSRF init failed: web upload disabled");
   }
+  /* Attach FTP context so /api/network/reset can reach the session pool */
+  http_api_set_server_ctx(&g_server_ctx);
   g_event_loop = event_loop_create();
   if (g_event_loop != NULL) {
     g_http_server =
@@ -355,6 +357,9 @@ int main(void) {
   if (g_event_loop != NULL) {
     event_loop_stop(g_event_loop);
   }
+  /* Detach FTP context before tearing down HTTP — prevents use-after-free
+   * if a /api/network/reset request races with server shutdown */
+  http_api_set_server_ctx(NULL);
   if (g_http_server != NULL) {
     http_server_destroy(g_http_server);
     g_http_server = NULL;
@@ -523,6 +528,8 @@ int main(void) {
   if (http_csrf_init() != 0) {
     ftp_log_line(FTP_LOG_WARN, "CSRF init failed: web upload disabled");
   }
+  /* Attach FTP context so /api/network/reset can reach the session pool */
+  http_api_set_server_ctx(&g_server_ctx);
   g_event_loop = event_loop_create();
   if (g_event_loop != NULL) {
     g_http_server = http_server_create(g_event_loop, HTTP_DEFAULT_PORT, "/");
@@ -566,6 +573,8 @@ int main(void) {
   if (g_event_loop != NULL) {
     event_loop_stop(g_event_loop);
   }
+  /* Detach FTP context before tearing down HTTP */
+  http_api_set_server_ctx(NULL);
   if (g_http_server != NULL) {
     http_server_destroy(g_http_server);
     g_http_server = NULL;

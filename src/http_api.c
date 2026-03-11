@@ -35,6 +35,9 @@ SOFTWARE.
 
 #include "http_api.h"
 #include "ftp_path.h"
+#include "ftp_server.h"    /* ftp_server_context_t — for network reset endpoint */
+#include "pal_network.h"   /* pal_network_reset_ftp_stack() */
+#include "pal_notification.h" /* pal_notification_send() — fallback notify */
 #include "http_config.h"
 #include "pal_fileio.h"
 #include <dirent.h>
@@ -94,6 +97,29 @@ extern const char *http_get_resource(const char *path, size_t *size);
  *===========================================================================*/
 
 static char g_http_root[FTP_PATH_MAX] = "/";
+
+/*
+ * Pointer to the FTP server context.
+ *
+ * Set once by http_api_set_server_ctx() during server startup.
+ * Used by the /api/network/reset endpoint (Fix #4) to reach the session pool
+ * and call pal_network_reset_ftp_stack().
+ *
+ * NULL if not set (e.g. HTTP server started standalone without FTP).
+ * Access is single-threaded from the HTTP event loop — no lock needed.
+ */
+static ftp_server_context_t *g_ftp_server_ctx = NULL;
+
+/**
+ * @brief Set the FTP server context for the HTTP API layer.
+ *
+ * Must be called after ftp_server_init() and before http_server_create().
+ *
+ * @param ctx  Pointer to the initialized FTP server context, or NULL to clear.
+ */
+void http_api_set_server_ctx(ftp_server_context_t *ctx) {
+    g_ftp_server_ctx = ctx;
+}
 
 void http_api_set_root(const char *root) {
   if ((root == NULL) || (root[0] == '\0')) {
@@ -203,6 +229,7 @@ static http_response_t *api_copy(const http_request_t *request);
 static http_response_t *api_copy_progress(const http_request_t *request);
 static http_response_t *api_copy_cancel(const http_request_t *request);
 #endif
+static http_response_t *api_network_reset(const http_request_t *request);
 static http_response_t *error_json(http_status_t code, const char *message);
 
 /*===========================================================================*
@@ -1017,6 +1044,11 @@ http_response_t *http_api_handle(const http_request_t *request) {
     return api_copy(request);
   }
 #endif
+
+  /*  POST /api/network/reset — flush TCP buffer accounting (Fix #4) */
+  if (strncmp(request->uri, "/api/network/reset", 18) == 0) {
+    return api_network_reset(request);
+  }
 
   /*  Static resources (index.html, style.css, app.js)  */
   return serve_static(request);
@@ -2666,4 +2698,89 @@ static http_response_t *error_json(http_status_t code, const char *message) {
 
   http_response_set_body(resp, body, (size_t)len);
   return resp;
+}
+
+/*===========================================================================*
+ * POST /api/network/reset — TCP buffer reset (Fix #4, #3, #7)
+ *
+ * ROOT CAUSE (repeated from pal_network.c for API-layer context):
+ *
+ *   After transfers to the internal SSD or M.2, OrbisOS kernel socket buffer
+ *   accounting becomes inflated.  New data connections receive smaller-than-
+ *   configured buffers, causing the 450 MB/s → 250 MB/s degradation.
+ *   The manual workaround (disable/enable PS5 networking) triggers a full NIC
+ *   buffer reallocation cycle.  This endpoint replicates that cycle at the
+ *   application level by writing 0 then the target value to SO_SNDBUF /
+ *   SO_RCVBUF on each idle session socket.
+ *
+ * RESPONSE:
+ *   200  {"ok":true,"message":"Network stack reset (N sessions)"}
+ *   200  {"ok":false,"message":"..."} — with PAL notification as fallback
+ *   405  If method is not POST
+ *
+ * SIDE EFFECTS:
+ *   - Closes orphaned data sockets (data_fd on non-TRANSFERRING sessions)
+ *   - Sends a PS4/PS5 notification if the reset succeeds or fails
+ *===========================================================================*/
+
+/**
+ * @brief POST /api/network/reset
+ *
+ * @note Thread-safety: Runs in the HTTP event loop thread.
+ *       pal_network_reset_ftp_stack() is safe to call from any thread
+ *       provided no session is in the middle of accept().
+ */
+static http_response_t *api_network_reset(const http_request_t *request)
+{
+    if (request == NULL) {
+        return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Null request");
+    }
+
+    /* Only POST is accepted */
+    if (request->method != HTTP_METHOD_POST) {
+        return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED,
+                          "Use POST /api/network/reset");
+    }
+
+    char body[128];
+    http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+    if (resp == NULL) {
+        return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "OOM");
+    }
+    http_response_add_header(resp, "Content-Type", "application/json");
+    http_response_add_header(resp, "Cache-Control", "no-store");
+
+    if (g_ftp_server_ctx == NULL) {
+        /*
+         * HTTP server running without an attached FTP context (unlikely in
+         * production, but handle it gracefully).  Send a PAL notification so
+         * the user knows what happened, then return a soft failure.
+         */
+        pal_notification_send("zftpd: network reset unavailable (no FTP ctx)");
+        (void)snprintf(body, sizeof(body),
+                       "{\"ok\":false,\"message\":\"FTP context not attached\"}");
+        http_response_set_body(resp, body, strlen(body));
+        return resp;
+    }
+
+    int rc = pal_network_reset_ftp_stack(g_ftp_server_ctx->sessions,
+                                         FTP_MAX_SESSIONS);
+
+    if (rc == 0) {
+        pal_notification_send("zftpd: network stack reset OK");
+        (void)snprintf(body, sizeof(body),
+                       "{\"ok\":true,\"message\":\"Network stack reset (%u sessions)\"}",
+                       (unsigned)FTP_MAX_SESSIONS);
+    } else {
+        /*
+         * Partial failure (invalid args) — fall back to notification so the
+         * user is still informed, even if the UI reset failed.
+         */
+        pal_notification_send("zftpd: network reset partial failure");
+        (void)snprintf(body, sizeof(body),
+                       "{\"ok\":false,\"message\":\"Reset partial — check logs\"}");
+    }
+
+    http_response_set_body(resp, body, strlen(body));
+    return resp;
 }

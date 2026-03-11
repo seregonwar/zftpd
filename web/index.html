@@ -4058,6 +4058,10 @@
       if (!dirs || !dirs.length) return;
       dirs.forEach(function (entry) {
         var p = join(entry.name);
+        /* Show loading spinner while fetching size */
+        var els = D.querySelectorAll('[data-dirpath="' + p.replace(/"/g, '\\"') + '"]');
+        for (var j = 0; j < els.length; j++) { els[j].textContent = '⟳'; els[j].style.opacity = '0.6'; }
+        
         fetch('/api/dirsize?path=' + E(p))
           .then(function (r) { return r.ok ? r.json() : null })
           .then(function (d) {
@@ -4069,34 +4073,42 @@
             }
             /* update every size label for this path */
             var els = D.querySelectorAll('[data-dirpath="' + p.replace(/"/g, '\\"') + '"]');
-            for (var j = 0; j < els.length; j++) { els[j].textContent = bytes(d.size); }
+            for (var j = 0; j < els.length; j++) { els[j].textContent = bytes(d.size); els[j].style.opacity = '1'; }
           })
-          .catch(function () { /* ignore */ });
+          .catch(function () { 
+            /* On error, show "—" instead of spinner */
+            var els = D.querySelectorAll('[data-dirpath="' + p.replace(/"/g, '\\"') + '"]');
+            for (var j = 0; j < els.length; j++) { els[j].textContent = '—'; els[j].style.opacity = '1'; }
+          });
       });
     }
 
     /* ── CACHE HELPERS ── */
     var _syncTimer = null;
     function getCacheKey(path) { return 'zftpd_list_' + path }
+    /**
+     * DISABLED: localStorage caching removed to prevent stale/ghost data.
+     * Always fetch fresh listings from server to ensure UI consistency.
+     */
     function getCachedListing(path) {
-      try {
-        var cached = localStorage.getItem(getCacheKey(path));
-        if (!cached) return null;
-        var obj = JSON.parse(cached);
-        if (!obj || !Array.isArray(obj.entries)) return null;
-        return obj;
-      } catch (e) { return null }
+      return null;  /* Always fetch fresh from server */
     }
     function setCachedListing(path, data) {
-      try {
-        localStorage.setItem(getCacheKey(path), JSON.stringify(data));
-      } catch (e) {
-        /* quota exceeded, cleanup old entries and retry */
-        cleanupCache();
-        try {
-          localStorage.setItem(getCacheKey(path), JSON.stringify(data));
-        } catch (e2) { /* still full, give up */ }
-      }
+      /* No-op: caching disabled */
+    }
+    /**
+     * Fix #1 — invalidate the localStorage cache for a directory.
+     *
+     * WHY: nav() shows cached entries immediately before fetching fresh data.
+     * After a delete, rename, or create the cache is stale, so the deleted/old
+     * entries would flash on screen until the background fetch completed.
+     * Removing the cache key forces nav() to show the loading spinner and only
+     * render once the server confirms the new state.
+     *
+     * @param {string} path  The directory whose cache entry should be removed.
+     */
+    function invalidateCache(path) {
+      try { localStorage.removeItem(getCacheKey(path)); } catch (e) { /* ignore */ }
     }
     function cleanupCache() {
       try {
@@ -4285,7 +4297,7 @@
             xferCardDone(card);
             completed++;
             if (completed === arr.length) {
-              hideDrop(); nav(S.path); toast('Uploaded ' + arr.length + ' file(s)', 'ok');
+              hideDrop(); invalidateCache(S.path); nav(S.path); toast('Uploaded ' + arr.length + ' file(s)', 'ok');
             } else {
               startNextUpload();
             }
@@ -4323,12 +4335,12 @@
     function mkFile() {
       var n = prompt('New file name:'); if (!n || !n.trim()) return; n = n.trim();
       fetch('/api/create_file?path=' + E(S.path) + '&name=' + E(n), { method: 'POST', headers: { 'Content-Type': 'text/plain', 'X-CSRF-Token': csrf() }, body: '' })
-        .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json() }).then(function () { nav(S.path); toast('Created: ' + n, 'ok') }).catch(function (e) { toast('Create failed: ' + e.message, 'er') })
+        .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json() }).then(function () { invalidateCache(S.path); nav(S.path); toast('Created: ' + n, 'ok') }).catch(function (e) { toast('Create failed: ' + e.message, 'er') })
     }
     function mkDir() {
       var n = prompt('New folder name:'); if (!n || !n.trim()) return; n = n.trim();
       fetch('/api/create_dir?path=' + E(S.path) + '&name=' + E(n), { method: 'POST', headers: { 'X-CSRF-Token': csrf() } })
-        .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json() }).then(function () { nav(S.path); toast('Folder created: ' + n, 'ok') }).catch(function (e) { toast('Folder failed: ' + e.message, 'er') })
+        .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json() }).then(function () { invalidateCache(S.path); nav(S.path); toast('Folder created: ' + n, 'ok') }).catch(function (e) { toast('Folder failed: ' + e.message, 'er') })
     }
     function del(p, n) {
       /* Find entry to check if it's a directory */
@@ -4357,13 +4369,13 @@
           if (!r.ok) throw new Error('HTTP ' + r.status);
           return r.json();
         })
-        .then(function () { nav(S.path); toast('Deleted: ' + n, 'ok') })
+        .then(function () { invalidateCache(S.path); nav(S.path); toast('Deleted: ' + n, 'ok') })
         .catch(function (e) { if (e.message !== 'Cancelled') toast('Delete failed: ' + e.message, 'er') })
     }
     function ren(p, old) {
       var n = prompt('Rename to:', old); if (!n || n.trim() === old || !n.trim()) return; n = n.trim();
       fetch('/api/rename?path=' + E(p) + '&name=' + E(n), { method: 'POST', headers: { 'X-CSRF-Token': csrf() } })
-        .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json() }).then(function () { nav(S.path); toast('Renamed to: ' + n, 'ok') }).catch(function (e) { toast('Rename failed: ' + e.message, 'er') })
+        .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json() }).then(function () { invalidateCache(S.path); nav(S.path); toast('Renamed to: ' + n, 'ok') }).catch(function (e) { toast('Rename failed: ' + e.message, 'er') })
     }
 
     /* ── CONTEXT MENU ── */
@@ -4424,7 +4436,10 @@
 
     function showSendToModal(entry, srcPath) {
       _smSrc = { entry: entry, srcPath: srcPath };
-      _smPath = S.path;  /* start at the current directory */
+      /* Fix #6: default to root ("/") instead of the current directory.
+       * Using S.path caused files to land in the same folder by accident
+       * when the user forgot to navigate before clicking "Send Here". */
+      _smPath = '/';
       $('send-modal').classList.add('on');
       smNav(_smPath);
     }
@@ -4545,6 +4560,8 @@
                   } else {
                     xferCardUpdate(card, 100, speed, elapsed);
                     xferCardDone(card);
+                    invalidateCache(S.path);
+                    invalidateCache(destDir);
                     nav(S.path); toast('Copied: ' + name, 'ok');
                   }
                   return;
@@ -4746,6 +4763,11 @@
       var fi = $('file-input'); if (fi) fi.onchange = function (e) { upload(e.target.files); e.target.value = '' };
       var fo = $('folder-input'); if (fo) fo.onchange = function (e) { upload(e.target.files); e.target.value = '' };
       var dc = $('drop-close'); if (dc) dc.onclick = function () { hideDrop() };
+      
+      /* Preload root directory to avoid slowdowns on first navigation */
+      fetch('/api/list?path=/')
+        .then(function (r) { return r.ok ? r.json() : null })
+        .catch(function () { /* ignore preload errors */ });
 
       ['grid', 'list', 'details'].forEach(function (v) { var b = $('vb-' + v); if (b) b.onclick = function () { setView(v) } });
 

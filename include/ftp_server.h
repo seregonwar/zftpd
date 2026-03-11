@@ -164,4 +164,36 @@ void ftp_server_get_stats(const ftp_server_context_t *ctx,
                             uint64_t *bytes_sent,
                             uint64_t *bytes_received);
 
+/*===========================================================================*
+ * SESSION POOL MANAGEMENT (called by session threads)
+ *===========================================================================*/
+
+/**
+ * @brief Release a session slot back to the server pool.
+ *
+ * MUST be called by the session thread as the very last action before it
+ * returns, AFTER ftp_session_cleanup() has closed all file descriptors.
+ *
+ * WHY THIS EXISTS:
+ *   ftp_server_stop() blocks on (active_sessions > 0).  Without this call
+ *   active_sessions is never decremented, causing an infinite loop that
+ *   prevents orderly PS5 shutdown and leads to SIGKILL → forced M2 unmount
+ *   → kernel panic.
+ *
+ * @param ctx     Owning server context (session->server_ctx)
+ * @param session Session to release
+ *
+ * @pre ctx != NULL
+ * @pre session != NULL
+ * @pre Called only from the session's own thread
+ * @pre ftp_session_cleanup() already called (all FDs closed)
+ *
+ * @post session->state == FTP_STATE_INIT  (slot is reusable)
+ * @post ctx->active_sessions decremented by 1
+ *
+ * @note Thread-safety: Protected internally by ctx->session_lock
+ */
+void ftp_server_release_session(ftp_server_context_t *ctx,
+                                ftp_session_t *session);
+
 #endif /* FTP_SERVER_H */

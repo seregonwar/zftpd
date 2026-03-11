@@ -33,6 +33,7 @@ SOFTWARE.
  */
 
 #include "ftp_session.h"
+#include "ftp_server.h"   /* ftp_server_release_session() — called at thread exit */
 #include "ftp_crypto.h"
 #include "ftp_log.h"
 #include "ftp_path.h"
@@ -271,6 +272,40 @@ void *ftp_session_thread(void *arg) {
   ftp_session_cleanup(session);
 
   ftp_log_session_event(session, "DISCONNECT", FTP_OK, 0U);
+
+  /*
+   * Release this session slot back to the server pool.
+   *
+   * WHY THIS IS THE CRITICAL FIX:
+   *   ftp_server_stop() blocks on (active_sessions > 0) waiting for all
+   *   sessions to finish.  Previously, active_sessions was incremented in
+   *   server_accept_thread when a new session thread was spawned, but was
+   *   NEVER decremented when the thread exited — free_session() existed but
+   *   was only called from error paths before the thread was created.
+   *
+   *   Without this call:
+   *     - active_sessions grows monotonically and never returns to 0
+   *     - ftp_server_stop() loops infinitely
+   *     - PS5 shutdown waits, extends the timer 7 times, then sends SIGKILL
+   *     - zftpd dies with 300+ open file descriptors
+   *     - M2 filesystem cannot unmount cleanly → forced unmount → kernel panic
+   *
+   *   With this call:
+   *     - Each thread decrements the counter on exit
+   *     - ftp_server_stop() unblocks once all threads have exited
+   *     - All FDs are closed before the process exits
+   *     - M2 unmounts cleanly → no kernel panic
+   *
+   * ORDERING: Must be called AFTER ftp_session_cleanup() so all file
+   * descriptors are already closed before the slot is marked as available.
+   * This prevents a race where a new session grabs the slot while the old
+   * session's FDs are still open.
+   *
+   * session->server_ctx is guaranteed non-NULL here: it is set in
+   * server_accept_thread before pthread_create(), and this function only
+   * runs inside the created thread.
+   */
+  ftp_server_release_session(session->server_ctx, session);
 
   return NULL;
 }

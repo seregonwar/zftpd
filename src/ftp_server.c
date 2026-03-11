@@ -188,25 +188,90 @@ ftp_error_t ftp_server_start(ftp_server_context_t *ctx)
 }
 
 /**
- * @brief Stop FTP server
+ * @brief Stop FTP server (graceful shutdown with bounded wait)
+ *
+ * SHUTDOWN SEQUENCE (order matters):
+ *
+ *  1. Clear the running flag so the accept thread exits its loop check.
+ *
+ *  2. Close listen_fd immediately.
+ *     WHY: PAL_ACCEPT() is a blocking syscall.  The accept thread only checks
+ *     ctx->running AFTER accept() returns.  Without closing the socket, the
+ *     thread blocks forever — even though running == 0.  Closing the fd
+ *     makes accept() return EBADF/EINVAL immediately, allowing the thread to
+ *     observe running == 0 and exit.
+ *
+ *  3. Force shutdown(SHUT_RDWR) on every active session's ctrl_fd.
+ *     WHY: Session threads block inside recv() waiting for the next FTP
+ *     command.  They only check for server shutdown when recv() returns.
+ *     shutdown() injects an EOF into the socket without closing the fd,
+ *     making recv() return 0 so the session loop exits cleanly.
+ *     (close() would race with the session thread which also closes ctrl_fd
+ *     in ftp_session_cleanup().)
+ *
+ *  4. Wait up to SERVER_STOP_TIMEOUT_MS for active_sessions to reach 0.
+ *     WHY: Each session thread calls ftp_server_release_session() at exit,
+ *     which decrements active_sessions.  The timeout is a safety net: if a
+ *     session thread is stuck (e.g. blocked in a long PFS write), we do not
+ *     hang the entire PS5 shutdown sequence — the kernel will collect the
+ *     remaining resources via SIGKILL/forced unmount anyway, but an orderly
+ *     decrement is strongly preferred.
  */
 void ftp_server_stop(ftp_server_context_t *ctx)
 {
     if (ctx == NULL) {
         return;
     }
-    
-    /* Signal server to stop */
+
+    /* Step 1 — signal stop */
     atomic_store(&ctx->running, 0);
-    
-    /* Wait for all sessions to complete */
-    while (atomic_load(&ctx->active_sessions) > 0U) {
-        usleep(100000); /* 100ms */
+
+    /* Step 2 — unblock PAL_ACCEPT() in the accept thread */
+    if (ctx->listen_fd >= 0) {
+        PAL_CLOSE(ctx->listen_fd);
+        ctx->listen_fd = -1; /* ftp_server_cleanup() guards against double-close */
     }
+
+    /* Step 3 — interrupt blocking recv() in each session thread */
+    pthread_mutex_lock(&ctx->session_lock);
+    for (size_t i = 0U; i < FTP_MAX_SESSIONS; i++) {
+        int state = atomic_load(&ctx->sessions[i].state);
+        if ((state == FTP_STATE_CONNECTED)    ||
+            (state == FTP_STATE_AUTHENTICATED)||
+            (state == FTP_STATE_TRANSFERRING)) {
+            int cfd = ctx->sessions[i].ctrl_fd;
+            if (cfd >= 0) {
+                /*
+                 * shutdown() injects EOF without closing the fd.
+                 * The session thread's recv() returns 0 → loop exits →
+                 * ftp_session_cleanup() closes the fd normally.
+                 * Using close() here would race with ftp_session_cleanup().
+                 */
+                (void)shutdown(cfd, SHUT_RDWR);
+            }
+        }
+    }
+    pthread_mutex_unlock(&ctx->session_lock);
+
+    /* Step 4 — wait for sessions to drain, with a hard timeout */
+#define SERVER_STOP_TIMEOUT_MS 5000U
+#define SERVER_STOP_POLL_MS    100U
+    uint32_t waited_ms = 0U;
+    while ((atomic_load(&ctx->active_sessions) > 0U) &&
+           (waited_ms < SERVER_STOP_TIMEOUT_MS)) {
+        usleep(SERVER_STOP_POLL_MS * 1000U);
+        waited_ms += SERVER_STOP_POLL_MS;
+    }
+
+#undef SERVER_STOP_TIMEOUT_MS
+#undef SERVER_STOP_POLL_MS
 }
 
 /**
  * @brief Cleanup server resources
+ *
+ * @note listen_fd may already be closed by ftp_server_stop() — guard
+ *       against double-close with the >= 0 check.
  */
 void ftp_server_cleanup(ftp_server_context_t *ctx)
 {
@@ -214,7 +279,7 @@ void ftp_server_cleanup(ftp_server_context_t *ctx)
         return;
     }
     
-    /* Close listen socket */
+    /* Close listen socket if not already closed by ftp_server_stop() */
     if (ctx->listen_fd >= 0) {
         PAL_CLOSE(ctx->listen_fd);
         ctx->listen_fd = -1;
@@ -286,6 +351,19 @@ static void* server_accept_thread(void *arg)
             atomic_fetch_add(&ctx->stats.total_errors, 1U);
             continue;
         }
+
+        /*
+         * Store the back-pointer to the owning server context.
+         *
+         * WHY: The session thread calls ftp_server_release_session() on exit
+         * to decrement active_sessions and mark the slot as free.  Without
+         * this pointer the thread cannot reach the server context.
+         *
+         * Written here — before pthread_create() — so it is visible to the
+         * new thread without any additional synchronisation (pthread_create
+         * acts as a memory barrier).
+         */
+        session->server_ctx = ctx;
         
         /* Create session thread */
         pthread_attr_t sess_attr;
@@ -321,7 +399,7 @@ static void* server_accept_thread(void *arg)
 }
 
 /*===========================================================================*
- * SESSION MANAGEMENT
+ * SESSION POOL MANAGEMENT
  *===========================================================================*/
 
 /**
@@ -355,7 +433,26 @@ static ftp_session_t* allocate_session(ftp_server_context_t *ctx)
 }
 
 /**
- * @brief Free session back to pool
+ * @brief Free session back to pool (internal error-path helper).
+ *
+ * Used ONLY in server_accept_thread for early error paths — BEFORE
+ * pthread_create() succeeds and BEFORE active_sessions is incremented.
+ *
+ * WHY NO DECREMENT:
+ *   active_sessions is incremented at line:
+ *       atomic_fetch_add(&ctx->active_sessions, 1U);
+ *   which occurs AFTER pthread_create() returns 0.  All calls to
+ *   free_session() happen in error branches that execute BEFORE that
+ *   line (ftp_session_init failure, pthread_create failure).
+ *   Decrementing here would underflow the counter from 0 to UINT_FAST32_MAX,
+ *   which would permanently prevent ftp_server_stop() from exiting even
+ *   after all real sessions have finished.
+ *
+ *   The only correct place to decrement active_sessions is
+ *   ftp_server_release_session(), which is called from inside
+ *   ftp_session_thread() — i.e. after the thread (and the increment) exist.
+ *
+ * @note Thread-safety: Protected by ctx->session_lock
  */
 static void free_session(ftp_server_context_t *ctx, ftp_session_t *session)
 {
@@ -365,12 +462,45 @@ static void free_session(ftp_server_context_t *ctx, ftp_session_t *session)
     
     pthread_mutex_lock(&ctx->session_lock);
     
-    /* Mark session as free */
+    /* Reset slot state so it can be reused — no counter decrement here */
     atomic_store(&session->state, FTP_STATE_INIT);
     
-    /* Update active count */
+    pthread_mutex_unlock(&ctx->session_lock);
+}
+
+/**
+ * @brief Release a session slot back to the server pool (public API).
+ *
+ * Called by ftp_session_thread() as its very last action, after
+ * ftp_session_cleanup() has closed all file descriptors.
+ *
+ * INVARIANT: active_sessions was already incremented (in server_accept_thread,
+ * after pthread_create() returned 0) before this thread started running.
+ * This function performs the matching decrement.  free_session() (the internal
+ * error-path helper) deliberately does NOT decrement — it is only called from
+ * code paths that execute BEFORE the increment.
+ *
+ * @pre Called only from the session's own thread
+ * @pre ftp_session_cleanup() already called (all FDs closed)
+ * @pre ctx->active_sessions > 0
+ */
+void ftp_server_release_session(ftp_server_context_t *ctx,
+                                ftp_session_t *session)
+{
+    if ((ctx == NULL) || (session == NULL)) {
+        return;
+    }
+
+    /*
+     * NULL out the back-pointer before releasing the slot.
+     * Prevents stale pointer access if the slot is immediately reused.
+     */
+    session->server_ctx = NULL;
+
+    /* Reset slot state and decrement the active-session counter */
+    pthread_mutex_lock(&ctx->session_lock);
+    atomic_store(&session->state, FTP_STATE_INIT);
     atomic_fetch_sub(&ctx->active_sessions, 1U);
-    
     pthread_mutex_unlock(&ctx->session_lock);
 }
 

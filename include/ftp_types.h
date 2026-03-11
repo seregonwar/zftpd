@@ -206,6 +206,21 @@ typedef struct {
 } ftp_session_stats_t;
 
 /*===========================================================================*
+ * FORWARD DECLARATIONS
+ *===========================================================================*/
+
+/**
+ * Forward declaration of server context.
+ *
+ * WHY: ftp_session_t needs a back-pointer to its owning ftp_server_context_t
+ * so the session thread can call ftp_server_release_session() at exit.
+ * ftp_server_context_t is defined later in this file (it embeds
+ * ftp_session_t[]), so a forward declaration is required to break the
+ * circular dependency.
+ */
+struct ftp_server_context;
+
+/*===========================================================================*
  * SESSION STRUCTURE
  *===========================================================================*/
 
@@ -287,6 +302,21 @@ typedef struct ftp_session {
   /* Statistics */
   ftp_session_stats_t stats;
 
+  /*
+   * Back-pointer to the owning server context.
+   *
+   * WHY: The session thread must decrement active_sessions and reset the
+   * slot state when it exits (Bug #1 fix). Without this pointer the thread
+   * cannot reach the server context to call ftp_server_release_session().
+   *
+   * Set by server_accept_thread immediately after ftp_session_init().
+   * Never NULL for a session that is running in its own thread.
+   *
+   * @note Thread-safety: written once before thread creation, read-only
+   *       thereafter — no synchronisation required.
+   */
+  struct ftp_server_context *server_ctx; /**< Owning server context */
+
 } ftp_session_t;
 
 /*===========================================================================*
@@ -335,7 +365,7 @@ typedef struct {
  * @note Single instance, initialized at startup
  * @note Thread-safe: atomic operations for shared state
  */
-typedef struct {
+typedef struct ftp_server_context {
   /* Server socket */
   int listen_fd;                  /**< Listening socket */
   struct sockaddr_in listen_addr; /**< Server bind address */

@@ -30,10 +30,21 @@ SOFTWARE.
 #ifndef HTTP_API_H
 #define HTTP_API_H
 
+#include "ftp_types.h"
 #include "http_parser.h"
 #include "http_response.h"
 
 http_response_t *http_api_handle(const http_request_t *request);
+
+/**
+ * @brief Attach the FTP server context to the HTTP API layer.
+ *
+ * Required for the POST /api/network/reset endpoint (Fix #4).
+ * Must be called after ftp_server_init() and before http_server_create().
+ *
+ * @param ctx  Initialized FTP server context, or NULL to detach.
+ */
+void http_api_set_server_ctx(ftp_server_context_t *ctx);
 
 /**
  * @brief Set the root directory for HTTP API path confinement
