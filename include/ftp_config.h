@@ -58,7 +58,7 @@ SOFTWARE.
  */
 #ifndef FTP_DEFAULT_PORT
 #if defined(PS4) || defined(PS5) || defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
-#define FTP_DEFAULT_PORT 2122U
+#define FTP_DEFAULT_PORT 2121U
 #else
 #define FTP_DEFAULT_PORT 2121U
 #endif
