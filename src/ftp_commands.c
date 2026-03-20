@@ -56,6 +56,10 @@ SOFTWARE.
     (defined(__FreeBSD__) && !defined(PLATFORM_PS4) && !defined(PLATFORM_PS5))
 #include <sys/mount.h>
 #endif
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+#include <sys/mount.h>
+extern int _fstatfs(int, struct statfs *);
+#endif
 #include <pthread.h>
 #include <time.h>
 #include <unistd.h>
@@ -685,6 +689,30 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
    */
   int use_sendfile = ((vfs_get_caps(&node) & VFS_CAP_SENDFILE) != 0U) &&
                      (FTP_TRANSFER_RATE_LIMIT_BPS == 0U);
+
+  /* DIAGNOSTIC: log transfer configuration so bottlenecks are visible in klog */
+  {
+    char diag[256];
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+    struct statfs sfs;
+    const char *fstype = "unknown";
+    if (_fstatfs(node.fd, &sfs) == 0) { fstype = sfs.f_fstypename; }
+    snprintf(diag, sizeof(diag),
+      "[RETR] file=%s size=%llu fs=%s sendfile=%d "
+      "chunk=%u cooldown=%u eagain_sleep=%u sndbuf=%u",
+      resolved, (unsigned long long)file_size, fstype, use_sendfile,
+      (unsigned)FTP_RETR_SENDFILE_CHUNK,
+      (unsigned)(4U << 20),
+      (unsigned)FTP_SENDFILE_EAGAIN_SLEEP_US,
+      (unsigned)FTP_TCP_DATA_SNDBUF);
+#else
+    snprintf(diag, sizeof(diag),
+      "[RETR] file=%s size=%llu sendfile=%d chunk=%u",
+      resolved, (unsigned long long)file_size, use_sendfile,
+      (unsigned)FTP_RETR_SENDFILE_CHUNK);
+#endif
+    ftp_log_line(FTP_LOG_INFO, diag);
+  }
 #if FTP_ENABLE_CRYPTO
   if (session->crypto.active != 0U) {
     use_sendfile = 0;
@@ -722,7 +750,7 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
    *=========================================================================*/
 
 /* Cooldown: bytes of read() between sendfile retries */
-#define SENDFILE_COOLDOWN_BYTES (1U << 20) /* 1 MB */
+#define SENDFILE_COOLDOWN_BYTES (4U << 20) /* 4 MB — allineato a PAL_FILE_COPY_BUFFER_SIZE PS5; meno rientri nel path lento */
 
   void *buf = NULL;
   size_t buf_sz = 0U;
@@ -969,6 +997,20 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
   if (remaining == 0U) {
     atomic_fetch_add(&session->stats.files_sent, 1U);
     ftp_log_session_event(session, "RETR_OK", FTP_OK, bytes_sent);
+    /* Log throughput so we can see MB/s in klog without an external tool */
+    {
+      struct timespec ts_end;
+      clock_gettime(CLOCK_MONOTONIC, &ts_end);
+      /* reuse session->last_activity as a rough start proxy — already set
+         at transfer open. For a real elapsed we'd need a start timestamp.
+         Instead log raw bytes; the surrounding timestamps in klog give elapsed. */
+      char tput[128];
+      snprintf(tput, sizeof(tput),
+               "[RETR] complete: bytes=%llu (%.1f MB)",
+               (unsigned long long)bytes_sent,
+               (double)bytes_sent / (1024.0 * 1024.0));
+      ftp_log_line(FTP_LOG_INFO, tput);
+    }
     return ftp_session_send_reply(session, FTP_REPLY_226_TRANSFER_COMPLETE,
                                   NULL);
   }

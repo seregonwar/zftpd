@@ -57,9 +57,25 @@ SOFTWARE.
  */
 #ifndef PAL_FILE_WRITE_CHUNK_MAX
 #  if defined(PLATFORM_PS5) || defined(PS5)
-#    define PAL_FILE_WRITE_CHUNK_MAX 131072U  /* 128 KB */
+/*
+ * 1 MB — matches FTP_BUFFER_SIZE and ftpsrv's IO_COPY_BUFSIZE.
+ *
+ * The original 128 KB limit existed to keep per-chunk PFS write latency
+ * under ~5 ms in the STOR double-buffer path, preventing the recv thread
+ * from stalling the TCP window.  On PS5 the double-buffer path is
+ * explicitly disabled (buf1 = NULL forced in cmd_STOR), so this cap is
+ * never protective — it only creates 8× 128 KB writes per 1 MB recv:
+ *   8 × 5 ms = 40 ms/MB → 25 MB/s   (observed bottleneck)
+ *
+ * With 1 MB writes matching the recv buffer size:
+ *   1 × ~9 ms = ~115 MB/s            (matches ftpsrv on /data)
+ *
+ * Safety: FTP_TCP_RCVBUF = 4 MB absorbs all in-flight network data
+ * during the single write() call, so no TCP zero-window stall occurs.
+ */
+#    define PAL_FILE_WRITE_CHUNK_MAX 1048576U /* 1 MB  — PS5: double-buf disabled, no TCP stall risk */
 #  elif defined(PLATFORM_PS4) || defined(PS4)
-#    define PAL_FILE_WRITE_CHUNK_MAX  65536U  /*  64 KB */
+#    define PAL_FILE_WRITE_CHUNK_MAX  65536U  /*  64 KB — PS4: keep original; HDD write latency higher */
 #  else
 #    define PAL_FILE_WRITE_CHUNK_MAX 262144U  /* 256 KB */
 #  endif
@@ -106,13 +122,13 @@ SOFTWARE.
 #ifndef PAL_FILE_COPY_BUFFER_SIZE
 #if defined(PLATFORM_PS5)
 #define PAL_FILE_COPY_BUFFER_SIZE                                              \
-  (4U * 1024U *                                                                \
-   1024U) /* 4 MB — NVMe ~215 MB/s, T_write=19ms covers T_read=12ms */
+  (8U * 1024U *                                                                \
+   1024U) /* 8 MB — NVMe ~500+ MB/s, reduces pthread sync overhead */
 #elif defined(PLATFORM_PS4)
 #define PAL_FILE_COPY_BUFFER_SIZE                                              \
   (1024U * 1024U) /* 1 MB — HDD ~85 MB/s,  T_write=12ms covers T_read=3ms  */
 #else
-#define PAL_FILE_COPY_BUFFER_SIZE FTP_BUFFER_SIZE
+#define PAL_FILE_COPY_BUFFER_SIZE (4U * 1024U * 1024U) /* 4 MB */
 #endif
 #endif
 
@@ -143,7 +159,6 @@ SOFTWARE.
  *   done        — reader has hit EOF or error
  *   reader_err  — non-zero errno set by reader on error
  *---------------------------------------------------------------------------*/
-#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
 #include <pthread.h>
 
 typedef struct {
@@ -204,7 +219,6 @@ static void *copy_reader_thread(void *arg) {
   pthread_mutex_unlock(&p->mtx);
   return NULL;
 }
-#endif /* PLATFORM_PS4 || PLATFORM_PS5 */
 
 /*===========================================================================*
  * ZERO-COPY FILE TRANSFER
@@ -517,7 +531,6 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
    * keeping the pipeline reader thread from stalling on rotational-latency-
    * equivalent NVMe seek delays between extents.
    */
-#if defined(PLATFORM_PS5) || defined(PLATFORM_PS4)
   if (src_fd >= 0) {
 #ifdef F_NOCACHE
     /*
@@ -526,11 +539,13 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
      */
     (void)fcntl(src_fd, F_NOCACHE, 1);
 #endif
+#ifdef F_RDAHEAD
+    (void)fcntl(src_fd, F_RDAHEAD, 1);
+#endif
 #if defined(POSIX_FADV_SEQUENTIAL) && !defined(PLATFORM_PS4) && !defined(PS4)
     (void)posix_fadvise(src_fd, 0, 0, POSIX_FADV_SEQUENTIAL);
 #endif
   }
-#endif /* PLATFORM_PS5 || PLATFORM_PS4 */
   if (src_fd < 0) {
     int e = errno;
     {
@@ -661,9 +676,8 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
    * Other: simple serial read→write loop.
    *=========================================================================*/
 
-#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
   /*-----------------------------------------------------------------------*
-   * PS4/PS5 double-buffer copy pipeline
+   * Double-buffer copy pipeline
    *
    * Allocate both buffers up-front.  If either malloc fails, fall through
    * to the serial path (pal_malloc returns NULL gracefully).
@@ -899,7 +913,6 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
     }
   }
   /* --- Serial fallback (malloc failure or pthread_create failure) --- */
-#endif /* PLATFORM_PS4 || PLATFORM_PS5 */
 
   {
     char msg[256];
@@ -1056,9 +1069,7 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
 
   out_err = FTP_OK;
 
-#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
 copy_done:;
-#endif
 
   /*
    * POST-COPY CACHE EVICTION — release source file pages from page cache.
@@ -1083,6 +1094,9 @@ copy_done:;
 #if defined(POSIX_FADV_DONTNEED) && !defined(PLATFORM_PS4) && !defined(PS4)
   if (src_fd >= 0) {
     (void)posix_fadvise(src_fd, 0, 0, POSIX_FADV_DONTNEED);
+  }
+  if (dst_fd >= 0) {
+    (void)posix_fadvise(dst_fd, 0, 0, POSIX_FADV_DONTNEED);
   }
 #endif
 

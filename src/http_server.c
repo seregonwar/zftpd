@@ -587,6 +587,24 @@ static int http_accept_callback(int fd, uint32_t events, void *data) {
     int rcvbuf = (int)HTTP_UPLOAD_RCVBUF_SIZE;
     (void)setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF,
                      &rcvbuf, sizeof(rcvbuf));
+
+#if (HTTP_SNDBUF_SIZE) > 0U
+    /*
+     * SO_SNDBUF — bypass OrbisOS TCP send-buffer clamping.
+     *
+     * Without this, PS5/PS4 accepted sockets keep the kernel default
+     * (~256 KB), causing pal_send_all() to block as soon as the buffer
+     * fills and capping HTTP downloads to ~400 Mbps.  4 MB matches
+     * FTP_TCP_DATA_SNDBUF and keeps the TCP pipeline saturated at
+     * 1 Gbps LAN RTTs.  On non-PS platforms HTTP_SNDBUF_SIZE == 0 so
+     * this block is compiled out and auto-tuning remains active.
+     */
+    {
+      int sndbuf = (int)HTTP_SNDBUF_SIZE;
+      (void)setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF,
+                       &sndbuf, sizeof(sndbuf));
+    }
+#endif
   }
 
   /* Connection limit */
@@ -1156,12 +1174,9 @@ static int http_handle_request(http_connection_t *conn) {
 
     } else {
       /* PATH B: pread + send_all (PS5/PS4 safe) */
-#ifndef HTTP_DOWNLOAD_PREAD_CHUNK
-#define HTTP_DOWNLOAD_PREAD_CHUNK (512U * 1024U)
-#endif
       /*
-       * Heap-allocate the read buffer — 512 KB on the stack would
-       * overflow the event-loop thread's stack on PS5.
+       * Heap-allocate the read buffer — HTTP_DOWNLOAD_PREAD_CHUNK (2 MB)
+       * on the stack would overflow the event-loop thread's stack on PS5.
        * On malloc failure, fall back to a small on-stack buffer so the
        * transfer degrades in speed rather than aborting.
        */

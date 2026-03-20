@@ -279,7 +279,7 @@ ftp_error_t pal_socket_configure_data(socket_t fd) {
 
   /*----------- Send buffer --------------------------------*/
   /*
-   * SO_SNDBUF is intentionally NOT set here.
+   * SO_SNDBUF is intentionally NOT set here on non-PS4/PS5 platforms.
    *
    * Setting SO_SNDBUF explicitly — even on a pre-bind listening socket —
    * disables the kernel's TCP send-buffer auto-tuning (net.inet.tcp.sendbuf_auto
@@ -287,9 +287,20 @@ ftp_error_t pal_socket_configure_data(socket_t fd) {
    * to fill the measured RTT×BDP product, which is what allows the HTTP server
    * to saturate any internet link without knowing the client's RTT in advance.
    *
-   * The FTP data socket relies on the same auto-tuning mechanism.
-   * cmd_PASV / cmd_EPSV intentionally omit SO_SNDBUF so auto-tuning is active.
-   */  /*----------- I/O timeouts (prevent infinite stalls) -----*/
+   * EXCEPTION — PS4/PS5 OrbisOS:
+   *   The OrbisOS kernel clamps SO_SNDBUF auto-tuning to a system maximum
+   *   that is lower than what a GbE LAN transfer needs.  Setting FTP_TCP_DATA_SNDBUF
+   *   explicitly forces the full 4 MB, covering the BDP for 1 GbE at LAN RTTs
+   *   and eliminating the ~50–100 Mbps throughput loss from the kernel clamp.
+   */
+#if (defined(PS5) || defined(PLATFORM_PS5) || defined(PS4) || defined(PLATFORM_PS4)) && \
+    defined(FTP_TCP_DATA_SNDBUF) && (FTP_TCP_DATA_SNDBUF > 0U)
+  {
+    int sndbuf = (int)FTP_TCP_DATA_SNDBUF;
+    (void)PAL_SETSOCKOPT(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+  }
+#endif
+  /* cmd_PASV / cmd_EPSV intentionally omit SO_SNDBUF on other platforms so auto-tuning is active. */
   (void)pal_socket_set_timeouts(fd, FTP_DATA_IO_TIMEOUT_MS,
                                 FTP_DATA_IO_TIMEOUT_MS);
 

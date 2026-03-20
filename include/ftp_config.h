@@ -43,7 +43,7 @@ SOFTWARE.
  *===========================================================================*/
 
 #ifndef RELEASE_VERSION
-#define RELEASE_VERSION "1.4.0"
+#define RELEASE_VERSION "1.5.0"
 #endif
 
 /*===========================================================================*
@@ -58,7 +58,7 @@ SOFTWARE.
  */
 #ifndef FTP_DEFAULT_PORT
 #if defined(PS4) || defined(PS5) || defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
-#define FTP_DEFAULT_PORT 2121U
+#define FTP_DEFAULT_PORT 2120U
 #else
 #define FTP_DEFAULT_PORT 2121U
 #endif
@@ -341,6 +341,24 @@ SOFTWARE.
 #endif
 
 /**
+ * TCP send buffer size for DATA socket (bytes)
+ *
+ *   On PS5/PS4, OrbisOS clamps SO_SNDBUF auto-tuning to a system
+ *   maximum that is lower than what GbE LAN transfers need.
+ *   Setting this explicitly forces 4 MB, covering the BDP for
+ *   a 1 GbE link at LAN RTTs (0.1–1 ms) with headroom.
+ *
+ *   Set to 0 on other platforms to leave kernel auto-tuning active.
+ */
+#ifndef FTP_TCP_DATA_SNDBUF
+#if defined(PS5) || defined(PLATFORM_PS5) || defined(PS4) || defined(PLATFORM_PS4)
+#define FTP_TCP_DATA_SNDBUF (4U * 1024U * 1024U) /* 4 MB — supera il clamping OrbisOS */
+#else
+#define FTP_TCP_DATA_SNDBUF 0U /* 0 = lascia auto-tuning attivo */
+#endif
+#endif
+
+/**
  * Maximum retries when sendfile() returns 0 bytes (TCP back-pressure)
  *
  *   Each retry sleeps FTP_SENDFILE_EAGAIN_SLEEP_US microseconds.
@@ -353,7 +371,7 @@ SOFTWARE.
 
 /** Sleep between sendfile EAGAIN retries (microseconds) */
 #ifndef FTP_SENDFILE_EAGAIN_SLEEP_US
-#define FTP_SENDFILE_EAGAIN_SLEEP_US 1000U /* 1 ms */
+#define FTP_SENDFILE_EAGAIN_SLEEP_US 500U /* 0.5 ms — PS5 LAN RTT ~0.1-0.3ms, 1ms era eccessivo */
 #endif
 
 /**
@@ -381,7 +399,7 @@ SOFTWARE.
  * @see HTTP_SENDFILE_CHUNK_SIZE in http_config.h
  */
 #ifndef FTP_RETR_SENDFILE_CHUNK
-#define FTP_RETR_SENDFILE_CHUNK (512U * 1024U) /* 512 KB */
+#define FTP_RETR_SENDFILE_CHUNK (2U * 1024U * 1024U) /* 2 MB — PS5 NVMe: meno syscall boundary, meno TCP flush prematuri */
 #endif
 
 /**

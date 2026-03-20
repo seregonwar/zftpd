@@ -127,4 +127,40 @@ SOFTWARE.
 #define HTTP_UPLOAD_RCVBUF_SIZE   (2U * 1024U * 1024U) /* 2 MB SO_RCVBUF hint */
 #endif
 
+/*---------------------------------------------------------------------------*
+ * Download pread() chunk size (PATH B — pread + pal_send_all)
+ *
+ * Used when sendfile() is unsafe (PS5/PS4 PFS/exFAT filesystems).
+ * Larger chunks mean fewer pread()+send_all() round-trips per MB.
+ * 2 MB halves the syscall count vs the previous 512 KB while staying
+ * well within the event-loop thread's heap budget.
+ *---------------------------------------------------------------------------*/
+#ifndef HTTP_DOWNLOAD_PREAD_CHUNK
+#define HTTP_DOWNLOAD_PREAD_CHUNK (2U * 1024U * 1024U) /* 2 MB */
+#endif
+
+/*---------------------------------------------------------------------------*
+ * HTTP client send buffer (SO_SNDBUF) — download throughput on PS5/PS4
+ *
+ * OrbisOS (PS5/PS4) clamps TCP send-buffer auto-tuning to a system
+ * maximum that is lower than what a GbE LAN download needs.  Without
+ * an explicit SO_SNDBUF the accepted socket keeps the kernel default
+ * (~256 KB on tested firmwares), forcing pal_send_all() to block as
+ * soon as the buffer fills and limiting throughput to ~400 Mbps.
+ *
+ * Setting 4 MB matches FTP_TCP_DATA_SNDBUF (the same fix applied to
+ * FTP data sockets) and allows the TCP pipeline to stay full at
+ * 1 Gbps LAN RTTs (0.1–1 ms), recovering the missing 300+ Mbps.
+ *
+ * On other platforms SO_SNDBUF is left to kernel auto-tuning (set to 0
+ * here so the caller can skip the setsockopt() call entirely).
+ *---------------------------------------------------------------------------*/
+#ifndef HTTP_SNDBUF_SIZE
+#if defined(PS5) || defined(PLATFORM_PS5) || defined(PS4) || defined(PLATFORM_PS4)
+#define HTTP_SNDBUF_SIZE (4U * 1024U * 1024U) /* 4 MB — bypass OrbisOS clamp */
+#else
+#define HTTP_SNDBUF_SIZE 0U /* 0 = leave kernel auto-tuning active */
+#endif
+#endif
+
 #endif /* HTTP_CONFIG_H */
