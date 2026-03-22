@@ -215,48 +215,60 @@ var ZFTPD = ZFTPD || {};
     }
     if (!ug) return;
 
-    if (ug.locations.length === 1) {
-      Z.switchView('explorer');
-      setTimeout(function() { if (Z.explorer) Z.explorer.nav(Z.parent(ug.locations[0].path) || '/'); }, 100);
-    } else {
-      showLocationPicker(ug);
+    var titleId = ug.meta && ug.meta.title_id ? ug.meta.title_id : null;
+    var title = ug.meta && ug.meta.title_name ? ug.meta.title_name : ug.name.replace(/\.(pkg|fpkg|exfat)$/i, '');
+
+    var d = document.getElementById('dash-action-modal');
+    if (d) d.parentNode.removeChild(d);
+
+    var html = 
+      '<div id="dash-action-modal" class="dash-loc-dropdown">' +
+        '<div class="dash-loc-box">' +
+          '<div class="dash-loc-box-title">' + title + ' <span class="close-btn" onclick="var d=document.getElementById(\'dash-action-modal\');d.parentNode.removeChild(d);">&times;</span></div>' +
+          '<div class="dash-loc-box-sub">Choose an action for this game</div>' +
+          '<div class="dash-loc-list" style="display:flex;flex-direction:column;gap:10px;padding:10px;">';
+
+    if (titleId) {
+      var launchJs = "fetch('/api/admin/launch?id=" + encodeURIComponent(titleId) + "').then(function(r){return r.json();}).then(function(j){ Z.toast(j.message || 'Launch signal sent', j.status==='ok'?'success':'error'); var m=document.getElementById('dash-action-modal'); if(m)m.parentNode.removeChild(m); }).catch(function(){Z.toast('Launch failed','error');})";
+      html += 
+        '<button class="btn" style="background:var(--ac);color:#fff;border:none;padding:12px;border-radius:8px;cursor:pointer;font-weight:bold;display:flex;align-items:center;justify-content:center;gap:8px;" onclick="' + launchJs + '">' +
+          ICO.gamepad + ' Launch Game (' + titleId + ')' +
+        '</button>';
     }
+
+    if (ug.locations.length === 1) {
+      html += 
+        '<button class="btn" style="background:var(--bg2);color:var(--tx1);border:1px solid var(--bd);padding:12px;border-radius:8px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;" onclick="ZFTPD.dashboard.navTo(\'' + Z.E(ug.locations[0].path) + '\')">' +
+          ICO.folder + ' Browse Files' +
+        '</button>';
+    } else {
+      html += '<div style="font-size:12px;color:var(--tx3);margin-top:10px;">Browse Duplicate Files:</div>';
+      for (var i = 0; i < ug.locations.length; i++) {
+        var loc = ug.locations[i];
+        var drive = loc.path.indexOf('usb0') > -1 ? 'USB0' : (loc.path.indexOf('usb1') > -1 ? 'USB1' : (loc.path.indexOf('data') > -1 ? 'DATA' : 'SYS'));
+        html += 
+          '<div class="dash-loc-list-item" onclick="ZFTPD.dashboard.navTo(\''+Z.E(loc.path)+'\')">' +
+            '<div class="dash-loc-drive">'+drive+'</div>' +
+            '<div class="dash-loc-path" title="'+loc.path+'">'+loc.path+'</div>' +
+            '<div class="dash-loc-size">'+Z.bytes(loc.size||0)+'</div>' +
+          '</div>';
+      }
+    }
+    
+    html += '</div></div></div>';
+    var div = document.createElement('div');
+    div.innerHTML = html;
+    document.body.appendChild(div.firstChild);
   };
 
   dashboard.navTo = function(pathUrl) {
     var path = decodeURIComponent(pathUrl);
-    var d = document.getElementById('dash-loc-modal');
+    var d = document.getElementById('dash-action-modal');
     if (d) d.parentNode.removeChild(d);
     
     Z.switchView('explorer');
     setTimeout(function() { if(Z.explorer) Z.explorer.nav(Z.parent(path) || '/'); }, 100);
   };
-
-  function showLocationPicker(ug) {
-    var title = ug.meta && ug.meta.title_name ? ug.meta.title_name : ug.name.replace(/\.(pkg|fpkg|exfat)$/i, '');
-    var html = 
-      '<div id="dash-loc-modal" class="dash-loc-dropdown">' +
-        '<div class="dash-loc-box">' +
-          '<div class="dash-loc-box-title">'+title+' <span class="close-btn" onclick="var d=document.getElementById(\'dash-loc-modal\');d.parentNode.removeChild(d);">&times;</span></div>' +
-          '<div class="dash-loc-box-sub">Duplicate files detected. Where do you want to browse?</div>' +
-          '<div class="dash-loc-list">';
-    
-    for (var i = 0; i < ug.locations.length; i++) {
-      var loc = ug.locations[i];
-      var drive = loc.path.indexOf('usb0') > -1 ? 'USB0' : (loc.path.indexOf('usb1') > -1 ? 'USB1' : (loc.path.indexOf('data') > -1 ? 'DATA' : 'SYS'));
-      html += 
-        '<div class="dash-loc-list-item" onclick="ZFTPD.dashboard.navTo(\''+Z.E(loc.path)+'\')">' +
-          '<div class="dash-loc-drive">'+drive+'</div>' +
-          '<div class="dash-loc-path" title="'+loc.path+'">'+loc.path+'</div>' +
-          '<div class="dash-loc-size">'+Z.bytes(loc.size||0)+'</div>' +
-        '</div>';
-    }
-    
-    html += '</div></div></div>';
-    var div = D.createElement('div');
-    div.innerHTML = html;
-    D.body.appendChild(div.firstChild);
-  }
 
   /* ── Load recent files ── */
   function loadRecentFiles() {

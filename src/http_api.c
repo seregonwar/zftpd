@@ -58,6 +58,27 @@ SOFTWARE.
 #ifndef _WIN32
 #include <sys/ioctl.h>
 #endif
+
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+#include <dlfcn.h>
+
+typedef enum {
+    LNC_FLAG_NONE = 0,
+    LNC_SKIP_LAUNCH_CHECK = 1,
+    LNC_SKIP_SYSTEM_UPDATE_CHECK = 2,
+    LNC_REBOOT_PATCH_INSTALL = 4,
+    LNC_VR_MODE = 8,
+    LNC_NON_VR_MODE = 16
+} LncAppParamFlag;
+
+typedef struct _LncAppParam {
+    uint32_t sz;
+    uint32_t user_id;
+    uint32_t app_opt;
+    uint64_t crash_report;
+    LncAppParamFlag check_flag;
+} LncAppParam;
+#endif
 #if defined(PLATFORM_PS4) || defined(PLATFORM_PS5) || defined(__FreeBSD__)
 #include <sys/mount.h> /* fstatfs, struct statfs — for sendfile safety check */
 /* PS4/PS5 libkernel exports _fstatfs, not fstatfs */
@@ -247,6 +268,7 @@ static http_response_t *api_copy_pause(const http_request_t *request);
 #endif
 static http_response_t *api_network_reset(const http_request_t *request);
 static http_response_t *api_admin_fan(const http_request_t *request);
+static http_response_t *api_admin_launch(const http_request_t *request);
 static http_response_t *error_json(http_status_t code, const char *message);
 
 /*===========================================================================*
@@ -1215,6 +1237,11 @@ http_response_t *http_api_handle(const http_request_t *request) {
   /*  GET /api/admin/fan?threshold=... — set PS4/PS5 fan threshold */
   if (strncmp(request->uri, "/api/admin/fan", 14) == 0) {
     return api_admin_fan(request);
+  }
+
+  /*  GET /api/admin/launch?id=... — launch PS4/PS5 app by title ID */
+  if (strncmp(request->uri, "/api/admin/launch", 17) == 0) {
+    return api_admin_launch(request);
   }
 
   /*  Static resources (index.html, style.css, app.js)  */
@@ -4187,4 +4214,76 @@ static http_response_t *api_admin_fan(const http_request_t *request) {
   int blen = snprintf(body, sizeof(body), "{\"status\":\"ok\",\"threshold\":%d}", threshold);
   http_response_set_body(resp, body, (size_t)blen);
   return resp;
+}
+
+/*===========================================================================*
+ * GET /api/admin/launch — Game Launcher Endpoint
+ *===========================================================================*/
+static http_response_t *api_admin_launch(const http_request_t *request) {
+    char title_id[64] = {0};
+    if (http_get_query_param(request, "id", title_id, sizeof(title_id)) < 0) {
+        return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing 'id' parameter");
+    }
+
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+    /*
+     * We dynamically load libSceLncUtil.sprx, libSceUserService.sprx,
+     * and libSceSystemService.sprx. Since this is a payload, these are
+     * not statically linked and must be resolved at runtime using POSIX dlopen.
+     */
+    void *sysService = dlopen("/system/common/lib/libSceSystemService.sprx", RTLD_NOW | RTLD_GLOBAL);
+    void *userService = dlopen("/system/common/lib/libSceUserService.sprx", RTLD_NOW | RTLD_GLOBAL);
+    void *lncUtil = dlopen("/system/common/lib/libSceLncUtil.sprx", RTLD_NOW | RTLD_GLOBAL);
+
+    if (sysService && userService && lncUtil) {
+        int (*f_sceUserServiceGetForegroundUser)(uint32_t *) = 
+            (int (*)(uint32_t *))dlsym(userService, "sceUserServiceGetForegroundUser");
+            
+        uint32_t (*f_sceLncUtilLaunchApp)(const char*, const char**, LncAppParam*) = 
+            (uint32_t (*)(const char*, const char**, LncAppParam*))dlsym(lncUtil, "sceLncUtilLaunchApp");
+
+        if (f_sceUserServiceGetForegroundUser && f_sceLncUtilLaunchApp) {
+            uint32_t userId = 0;
+            if (f_sceUserServiceGetForegroundUser(&userId) < 0) {
+                return error_json(HTTP_STATUS_500_INTERNAL_SERVER_ERROR, "Failed to get Foreground User");
+            }
+
+            LncAppParam param;
+            memset(&param, 0, sizeof(param));
+            param.sz = sizeof(LncAppParam);
+            param.user_id = userId;
+            param.app_opt = 0;
+            param.crash_report = 0;
+            param.check_flag = LNC_SKIP_SYSTEM_UPDATE_CHECK;
+
+            /* LncUtil uses Title ID like CUSAXXXXX */
+            uint32_t res = f_sceLncUtilLaunchApp(title_id, NULL, &param);
+            
+            char msg[128];
+            if (res == 0 || res == 0x8094000c) { /* 0x8094000c means ALREADY_RUNNING */
+                (void)snprintf(msg, sizeof(msg), "{\"status\": \"ok\", \"message\": \"Game %s launched successfully!\"}", title_id);
+                http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+                http_response_add_header(resp, "Content-Type", "application/json");
+                http_response_set_body(resp, (const uint8_t *)msg, strlen(msg));
+                pal_notification_send("Game Launch executed.");
+                return resp;
+            } else {
+                (void)snprintf(msg, sizeof(msg), "Game Launch failed with error: 0x%08X", res);
+                return error_json(HTTP_STATUS_500_INTERNAL_SERVER_ERROR, msg);
+            }
+        } else {
+            return error_json(HTTP_STATUS_500_INTERNAL_SERVER_ERROR, "Failed to resolve Launch API symbols");
+        }
+    } else {
+        return error_json(HTTP_STATUS_500_INTERNAL_SERVER_ERROR, "Failed to dynamically load Sony SPRX modules");
+    }
+#else
+    /* Mock fallback for local tests */
+    char debug_msg[128];
+    (void)snprintf(debug_msg, sizeof(debug_msg), "{\"status\": \"ok\", \"message\": \"Mock Launch %s initiated\"}", title_id);
+    http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+    http_response_add_header(resp, "Content-Type", "application/json");
+    http_response_set_body(resp, (const uint8_t *)debug_msg, strlen(debug_msg));
+    return resp;
+#endif
 }
