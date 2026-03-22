@@ -1,0 +1,198 @@
+/* ══ THEMES ═══════════════════════════════════════════════════════════════
+ * CSS custom properties for all color themes.
+ * Each theme defines a complete palette: backgrounds, surfaces, borders,
+ * accent colors, text colors, and semantic states (ok/warn/error).
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+:root,
+[data-theme="ps5"] {
+  --bg: #080b10;
+  --sf: #101520;
+  --sf2: #171d28;
+  --sf3: #1e2535;
+  --bd: #1e2d40;
+  --bd2: #273550;
+  --ac: #2b8cff;
+  --ac2: #00c2ff;
+  --acR: 43, 140, 255;
+  --tx: #dce8f8;
+  --tx2: #7a94b8;
+  --tx3: #445a78;
+  --ok: #2ecc71;
+  --wn: #f0a500;
+  --er: #ff5f57;
+  --tg: rgba(43, 140, 255, .12);
+  --tgb: rgba(43, 140, 255, .3);
+  --tl: #2b8cff;
+  --gw: rgba(43, 140, 255, .08);
+  --glass: rgba(16, 21, 32, .75);
+  --glass-border: rgba(43, 140, 255, .15);
+  --shadow: rgba(0, 0, 0, .5);
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --radius-pill: 999px;
+  --transition-fast: .12s ease;
+  --transition-med: .2s ease;
+  --transition-slow: .35s cubic-bezier(.22, 1, .36, 1);
+  /* ── Premium visual tokens ── */
+  --glow-sm: 0 0 8px rgba(var(--acR), .2);
+  --glow-md: 0 0 20px rgba(var(--acR), .25);
+  --glow-lg: 0 0 40px rgba(var(--acR), .3);
+  --card-shadow: 0 2px 8px rgba(0, 0, 0, .3);
+  --card-hover-shadow: 0 12px 40px rgba(0, 0, 0, .5), 0 0 0 1px rgba(var(--acR), .25);
+  --card-hover-lift: translateY(-3px);
+  --topbar-bg: linear-gradient(180deg, var(--sf) 0%, rgba(16,21,32,.95) 100%);
+  --glass-blur: 12px;
+}
+
+[data-theme="matrix"] {
+  --bg: #030804;
+  --sf: #07100a;
+  --sf2: #0b160d;
+  --sf3: #101c12;
+  --bd: #132a16;
+  --bd2: #1c4022;
+  --ac: #00e639;
+  --ac2: #a8ff3e;
+  --acR: 0, 230, 57;
+  --tx: #c8f5cc;
+  --tx2: #56a060;
+  --tx3: #2e6035;
+  --ok: #00e639;
+  --wn: #d4ff00;
+  --er: #ff3333;
+  --tg: rgba(0, 230, 57, .1);
+  --tgb: rgba(0, 230, 57, .3);
+  --tl: #00e639;
+  --gw: rgba(0, 230, 57, .05);
+  --glass: rgba(7, 16, 10, .75);
+  --glass-border: rgba(0, 230, 57, .15);
+  --shadow: rgba(0, 0, 0, .5);
+}
+
+[data-theme="sunset"] {
+  --bg: #0c080f;
+  --sf: #16101e;
+  --sf2: #1e1528;
+  --sf3: #261b32;
+  --bd: #2e1f40;
+  --bd2: #44285c;
+  --ac: #ff6535;
+  --ac2: #ff2d78;
+  --acR: 255, 101, 53;
+  --tx: #f2e4ff;
+  --tx2: #a87ac4;
+  --tx3: #6e4a8c;
+  --ok: #80ff44;
+  --wn: #ffcc00;
+  --er: #ff2d78;
+  --tg: rgba(255, 101, 53, .12);
+  --tgb: rgba(255, 101, 53, .3);
+  --tl: #ff6535;
+  --gw: rgba(255, 101, 53, .07);
+  --glass: rgba(22, 16, 30, .75);
+  --glass-border: rgba(255, 101, 53, .15);
+  --shadow: rgba(0, 0, 0, .5);
+}
+
+[data-theme="arctic"] {
+  --bg: #060a0d;
+  --sf: #0b1218;
+  --sf2: #101a22;
+  --sf3: #16222e;
+  --bd: #162232;
+  --bd2: #1e3048;
+  --ac: #00d4ff;
+  --ac2: #00ffcc;
+  --acR: 0, 212, 255;
+  --tx: #d4eef8;
+  --tx2: #5aaccc;
+  --tx3: #2e7090;
+  --ok: #00ffcc;
+  --wn: #ffee00;
+  --er: #ff4466;
+  --tg: rgba(0, 212, 255, .1);
+  --tgb: rgba(0, 212, 255, .28);
+  --tl: #00d4ff;
+  --gw: rgba(0, 212, 255, .06);
+  --glass: rgba(11, 18, 24, .75);
+  --glass-border: rgba(0, 212, 255, .15);
+  --shadow: rgba(0, 0, 0, .5);
+}
+
+[data-theme="neon"] {
+  --bg: #07040e;
+  --sf: #0e0a1c;
+  --sf2: #150f26;
+  --sf3: #1c1432;
+  --bd: #241a40;
+  --bd2: #352560;
+  --ac: #c800ff;
+  --ac2: #ff00cc;
+  --acR: 200, 0, 255;
+  --tx: #eddeff;
+  --tx2: #9a70cc;
+  --tx3: #5e3d8a;
+  --ok: #44ff88;
+  --wn: #ffaa00;
+  --er: #ff3344;
+  --tg: rgba(200, 0, 255, .1);
+  --tgb: rgba(200, 0, 255, .28);
+  --tl: #c800ff;
+  --gw: rgba(200, 0, 255, .06);
+  --glass: rgba(14, 10, 28, .75);
+  --glass-border: rgba(200, 0, 255, .15);
+  --shadow: rgba(0, 0, 0, .5);
+}
+
+[data-theme="amber"] {
+  --bg: #090700;
+  --sf: #120e00;
+  --sf2: #1a1400;
+  --sf3: #221b00;
+  --bd: #2e2200;
+  --bd2: #453300;
+  --ac: #ffb700;
+  --ac2: #ff8c00;
+  --acR: 255, 183, 0;
+  --tx: #fff4cc;
+  --tx2: #c49a00;
+  --tx3: #7a5e00;
+  --ok: #88ff44;
+  --wn: #ff8c00;
+  --er: #ff4422;
+  --tg: rgba(255, 183, 0, .12);
+  --tgb: rgba(255, 183, 0, .3);
+  --tl: #ffb700;
+  --gw: rgba(255, 183, 0, .07);
+  --glass: rgba(18, 14, 0, .75);
+  --glass-border: rgba(255, 183, 0, .15);
+  --shadow: rgba(0, 0, 0, .5);
+}
+
+/* ── Cloud — clean white / light theme ─────────────────────────────────── */
+[data-theme="cloud"] {
+  --bg: #f0f2f5;
+  --sf: #ffffff;
+  --sf2: #f5f7fa;
+  --sf3: #ebeef3;
+  --bd: #dce1e8;
+  --bd2: #c5cdd8;
+  --ac: #3b82f6;
+  --ac2: #2563eb;
+  --acR: 59, 130, 246;
+  --tx: #1a1d23;
+  --tx2: #5b6577;
+  --tx3: #8b95a8;
+  --ok: #16a34a;
+  --wn: #d97706;
+  --er: #dc2626;
+  --tg: rgba(59, 130, 246, .08);
+  --tgb: rgba(59, 130, 246, .2);
+  --tl: #3b82f6;
+  --gw: rgba(59, 130, 246, .06);
+  --glass: rgba(255, 255, 255, .85);
+  --glass-border: rgba(255, 255, 255, .4);
+  --shadow: rgba(0, 0, 0, .08);
+}

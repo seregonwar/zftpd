@@ -1,0 +1,544 @@
+/* ══ PS5 HUB DASHBOARD REVOLUTION ═════════════════════════════════════════
+ * Premium, glassmorphism-heavy dashboard redesign.
+ * ═════════════════════════════════════════════════════════════════════════ */
+
+.dash {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 0 40px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+}
+
+/* ── Section Structure ── */
+.dash-section {
+  background: var(--sf);
+  border: 1px solid var(--bd);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+  box-shadow: var(--card-shadow);
+  position: relative;
+  overflow: hidden;
+}
+
+/* Accent top border for sections */
+.dash-section::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--ac), transparent);
+  opacity: 0.5;
+}
+
+.dash-section-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--tx);
+  margin-bottom: 20px;
+}
+
+.dash-section-title svg {
+  color: var(--ac);
+  width: 20px;
+  height: 20px;
+  filter: drop-shadow(0 0 4px rgba(43,140,255, 0.4));
+}
+
+.dash-section-title .dash-see-all {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--tx3);
+  cursor: pointer;
+  padding: 6px 12px;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.05);
+  transition: all var(--transition-fast);
+}
+
+.dash-section-title .dash-see-all:hover {
+  color: #fff;
+  background: var(--ac);
+  box-shadow: var(--glow-sm);
+}
+
+/* ── Hero Banner ── */
+.dash-hero-container {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  margin-bottom: 24px;
+}
+
+.dash-hero-banner {
+  position: relative;
+  width: 100%;
+  height: 320px;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  background: var(--sf2);
+  display: flex;
+  box-shadow: var(--card-shadow);
+  border: 1px solid var(--ac);
+}
+
+.dash-hero-bg {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background-size: cover;
+  background-position: center;
+  filter: blur(12px) brightness(0.3);
+  transform: scale(1.1); /* hide blurred edges */
+  z-index: 1;
+}
+
+.dash-hero-content {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: flex-end;
+  padding: 40px;
+  width: 100%;
+  background: linear-gradient(to top, rgba(0,0,0,0.95) 0%, rgba(0,0,0,0.3) 60%, transparent 100%);
+}
+
+.dash-hero-cover {
+  width: 180px;
+  height: 180px;
+  border-radius: var(--radius-md);
+  box-shadow: 0 16px 48px rgba(0,0,0,0.8);
+  border: 2px solid rgba(255,255,255,0.15);
+  object-fit: cover;
+  margin-right: 32px;
+}
+
+.dash-hero-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.dash-hero-meta {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--ac);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.dash-hero-title {
+  font-size: 32px;
+  font-weight: 800;
+  color: #fff;
+  line-height: 1.1;
+  text-shadow: 0 4px 12px rgba(0,0,0,0.5);
+}
+
+.dash-hero-id {
+  font-size: 14px;
+  color: rgba(255,255,255,0.7);
+  font-weight: 500;
+}
+
+.dash-hero-actions {
+  margin-left: auto;
+  margin-bottom: 20px;
+}
+
+/* ── Game Cards Scroll ── */
+.dash-games-row {
+  display: flex;
+  gap: 16px;
+  overflow-x: auto;
+  padding-bottom: 16px;
+  scrollbar-width: none;
+  scroll-snap-type: x mandatory;
+}
+
+.dash-games-row::-webkit-scrollbar { display: none; }
+
+.dash-game-card {
+  flex-shrink: 0;
+  width: 160px;
+  cursor: pointer;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--bd);
+  transition: transform .2s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow .2s;
+  scroll-snap-align: start;
+  position: relative;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+}
+
+.dash-game-card:hover {
+  transform: translateY(-6px) scale(1.02);
+  box-shadow: 0 16px 32px rgba(0,0,0,0.4), 0 0 12px rgba(43,140,255,0.2);
+  border-color: rgba(255,255,255,0.2);
+  background: rgba(255,255,255,0.05);
+}
+
+.dash-game-cover {
+  width: 100%;
+  height: 160px;
+  object-fit: cover;
+  background: rgba(0,0,0,0.2);
+  display: block;
+}
+
+.dash-game-cover.placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--tx3);
+  font-size: 32px;
+}
+
+.dash-game-info {
+  padding: 12px;
+}
+
+.dash-game-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--tx);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-bottom: 4px;
+}
+
+.dash-game-id {
+  font-size: 10px;
+  color: var(--tx3);
+  font-weight: 500;
+}
+
+/* Location Badge */
+.dash-loc-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: rgba(0,0,0,0.7);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  border: 1px solid rgba(255,255,255,0.15);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 4px 8px;
+  border-radius: var(--radius-pill);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+  z-index: 10;
+}
+
+/* ── Layout: Two Columns for Actions/Stats & Recent ── */
+.dash-grid-2col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 32px;
+}
+@media (max-width: 900px) {
+  .dash-grid-2col {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ── Quick Actions (Pills) ── */
+.dash-actions-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+
+.dash-action-pill {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--bd);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.dash-action-pill:hover {
+  background: rgba(255,255,255,0.08);
+  transform: translateY(-2px);
+  border-color: rgba(255,255,255,0.2);
+  box-shadow: 0 8px 16px rgba(0,0,0,0.2);
+}
+
+.dash-action-pill-ico {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.dash-action-pill-ico.blue   { background: rgba(43, 140, 255, 0.15); color: #2b8cff; }
+.dash-action-pill-ico.green  { background: rgba(46, 204, 113, 0.15); color: #2ecc71; }
+.dash-action-pill-ico.orange { background: rgba(240, 165, 0, 0.15);  color: #f0a500; }
+.dash-action-pill-ico.purple { background: rgba(124, 77, 255, 0.15); color: #7c4dff; }
+
+.dash-action-pill-text {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--tx);
+}
+
+/* ── Stats (Circular Rings) ── */
+.dash-stats-flex {
+  display: flex;
+  gap: 24px;
+  margin-top: 24px;
+}
+
+.dash-stat-ring-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: rgba(0,0,0,0.15);
+  border-radius: 16px;
+  padding: 20px 10px;
+  border: 1px solid rgba(255,255,255,0.05);
+}
+
+.dash-stat-ring {
+  position: relative;
+  width: 80px;
+  height: 80px;
+  margin-bottom: 16px;
+}
+
+.dash-stat-ring svg {
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+}
+
+.dash-stat-ring-bg {
+  fill: none;
+  stroke: rgba(255,255,255,0.05);
+  stroke-width: 6;
+}
+
+.dash-stat-ring-fg {
+  fill: none;
+  stroke: var(--ac);
+  stroke-width: 6;
+  stroke-linecap: round;
+  stroke-dasharray: 220; /* 2 * pi * r (r=35) approximated */
+  stroke-dashoffset: 220;
+  transition: stroke-dashoffset 1s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.dash-stat-ring-fg.wn { stroke: var(--wn); }
+.dash-stat-ring-fg.cr { stroke: var(--er); }
+
+.dash-stat-ring-val {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--tx);
+}
+
+.dash-stat-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--tx2);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-bottom: 4px;
+}
+
+.dash-stat-sub {
+  font-size: 10px;
+  color: var(--tx3);
+  text-align: center;
+}
+
+/* ── Recent Files ── */
+.dash-recent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dash-recent-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: rgba(255,255,255,0.02);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.dash-recent-item:hover {
+  background: rgba(255,255,255,0.06);
+  border-color: rgba(255,255,255,0.1);
+  transform: translateX(4px);
+}
+
+.dash-recent-ico {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255,255,255,0.05);
+  flex-shrink: 0;
+}
+
+.dash-recent-name {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--tx);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dash-recent-size {
+  font-size: 11px;
+  color: var(--tx3);
+  white-space: nowrap;
+}
+
+/* ── Dedup Location Dropdown ── */
+.dash-loc-dropdown {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.6);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+}
+
+.dash-loc-box {
+  background: var(--bg);
+  border: 1px solid var(--bd);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+  width: 480px;
+  max-width: 90%;
+  box-shadow: 0 24px 64px rgba(0,0,0,0.8);
+}
+
+.dash-loc-box-title {
+  font-size: 20px;
+  font-weight: 700;
+  margin-bottom: 8px;
+  color: #fff;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.dash-loc-box-title span.close-btn {
+  cursor: pointer;
+  color: var(--tx3);
+  font-size: 24px;
+}
+
+.dash-loc-box-title span.close-btn:hover {
+  color: #fff;
+}
+
+.dash-loc-box-sub {
+  font-size: 13px;
+  color: var(--tx2);
+  margin-bottom: 24px;
+}
+
+.dash-loc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dash-loc-list-item {
+  display: flex;
+  align-items: center;
+  padding: 16px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.05);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all .15s;
+}
+
+.dash-loc-list-item:hover {
+  background: rgba(43,140,255,0.1);
+  border-color: var(--ac);
+}
+
+.dash-loc-drive {
+  background: var(--tx);
+  color: var(--bg);
+  font-size: 10px;
+  font-weight: 800;
+  padding: 4px 8px;
+  border-radius: 4px;
+  margin-right: 16px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.dash-loc-path {
+  font-size: 13px;
+  color: var(--tx);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.dash-loc-size {
+  font-size: 11px;
+  color: var(--tx3);
+  margin-left: 12px;
+}
+
+/* ── Skeleton Loaders ── */
+@keyframes dash-shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+.shimmer {
+  position: relative;
+  overflow: hidden;
+  background-color: var(--sf) !important;
+}
+.shimmer::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.06), transparent);
+  animation: dash-shimmer 2s infinite;
+}

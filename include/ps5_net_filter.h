@@ -1,5 +1,5 @@
 /*
- * MIT License — Copyright (c) 2026 SeregonWar
+ * GNU GPLv3 License — Copyright (c) 2026 SeregonWar
  * See LICENSE for full text.
  */
 
@@ -7,7 +7,7 @@
  * @file ps5_net_filter.h
  * @brief PS5 kernel-level outbound connection filter
  *
- * PROBLEM ADDRESSED
+ * PROBLEM AD DRESSED
  * -----------------
  * Sony system daemons (ScePatchChecker, PFAuthClient, SceConsoleFeatureFlagChecker,
  * SceHidConfigService, SceWorkaroundCtl, RNPS Curl) enter aggressive retry loops

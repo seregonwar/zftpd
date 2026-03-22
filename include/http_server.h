@@ -41,16 +41,15 @@ SOFTWARE.
 typedef struct http_server http_server_t;
 
 /**
- * @brief Create and start HTTP server on given port
+ * @brief Create HTTP server
  *
- * @param loop      Event loop to register with
- * @param port      TCP port to listen on
- * @param root_path Root directory for filesystem confinement
- *                  (all HTTP file ops restricted to this subtree)
+ * @param loop      Event loop handle
+ * @param bind_addr Bind address with port (e.g., "[::1]:8888" or "0.0.0.0:8888")
+ * @param root_path Filesystem root for confinement
  *
  * @return Server handle, or NULL on failure
  */
-http_server_t *http_server_create(event_loop_t *loop, uint16_t port,
+http_server_t *http_server_create(event_loop_t *loop, const char *bind_addr,
                                   const char *root_path);
 
 /**

@@ -1,0 +1,202 @@
+/* ══ TOPBAR ═══════════════════════════════════════════════════════════════ */
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 20px;
+  height: 58px;
+  background: var(--topbar-bg, var(--sf));
+  border-bottom: 1.5px solid var(--tl);
+  box-shadow: 0 2px 20px rgba(0, 0, 0, .45), inset 0 -1px 0 rgba(var(--acR), .1);
+}
+
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  flex: 1;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.brand-logo {
+  width: 38px;
+  height: 38px;
+  object-fit: contain;
+  filter: drop-shadow(0 0 10px rgba(var(--acR), .5));
+}
+
+.brand-text { line-height: 1; }
+
+.brand-title {
+  font-weight: 800;
+  font-size: 16px;
+  background: linear-gradient(90deg, var(--ac), var(--ac2));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  white-space: nowrap;
+  letter-spacing: -.01em;
+}
+
+.brand-sub {
+  font-size: 9px;
+  color: var(--tx3);
+  margin-top: 2px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* ══ NAV TABS ═════════════════════════════════════════════════════════════ */
+
+.nav-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 20px;
+  background: var(--sf);
+  border-bottom: 1px solid var(--bd);
+}
+
+.nav-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 16px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--tx2);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+  white-space: nowrap;
+  background: none;
+  border-top: none;
+  border-left: none;
+  border-right: none;
+}
+
+.nav-tab:hover {
+  color: var(--tx);
+}
+
+.nav-tab.active {
+  color: var(--ac);
+  border-bottom-color: var(--ac);
+  background: var(--gw);
+  text-shadow: 0 0 10px rgba(var(--acR), .3);
+}
+
+.nav-tab svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* ══ TOOLBAR ══════════════════════════════════════════════════════════════ */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 20px;
+  background: var(--sf);
+  border-bottom: 1px solid var(--bd);
+  flex-wrap: wrap;
+}
+
+.spacer {
+  flex: 1;
+  min-width: 8px;
+}
+
+.tb-sep {
+  width: 1px;
+  height: 22px;
+  background: var(--bd);
+  flex-shrink: 0;
+  margin: 0 2px;
+}
+
+/* ══ BREADCRUMB ═══════════════════════════════════════════════════════════ */
+
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 20px;
+  border-bottom: 1px solid var(--bd);
+  overflow-x: auto;
+  scrollbar-width: none;
+  background: var(--sf);
+}
+
+.breadcrumb::-webkit-scrollbar { display: none; }
+
+.crumb {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--tx3);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 3px 8px;
+  border-radius: 5px;
+  white-space: nowrap;
+  transition: color .1s, background .1s;
+}
+
+.crumb:hover {
+  color: var(--tx);
+  background: var(--sf2);
+}
+
+.crumb.act {
+  color: var(--ac);
+  font-weight: 600;
+  background: var(--gw);
+}
+
+.cr-sep {
+  color: var(--bd2);
+  font-size: 11px;
+  user-select: none;
+  padding: 0 1px;
+}
+
+/* ══ CONTENT AREA ═════════════════════════════════════════════════════════ */
+
+.content {
+  padding: 14px 20px;
+  min-height: calc(100vh - 180px);
+}
+
+/* ══ VIEW CONTAINER ═══════════════════════════════════════════════════════
+ * Each view (dashboard, explorer, file-manager, downloads) is a
+ * direct child of #app-content and toggles visibility via .view-active.
+ * ═════════════════════════════════════════════════════════════════════════ */
+
+.view {
+  display: none;
+  animation: fadeIn var(--transition-fast);
+}
+
+.view.view-active {
+  display: block;
+}

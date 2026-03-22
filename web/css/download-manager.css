@@ -1,0 +1,307 @@
+/* ══ DOWNLOAD MANAGER ═════════════════════════════════════════════════════
+ * URL input, active downloads list, history.
+ * ═════════════════════════════════════════════════════════════════════════ */
+
+.dl-container {
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+/* ── URL Input Bar ── */
+
+.dl-input-bar {
+  display: flex;
+  gap: 8px;
+  padding: 16px;
+  background: var(--sf);
+  border: 1px solid var(--bd);
+  border-radius: var(--radius-md);
+  margin-bottom: 16px;
+}
+
+.dl-url-input {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--bd2);
+  color: var(--tx);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color var(--transition-fast);
+}
+
+.dl-url-input:focus {
+  border-color: var(--ac);
+}
+
+.dl-url-input::placeholder {
+  color: var(--tx3);
+}
+
+.dl-dest-select {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: var(--sf2);
+  border: 1px solid var(--bd2);
+  border-radius: 8px;
+  color: var(--tx2);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all var(--transition-fast);
+}
+
+.dl-dest-select:hover {
+  border-color: var(--ac);
+  color: var(--tx);
+}
+
+.dl-start-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 20px;
+  background: var(--ac);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+  transition: filter var(--transition-fast);
+  white-space: nowrap;
+}
+
+.dl-start-btn:hover {
+  filter: brightness(1.15);
+}
+
+.dl-start-btn:disabled {
+  opacity: .4;
+  cursor: not-allowed;
+}
+
+/* ── Section Headers ── */
+
+.dl-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--tx3);
+  text-transform: uppercase;
+  letter-spacing: .08em;
+}
+
+.dl-section-header .dl-count {
+  background: var(--gw);
+  color: var(--ac);
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  font-size: 10px;
+}
+
+/* ── Download Card ── */
+
+.dl-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  background: var(--sf);
+  border: 1px solid var(--bd);
+  border-radius: var(--radius-md);
+  margin-bottom: 8px;
+  transition: border-color var(--transition-fast);
+}
+
+.dl-card:hover {
+  border-color: var(--bd2);
+}
+
+.dl-card-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.dl-card-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: var(--gw);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--ac);
+}
+
+.dl-card-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.dl-card-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--tx);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dl-card-url {
+  font-size: 10px;
+  color: var(--tx3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 2px;
+}
+
+.dl-card-stats {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.dl-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+}
+
+.dl-stat-value {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--tx);
+}
+
+.dl-stat-label {
+  font-size: 9px;
+  color: var(--tx3);
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+
+/* ── Progress Bar ── */
+
+.dl-progress {
+  height: 5px;
+  border-radius: var(--radius-pill);
+  background: var(--bd);
+  overflow: hidden;
+}
+
+.dl-progress-fill {
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(90deg, var(--ac), var(--ac2));
+  transition: width .15s ease;
+}
+
+.dl-progress-fill.error {
+  background: var(--er);
+}
+
+.dl-progress-fill.done {
+  background: var(--ok);
+}
+
+/* ── Card Actions ── */
+
+.dl-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dl-card-actions .btn {
+  padding: 4px 10px;
+  font-size: 10px;
+}
+
+/* ── Empty State ── */
+
+.dl-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 48px 24px;
+  background: var(--sf);
+  border: 1px solid var(--bd);
+  border-radius: var(--radius-md);
+  color: var(--tx3);
+  font-size: 13px;
+  text-align: center;
+}
+
+.dl-empty-icon {
+  opacity: .3;
+  color: var(--tx2);
+}
+
+/* ── History ── */
+
+.dl-history-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--bd);
+  font-size: 12px;
+}
+
+.dl-history-item:last-child {
+  border-bottom: none;
+}
+
+.dl-history-name {
+  flex: 1;
+  font-weight: 500;
+  color: var(--tx);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dl-history-size {
+  color: var(--tx2);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.dl-history-date {
+  color: var(--tx3);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.dl-history-status {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+}
+
+.dl-history-status.ok {
+  background: rgba(46, 204, 113, .12);
+  color: var(--ok);
+}
+
+.dl-history-status.er {
+  background: rgba(255, 95, 87, .12);
+  color: var(--er);
+}

@@ -1,0 +1,173 @@
+/* ══ RESPONSIVE — MOBILE ══════════════════════════════════════════════════ */
+
+@media (max-width: 768px) {
+
+  /* ── Topbar ── */
+  .topbar {
+    flex-wrap: wrap;
+    height: auto;
+    padding: 8px 12px;
+    gap: 6px;
+  }
+
+  .topbar-left {
+    flex: 0 0 auto;
+    min-width: 0;
+  }
+
+  .brand-sub { display: none; }
+  .brand-logo { width: 30px; height: 30px; }
+  .brand-title { font-size: 14px; }
+
+  .topbar-right {
+    flex: 1 1 auto;
+    justify-content: flex-end;
+    overflow-x: auto;
+    gap: 5px;
+  }
+
+  .status-pill {
+    font-size: 10px;
+    padding: 3px 8px;
+  }
+
+  /* ── Nav tabs ── */
+  .nav-tabs {
+    padding: 0 12px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .nav-tabs::-webkit-scrollbar { display: none; }
+
+  .nav-tab {
+    padding: 8px 12px;
+    font-size: 11px;
+  }
+
+  /* ── Toolbar ── */
+  .toolbar {
+    padding: 6px 12px;
+    gap: 4px;
+  }
+
+  .btn {
+    padding: 5px 8px;
+    font-size: 10px;
+  }
+
+  .search {
+    width: 100%;
+    max-width: none;
+  }
+
+  .search-wrap {
+    flex: 1 1 100%;
+    order: 10;
+  }
+
+  /* ── Breadcrumb ── */
+  .breadcrumb {
+    padding: 4px 12px;
+  }
+
+  .crumb {
+    font-size: 10px;
+    padding: 2px 6px;
+  }
+
+  /* ── Content ── */
+  .content {
+    padding: 10px 12px;
+  }
+
+  .fl.vg-grid {
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 6px;
+  }
+
+  .fl.vg-grid .card {
+    padding: 12px 8px 8px;
+  }
+
+  .c-ico { width: 40px; height: 40px; }
+  .c-name { font-size: 11px; }
+  .c-meta { font-size: 9px; }
+
+  /* ── Show mobile action button ── */
+  .c-action { display: flex; }
+
+  /* ── File manager ── */
+  .fm-container {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr auto 1fr;
+    height: auto;
+  }
+
+  .fm-center {
+    flex-direction: row;
+    padding: 4px;
+  }
+
+  /* ── Dashboard ── */
+  .dash-game-card { width: 130px; }
+  .dash-actions { grid-template-columns: repeat(2, 1fr); }
+  .dash-stats { grid-template-columns: 1fr; }
+
+  /* ── Transfer tray ── */
+  .xfer-tray {
+    left: 10px;
+    right: 10px;
+    max-width: none;
+    bottom: 10px;
+  }
+
+  .xfer-card { min-width: 0; }
+
+  /* ── Context menu ── */
+  .ctx { min-width: 170px; }
+
+  /* ── Download manager ── */
+  .dl-input-bar {
+    flex-direction: column;
+  }
+
+  .dl-card-stats {
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 400px) {
+  .fl.vg-grid {
+    grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+  }
+
+  .dash-game-card { width: 110px; }
+  .dash-actions { grid-template-columns: 1fr; }
+}
+
+/* ══ THEME SELECTOR — MOBILE ═════════════════════════════════════════════ */
+
+.theme-select-mobile {
+  display: none;
+  background: var(--sf2);
+  color: var(--tx);
+  border: 1px solid var(--bd);
+  border-radius: 8px;
+  padding: 6px 28px 6px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  appearance: none;
+  width: 120px;
+}
+
+.theme-select-mobile:focus {
+  outline: 2px solid var(--ac);
+  outline-offset: 2px;
+}
+
+@media (hover: none) and (pointer: coarse) {
+  .theme-btn { display: none; }
+  .theme-select-mobile { display: block; }
+  .theme-switcher { margin-left: auto; }
+}

@@ -257,6 +257,83 @@ ifeq ($(ENABLE_ZHTTPD),1)
     SOURCES += src/http_api.c
     SOURCES += src/http_csrf.c
     SOURCES += src/http_resources.c
+    SOURCES += src/exfat_unpacker.c
+    SOURCES += src/pkg_unpacker.c
+endif
+
+#============================================================================
+# OPTIONAL LIBRARIES — enable with ENABLE_LIBARCHIVE=1 / ENABLE_LIBCURL=1
+#
+# When enabled, the Makefile verifies that the required header is actually
+# available.  For desktop (gcc/clang) it uses a compiler probe.  For
+# PS4/PS5 cross-compilers the probe fails (missing sysroot headers),
+# so we fall back to a simple file-existence check on bundled headers.
+#============================================================================
+
+override ENABLE_LIBARCHIVE ?= 0
+override ENABLE_LIBCURL ?= 0
+
+# ── libarchive detection ──────────────────────────────────────────────────
+ifeq ($(ENABLE_LIBARCHIVE),1)
+  _BUNDLED_ARCHIVE_H := $(wildcard external/libarchive-3.8.6/libarchive/archive.h)
+  ifneq ($(filter $(TARGET),ps4 ps5),)
+    # Cross-compilation: NO prebuilt libarchive static lib for PS4/PS5!
+    # Even if headers are found, we must gracefully disable it.
+    $(info [INFO] libarchive not supported on cross-compile targets — disabling ENABLE_LIBARCHIVE)
+    override ENABLE_LIBARCHIVE := 0
+  else
+    # Desktop: try system headers first, then bundled
+    _HAS_ARCHIVE := $(shell echo '\#include <archive.h>' | $(CC) -xc -fsyntax-only - 2>/dev/null && echo 1 || echo 0)
+    ifeq ($(_HAS_ARCHIVE),1)
+      $(info [INFO] Using system libarchive)
+    else ifneq ($(_BUNDLED_ARCHIVE_H),)
+      $(info [INFO] Using bundled libarchive headers)
+      CFLAGS += -I./external/libarchive-3.8.6/libarchive
+      ifeq ($(wildcard external/libarchive-3.8.6-compiled/.libs/libarchive.a),)
+        LIBS += -larchive
+      else
+        LIBS += external/libarchive-3.8.6-compiled/.libs/libarchive.a
+      endif
+    else
+      $(info [INFO] libarchive headers not found — disabling ENABLE_LIBARCHIVE)
+      override ENABLE_LIBARCHIVE := 0
+    endif
+  endif
+endif
+
+ifeq ($(ENABLE_LIBARCHIVE),1)
+    CFLAGS += -DENABLE_LIBARCHIVE=1
+endif
+
+# ── libcurl detection ─────────────────────────────────────────────────────
+ifeq ($(ENABLE_LIBCURL),1)
+  _BUNDLED_CURL_H := $(wildcard external/curl/include/curl/curl.h)
+  ifneq ($(filter $(TARGET),ps4 ps5),)
+    # Cross-compilation: check for bundled curl headers
+    ifneq ($(_BUNDLED_CURL_H),)
+      $(info [INFO] Using bundled libcurl headers (cross-compile))
+      CFLAGS += -I./external/curl/include
+    else
+      $(info [INFO] libcurl headers not found — disabling ENABLE_LIBCURL)
+      override ENABLE_LIBCURL := 0
+    endif
+  else
+    # Desktop: compiler probe
+    _HAS_CURL := $(shell echo '\#include <curl/curl.h>' | $(CC) -xc -fsyntax-only - 2>/dev/null && echo 1 || echo 0)
+    ifneq ($(_HAS_CURL),1)
+      $(info [INFO] libcurl headers not found — disabling ENABLE_LIBCURL)
+      override ENABLE_LIBCURL := 0
+    endif
+  endif
+endif
+
+ifeq ($(ENABLE_LIBCURL),1)
+    CFLAGS += -DENABLE_LIBCURL=1
+    ifneq ($(filter $(TARGET),ps4 ps5),)
+        SOURCES += src/pal_curl.c
+    else
+        LIBS += -lcurl
+    endif
 endif
 
 # Object files
@@ -278,7 +355,7 @@ DEPENDS := $(patsubst $(OBJ_DIR)/%.o,$(DEP_DIR)/%.d,$(OBJECTS))
 
 .PHONY: all clean distclean install test help bin deploy deploy-i deploy-nc doctor-ps4
 .PHONY: all-platforms release-all debug-all ffi ffi-java ffi-rust ffi-python resources
-.PHONY: ps5-hook-blob
+.PHONY: ps5-hook-blob web-deploy
 
 # ============================================================================
 # PS5 NET FILTER HOOK — Kernel-safe compilation pipeline
@@ -482,7 +559,10 @@ release-matrix:
 	for t in $(TARGETS_ALL); do \
 		for z in $(ZHTTP_VARIANTS); do \
 			echo "==> Building $$t (release, ENABLE_ZHTTPD=$$z)"; \
-			$(MAKE) TARGET=$$t BUILD_TYPE=release ENABLE_ZHTTPD=$$z clean all; \
+			$(MAKE) TARGET=$$t BUILD_TYPE=release ENABLE_ZHTTPD=$$z \
+				ENABLE_LIBARCHIVE=$(ENABLE_LIBARCHIVE) \
+				ENABLE_LIBCURL=$(ENABLE_LIBCURL) \
+				clean all; \
 		done; \
 	done
 
@@ -642,12 +722,14 @@ help:
 	@echo "  analyze     - Run static analysis (requires clang)"
 	@echo "  test        - Run test suite"
 	@echo "  help        - Display this help message"
+	@echo "  web-deploy  - Copy web UI to console filesystem"
 	@echo ""
 	@echo "Variables:"
-	@echo "  TARGET      - Target platform (linux, macos, ps3, ps4, ps5)"
-	@echo "                Default: linux"
-	@echo "  BUILD_TYPE  - Build configuration (debug, release)"
-	@echo "                Default: release"
+	@echo "  TARGET            - Target platform (linux, macos, ps3, ps4, ps5)"
+	@echo "  BUILD_TYPE        - Build configuration (debug, release)"
+	@echo "  ENABLE_LIBARCHIVE - Enable archive extraction (0/1, requires libarchive)"
+	@echo "  ENABLE_LIBCURL    - Enable URL downloads (0/1, requires libcurl)"
+	@echo "  WEB_DEPLOY_DIR    - Web UI deploy path (default: /data/zftpd/web)"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make                          # Build for Linux (release)"
@@ -655,11 +737,15 @@ help:
 	@echo "  make TARGET=ps5               # Build for PS5"
 	@echo "  make BUILD_TYPE=debug         # Build debug version"
 	@echo "  make TARGET=ps4 BUILD_TYPE=debug  # PS4 debug build"
+	@echo "  make ENABLE_LIBARCHIVE=1 ENABLE_LIBCURL=1  # With extract + download"
+	@echo "  make web-deploy               # Deploy web UI to /data/zftpd/web/"
 	@echo ""
 	@echo "Current configuration:"
 	@echo "  Target:     $(TARGET)"
 	@echo "  Build type: $(BUILD_TYPE)"
 	@echo "  Compiler:   $(CC)"
+	@echo "  libarchive: $(ENABLE_LIBARCHIVE)"
+	@echo "  libcurl:    $(ENABLE_LIBCURL)"
 	@echo ""
 
 #============================================================================
@@ -672,3 +758,26 @@ compile_commands.json:
 	@echo "Compilation database generated."
 
 .PHONY: compile_commands.json
+
+#============================================================================
+# WEB DEPLOY — copy modular web UI to console filesystem
+#
+#   make web-deploy                    (uses default WEB_DEPLOY_DIR)
+#   make web-deploy WEB_DEPLOY_DIR=/mnt/usb/zftpd/web
+#
+# On PS5: files go to /data/zftpd/web/ (matching HTTP_WEB_ROOT)
+#============================================================================
+
+WEB_DEPLOY_DIR ?= /data/zftpd/web
+
+web-deploy:
+	@echo "  [WEB]  Deploying web UI to $(WEB_DEPLOY_DIR)/"
+	@mkdir -p $(WEB_DEPLOY_DIR)/css
+	@mkdir -p $(WEB_DEPLOY_DIR)/js/views
+	@mkdir -p $(WEB_DEPLOY_DIR)/assets
+	@cp web/index.html           $(WEB_DEPLOY_DIR)/
+	@cp web/css/*.css            $(WEB_DEPLOY_DIR)/css/
+	@cp web/js/*.js              $(WEB_DEPLOY_DIR)/js/
+	@cp web/js/views/*.js        $(WEB_DEPLOY_DIR)/js/views/
+	@cp web/assets/*             $(WEB_DEPLOY_DIR)/assets/
+	@echo "  [WEB]  Done — $(shell find web/css web/js -name '*.css' -o -name '*.js' | wc -l | tr -d ' ') files deployed"

@@ -1,0 +1,70 @@
+/* ══ CONTEXT MENU ═════════════════════════════════════════════════════════ */
+
+.ctx {
+  position: fixed;
+  z-index: 9999;
+  background: var(--sf);
+  border: 1px solid var(--bd2);
+  border-radius: 12px;
+  padding: 6px;
+  min-width: 194px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, .75);
+  display: none;
+}
+
+.ctx.on {
+  display: block;
+  animation: popIn .12s ease;
+}
+
+.ci {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--tx2);
+  transition: background .1s, color .1s;
+}
+
+.ci:hover {
+  background: var(--sf2);
+  color: var(--tx);
+}
+
+.ci.red:hover {
+  background: rgba(255, 95, 87, .1);
+  color: var(--er);
+}
+
+.ci-i {
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.ci-l { flex: 1; }
+
+.c-sec {
+  padding: 4px 10px 5px;
+  font-size: 9px;
+  color: var(--tx3);
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 192px;
+}
+
+.c-sep {
+  height: 1px;
+  background: var(--bd);
+  margin: 4px 0;
+}

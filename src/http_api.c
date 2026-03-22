@@ -40,6 +40,8 @@ SOFTWARE.
 #include "pal_fileio.h"
 #include "pal_network.h"      /* pal_network_reset_ftp_stack() */
 #include "pal_notification.h" /* pal_notification_send() — fallback notify */
+#include "exfat_unpacker.h"  /* exFAT image parsing for game metadata */
+#include "pkg_unpacker.h"    /* PKG archive parsing for game metadata */
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -53,6 +55,9 @@ SOFTWARE.
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/time.h>
+#ifndef _WIN32
+#include <sys/ioctl.h>
+#endif
 #if defined(PLATFORM_PS4) || defined(PLATFORM_PS5) || defined(__FreeBSD__)
 #include <sys/mount.h> /* fstatfs, struct statfs — for sendfile safety check */
 /* PS4/PS5 libkernel exports _fstatfs, not fstatfs */
@@ -221,8 +226,18 @@ static http_response_t *api_disk_tree(const http_request_t *request);
 static http_response_t *api_processes(const http_request_t *request);
 static http_response_t *api_process_kill(const http_request_t *request);
 static http_response_t *serve_static(const http_request_t *request);
+static http_response_t *api_game_meta(const http_request_t *request);
+static http_response_t *api_game_icon(const http_request_t *request);
+static http_response_t *api_extract(const http_request_t *request);
+static http_response_t *api_extract_progress(const http_request_t *request);
+static http_response_t *api_extract_cancel(const http_request_t *request);
+static http_response_t *api_dl_start(const http_request_t *request);
+static http_response_t *api_dl_status(const http_request_t *request);
+static http_response_t *api_dl_pause(const http_request_t *request);
+static http_response_t *api_dl_cancel(const http_request_t *request);
 #if ENABLE_WEB_UPLOAD
 static http_response_t *api_create_file(const http_request_t *request);
+static http_response_t *api_mkdir(const http_request_t *request);
 static http_response_t *api_delete(const http_request_t *request);
 static http_response_t *api_rename(const http_request_t *request);
 static http_response_t *api_copy(const http_request_t *request);
@@ -231,6 +246,7 @@ static http_response_t *api_copy_cancel(const http_request_t *request);
 static http_response_t *api_copy_pause(const http_request_t *request);
 #endif
 static http_response_t *api_network_reset(const http_request_t *request);
+static http_response_t *api_admin_fan(const http_request_t *request);
 static http_response_t *error_json(http_status_t code, const char *message);
 
 /*===========================================================================*
@@ -1067,7 +1083,34 @@ http_response_t *http_api_handle(const http_request_t *request) {
     return api_dirsize(request);
   }
 
-  /*  /api/download?path=...  */
+  /*  Download manager — /api/download/start, status, pause, cancel
+   *
+   *  IMPORTANT: These longer-prefix routes MUST come BEFORE the
+   *  generic /api/download handler below, because strncmp matches
+   *  left-to-right and "/api/download" (13 chars) is a prefix of
+   *  "/api/download/start" (19 chars).
+   *
+   *  Route order:          Match example:
+   *    /api/download/start   → api_dl_start()     ✓
+   *    /api/download/status  → api_dl_status()    ✓
+   *    /api/download/pause   → api_dl_pause()     ✓
+   *    /api/download/cancel  → api_dl_cancel()    ✓
+   *    /api/download?path=   → api_download()     ✓  (file download)
+   */
+  if (strncmp(request->uri, "/api/download/start", 19) == 0) {
+    return api_dl_start(request);
+  }
+  if (strncmp(request->uri, "/api/download/status", 20) == 0) {
+    return api_dl_status(request);
+  }
+  if (strncmp(request->uri, "/api/download/pause", 19) == 0) {
+    return api_dl_pause(request);
+  }
+  if (strncmp(request->uri, "/api/download/cancel", 20) == 0) {
+    return api_dl_cancel(request);
+  }
+
+  /*  /api/download?path=...  (file download — generic, MUST come after /start etc) */
   if (strncmp(request->uri, "/api/download", 13) == 0) {
     return api_download(request);
   }
@@ -1113,6 +1156,11 @@ http_response_t *http_api_handle(const http_request_t *request) {
     return api_create_file(request);
   }
 
+  /*  POST /api/mkdir?path=...&name=...  */
+  if (strncmp(request->uri, "/api/mkdir", 10) == 0) {
+    return api_mkdir(request);
+  }
+
   /*  POST /api/delete?path=...  */
   if (strncmp(request->uri, "/api/delete", 11) == 0) {
     return api_delete(request);
@@ -1138,9 +1186,35 @@ http_response_t *http_api_handle(const http_request_t *request) {
   }
 #endif
 
+  /*  GET /api/game/meta?path=... — game metadata (title, icon base64) */
+  if (strncmp(request->uri, "/api/game/meta", 14) == 0) {
+    return api_game_meta(request);
+  }
+
+  /*  GET /api/game/icon?path=... — game cover art PNG */
+  if (strncmp(request->uri, "/api/game/icon", 14) == 0) {
+    return api_game_icon(request);
+  }
+
+  /*  POST /api/extract — archive extraction (libarchive) */
+  if (strncmp(request->uri, "/api/extract_progress", 21) == 0) {
+    return api_extract_progress(request);
+  }
+  if (strncmp(request->uri, "/api/extract_cancel", 19) == 0) {
+    return api_extract_cancel(request);
+  }
+  if (strncmp(request->uri, "/api/extract", 12) == 0) {
+    return api_extract(request);
+  }
+
   /*  POST /api/network/reset — flush TCP buffer accounting (Fix #4) */
   if (strncmp(request->uri, "/api/network/reset", 18) == 0) {
     return api_network_reset(request);
+  }
+
+  /*  GET /api/admin/fan?threshold=... — set PS4/PS5 fan threshold */
+  if (strncmp(request->uri, "/api/admin/fan", 14) == 0) {
+    return api_admin_fan(request);
   }
 
   /*  Static resources (index.html, style.css, app.js)  */
@@ -1595,6 +1669,71 @@ static http_response_t *api_create_file(const http_request_t *request) {
   }
 
   (void)pal_file_close(fd);
+
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  http_response_add_header(resp, "Content-Type", "application/json");
+  http_response_add_header(resp, "Access-Control-Allow-Origin", "*");
+
+  char body[512];
+  int len =
+      snprintf(body, sizeof(body),
+               "{\"ok\":true,\"path\":\"%s\",\"name\":\"%s\"}", full, name);
+  http_response_set_body(resp, body, (size_t)len);
+  return resp;
+}
+
+/*===========================================================================*
+ * POST /api/mkdir — Create directory
+ *
+ *   POST /api/mkdir?path=/parent&name=new_folder
+ *   Returns: {"ok":true,"path":"/parent/new_folder","name":"new_folder"}
+ *===========================================================================*/
+
+static http_response_t *api_mkdir(const http_request_t *request) {
+  if (request->method != HTTP_METHOD_POST) {
+    return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED,
+                      "Use POST for this endpoint");
+  }
+
+  const char *query = strchr(request->uri, '?');
+  if (query == NULL) {
+    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing query string");
+  }
+
+  char dir_path[1024] = "/";
+  char name[256];
+
+  if (parse_path_param(query, dir_path, sizeof(dir_path)) != 0) {
+    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing or invalid path");
+  }
+  if (parse_name_param(query, name, sizeof(name)) != 0) {
+    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing or invalid name");
+  }
+  if (!is_safe_filename(name)) {
+    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Invalid folder name");
+  }
+  char safe_dir[FTP_PATH_MAX];
+  if (!validate_path(dir_path, safe_dir, sizeof(safe_dir))) {
+    return error_json(HTTP_STATUS_403_FORBIDDEN, "Forbidden path");
+  }
+
+  char full[FTP_PATH_MAX];
+  if (strcmp(safe_dir, "/") == 0) {
+    (void)snprintf(full, sizeof(full), "/%s", name);
+  } else {
+    (void)snprintf(full, sizeof(full), "%s/%s", safe_dir, name);
+  }
+
+  char safe_full[FTP_PATH_MAX];
+  if (!validate_path(full, safe_full, sizeof(safe_full))) {
+    return error_json(HTTP_STATUS_403_FORBIDDEN, "Forbidden path");
+  }
+
+  if (mkdir(safe_full, 0777) != 0 && errno != EEXIST) {
+    char msg[128];
+    snprintf(msg, sizeof(msg), "mkdir failed: %s", strerror(errno));
+    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, msg);
+  }
 
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
   http_response_add_header(resp, "Content-Type", "application/json");
@@ -2783,9 +2922,997 @@ static http_response_t *api_process_kill(const http_request_t *request) {
 }
 
 /*===========================================================================*
+ * GAME METADATA — exFAT image parsing
+ *
+ *   GET /api/game/meta?path=<file>
+ *     Extracts param.json + icon0.png from sce_sys/ inside an exFAT image.
+ *     Returns JSON: { title_id, title_name, version, category, icon_base64 }
+ *
+ *   GET /api/game/icon?path=<file>
+ *     Returns the raw PNG icon directly (Content-Type: image/png).
+ *===========================================================================*/
+
+/* Simple SFO string extraction */
+static uint16_t le16(const uint8_t *p) { return (uint16_t)(p[0] | ((uint16_t)p[1] << 8)); }
+static uint32_t le32(const uint8_t *p) { return (uint32_t)(p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24)); }
+
+static int sfo_get_string(const uint8_t *sfo, size_t size, const char *req_key, char *out, size_t out_max) {
+  if (!sfo || size < 20 || !req_key || !out || out_max == 0) return -1;
+  /* 0x46535000 -> "\0PSF" in little-endian */
+  if (le32(sfo) != 0x46535000) return -1;
+  
+  uint32_t key_table_ofs  = le32(sfo + 0x08);
+  uint32_t data_table_ofs = le32(sfo + 0x0C);
+  uint32_t count          = le32(sfo + 0x10);
+  
+  if (key_table_ofs >= size || data_table_ofs >= size) return -1;
+  if (0x14 + count * 16 > size) return -1;
+  
+  for (uint32_t i = 0; i < count; i++) {
+      const uint8_t *entry = sfo + 0x14 + i * 16;
+      uint16_t key_ofs   = le16(entry + 0);
+      uint16_t fmt       = le16(entry + 2);
+      uint32_t data_len  = le32(entry + 4);
+      uint32_t data_ofs  = le32(entry + 12);
+      
+      if (key_table_ofs + key_ofs >= size) return -1;
+      const char *key = (const char *)(sfo + key_table_ofs + key_ofs);
+      
+      if (strcmp(key, req_key) == 0) {
+          if (fmt == 0x0204 || fmt == 0x0004 || fmt == 0x0000 || fmt == 0x0404) {
+              if (data_table_ofs + data_ofs + data_len <= size) {
+                  snprintf(out, out_max, "%.*s", (int)(data_len > 0 ? data_len - 1 : 0), sfo + data_table_ofs + data_ofs);
+                  return 0; /* success */
+              }
+          }
+      }
+  }
+  return -1;
+}
+
+/* Simple JSON string extraction: get value for "key":"value" */
+static int json_get_string(const char *json, const char *key,
+                           char *out, size_t out_size) {
+  if (!json || !key || !out || out_size == 0) return -1;
+  out[0] = '\0';
+
+  char needle[128];
+  int nlen = snprintf(needle, sizeof(needle), "\"%s\"", key);
+  if (nlen < 0 || (size_t)nlen >= sizeof(needle)) return -1;
+
+  const char *pos = strstr(json, needle);
+  if (!pos) return -1;
+  pos += (size_t)nlen;
+
+  /* Skip whitespace and colon */
+  while (*pos == ' ' || *pos == '\t' || *pos == '\n' || *pos == ':') pos++;
+  if (*pos != '"') return -1;
+  pos++; /* skip opening quote */
+
+  size_t i = 0;
+  while (*pos && *pos != '"' && i < out_size - 1) {
+    if (*pos == '\\' && *(pos + 1)) {
+      pos++;
+      if (*pos == 'n') out[i++] = '\n';
+      else if (*pos == 't') out[i++] = '\t';
+      else out[i++] = *pos;
+    } else {
+      out[i++] = *pos;
+    }
+    pos++;
+  }
+  out[i] = '\0';
+  return 0;
+}
+
+#define GAME_META_MAX_ENTRIES   256
+#define GAME_META_SCE_ENTRIES    64
+#define GAME_META_MAX_PARAM  (256 * 1024)
+#define GAME_META_MAX_ICON   (2 * 1024 * 1024)
+
+static http_response_t *api_game_meta(const http_request_t *request) {
+  const char *query = strchr(request->uri, '?');
+  char path[1024] = "/";
+  if (query) (void)parse_path_param(query, path, sizeof(path));
+
+  char safe[FTP_PATH_MAX];
+  if (!validate_path(path, safe, sizeof(safe))) {
+    return error_json(HTTP_STATUS_403_FORBIDDEN, "Path traversal blocked");
+  }
+
+  char title_id[64]    = "";
+  char title_name[256] = "";
+  char version[64]     = "";
+  char category[64]    = "";
+  char content_id[48]  = "";
+  uint8_t *icon_data   = NULL;
+  size_t   icon_size   = 0;
+
+  /* 1. Try PKG archive first */
+  pkg_context_t pkg_ctx;
+  if (pkg_init(&pkg_ctx, safe) == PKG_OK) {
+    fprintf(stderr, "[PKG] Successfully opened %s (entries: %u)\n", safe, pkg_ctx.header.entry_count);
+    
+    /* Always grab content_id from PKG header */
+    snprintf(content_id, sizeof(content_id), "%.36s", pkg_ctx.header.content_id);
+
+    const pkg_entry_t *sfo_entry = pkg_find_entry_by_id(&pkg_ctx, PKG_ENTRY_ID_PARAM_SFO);
+    if (sfo_entry && sfo_entry->size > 0 && sfo_entry->size <= 65536) {
+      uint8_t *sfo_data = (uint8_t *)malloc((size_t)sfo_entry->size);
+      if (sfo_data) {
+        if (pkg_extract_to_buffer(&pkg_ctx, sfo_entry, sfo_data, (size_t)sfo_entry->size) > 0) {
+          sfo_get_string(sfo_data, (size_t)sfo_entry->size, "TITLE_ID", title_id, sizeof(title_id));
+          sfo_get_string(sfo_data, (size_t)sfo_entry->size, "TITLE", title_name, sizeof(title_name));
+          sfo_get_string(sfo_data, (size_t)sfo_entry->size, "APP_VER", version, sizeof(version));
+          sfo_get_string(sfo_data, (size_t)sfo_entry->size, "CATEGORY", category, sizeof(category));
+          /* Also try CONTENT_ID from SFO (more authoritative than PKG header) */
+          {
+            char sfo_cid[48] = "";
+            sfo_get_string(sfo_data, (size_t)sfo_entry->size, "CONTENT_ID", sfo_cid, sizeof(sfo_cid));
+            if (sfo_cid[0]) {
+              strncpy(content_id, sfo_cid, sizeof(content_id) - 1);
+              content_id[sizeof(content_id) - 1] = '\0';
+            }
+          }
+        }
+        free(sfo_data);
+      }
+    }
+
+    if (!title_id[0]) {
+      snprintf(title_id, sizeof(title_id), "%.36s", pkg_ctx.header.content_id);
+    }
+    if (!title_name[0]) {
+      snprintf(title_name, sizeof(title_name), "%.36s", pkg_ctx.header.content_id);
+    }
+
+    const pkg_entry_t *entry = pkg_find_entry_by_id(&pkg_ctx, PKG_ENTRY_ID_ICON0_PNG);
+    if (!entry) {
+      entry = pkg_find_entry_by_id(&pkg_ctx, PKG_ENTRY_ID_PIC0_PNG); /* fallback */
+    }
+
+    if (entry) {
+      if (pkg_entry_is_encrypted(entry)) {
+        fprintf(stderr, "[PKG] Icon entry is encrypted! Cannot extract.\n");
+      } else if (entry->size > GAME_META_MAX_ICON) {
+        fprintf(stderr, "[PKG] Icon too large: %u\n", entry->size);
+      } else {
+         icon_size = (size_t)entry->size;
+         icon_data = (uint8_t *)malloc(icon_size);
+         if (icon_data) {
+            ssize_t got = pkg_extract_to_buffer(&pkg_ctx, entry, icon_data, icon_size);
+            if (got > 0) {
+              icon_size = (size_t)got;
+              fprintf(stderr, "[PKG] Icon successfully extracted (%zu bytes)\n", icon_size);
+            } else { 
+              free(icon_data); icon_data = NULL; icon_size = 0; 
+              fprintf(stderr, "[PKG] Failed to extract icon (err: %zd)\n", got);
+            }
+         }
+      }
+    } else {
+      fprintf(stderr, "[PKG] Could not find any icon entry in PKG\n");
+    }
+    pkg_cleanup(&pkg_ctx);
+  } else {
+    /* 2. Fall back to exFAT image */
+    exfat_context_t ctx;
+    if (exfat_init(&ctx, safe) != 0) {
+      return error_json(HTTP_STATUS_400_BAD_REQUEST, "Not a valid PKG or exFAT image");
+    }
+
+    /* Scan root directory for sce_sys */
+    exfat_file_info_t root_entries[GAME_META_MAX_ENTRIES];
+    int root_count = exfat_read_directory(&ctx,
+        ctx.boot_sector.root_dir_first_cluster,
+        root_entries, GAME_META_MAX_ENTRIES);
+
+    for (int i = 0; i < root_count; i++) {
+      if (!root_entries[i].is_directory) continue;
+      if (strcasecmp(root_entries[i].filename, "sce_sys") != 0) continue;
+
+      /* Read sce_sys contents */
+      exfat_file_info_t sce_entries[GAME_META_SCE_ENTRIES];
+      int sce_count = exfat_read_directory(&ctx,
+          root_entries[i].first_cluster,
+          sce_entries, GAME_META_SCE_ENTRIES);
+
+      for (int j = 0; j < sce_count; j++) {
+        if (sce_entries[j].is_directory) continue;
+
+        /* param.json */
+        if (strcasecmp(sce_entries[j].filename, "param.json") == 0 &&
+            sce_entries[j].data_length > 0 &&
+            sce_entries[j].data_length <= GAME_META_MAX_PARAM) {
+          size_t plen = (size_t)sce_entries[j].data_length;
+          uint8_t *pbuf = (uint8_t *)malloc(plen + 1);
+          if (pbuf) {
+            ssize_t got = exfat_extract_to_buffer(&ctx, &sce_entries[j], pbuf, plen);
+            if (got > 0) {
+              pbuf[got] = '\0';
+              json_get_string((char *)pbuf, "titleId", title_id, sizeof(title_id));
+              if (!title_id[0])
+                json_get_string((char *)pbuf, "title_id", title_id, sizeof(title_id));
+              json_get_string((char *)pbuf, "titleName", title_name, sizeof(title_name));
+              json_get_string((char *)pbuf, "contentVersion", version, sizeof(version));
+              if (!version[0])
+                json_get_string((char *)pbuf, "appVer", version, sizeof(version));
+              json_get_string((char *)pbuf, "category", category, sizeof(category));
+            }
+            free(pbuf);
+          }
+        }
+
+        /* icon0.png */
+        if (strcasecmp(sce_entries[j].filename, "icon0.png") == 0 &&
+            sce_entries[j].data_length > 0 &&
+            sce_entries[j].data_length <= GAME_META_MAX_ICON) {
+          icon_size = (size_t)sce_entries[j].data_length;
+          icon_data = (uint8_t *)malloc(icon_size);
+          if (icon_data) {
+            ssize_t got = exfat_extract_to_buffer(&ctx, &sce_entries[j],
+                                                   icon_data, icon_size);
+            if (got > 0) icon_size = (size_t)got;
+            else { free(icon_data); icon_data = NULL; icon_size = 0; }
+          }
+        }
+      }
+      break; /* found sce_sys */
+    }
+
+    exfat_cleanup(&ctx);
+  }
+
+  /* Build JSON response */
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  http_response_add_header(resp, "Content-Type", "application/json");
+  http_response_add_header(resp, "Cache-Control", "max-age=3600");
+
+  size_t body_cap = 1024;
+  char *body = (char *)malloc(body_cap);
+  if (!body) {
+    if (icon_data) free(icon_data);
+    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+  }
+
+  int blen = snprintf(body, body_cap,
+      "{\"title_id\":\"%s\",\"title_name\":\"%s\",\"version\":\"%s\","
+      "\"category\":\"%s\",\"content_id\":\"%s\",\"has_icon\":%s}",
+      title_id, title_name, version, category, content_id,
+      (icon_data && icon_size > 0) ? "true" : "false");
+
+  http_response_set_body(resp, body, (size_t)blen);
+
+  free(body);
+  if (icon_data) free(icon_data);
+  return resp;
+}
+
+static http_response_t *api_game_icon(const http_request_t *request) {
+  const char *query = strchr(request->uri, '?');
+  char path[1024] = "/";
+  if (query) (void)parse_path_param(query, path, sizeof(path));
+
+  char safe[FTP_PATH_MAX];
+  if (!validate_path(path, safe, sizeof(safe))) {
+    return error_json(HTTP_STATUS_403_FORBIDDEN, "Path traversal blocked");
+  }
+
+  uint8_t *icon_data = NULL;
+  size_t   icon_size = 0;
+
+  /* 1. Try PKG archive first */
+  pkg_context_t pkg_ctx;
+  if (pkg_init(&pkg_ctx, safe) == PKG_OK) {
+    fprintf(stderr, "[PKG-ICON] Successfully opened %s\n", safe);
+    const pkg_entry_t *entry = pkg_find_entry_by_id(&pkg_ctx, PKG_ENTRY_ID_ICON0_PNG);
+    if (!entry) {
+      entry = pkg_find_entry_by_id(&pkg_ctx, PKG_ENTRY_ID_PIC0_PNG); /* fallback */
+    }
+
+    if (entry) {
+      if (pkg_entry_is_encrypted(entry)) {
+        fprintf(stderr, "[PKG-ICON] Icon entry is encrypted! Cannot extract.\n");
+      } else if (entry->size > GAME_META_MAX_ICON) {
+        fprintf(stderr, "[PKG-ICON] Icon too large: %u\n", entry->size);
+      } else {
+         icon_size = (size_t)entry->size;
+         icon_data = (uint8_t *)malloc(icon_size);
+         if (icon_data) {
+            ssize_t got = pkg_extract_to_buffer(&pkg_ctx, entry, icon_data, icon_size);
+            if (got > 0) icon_size = (size_t)got;
+            else { free(icon_data); icon_data = NULL; icon_size = 0; }
+         }
+      }
+    }
+    pkg_cleanup(&pkg_ctx);
+  } else {
+    /* 2. Fall back to exFAT image */
+    exfat_context_t ctx;
+    if (exfat_init(&ctx, safe) != 0) {
+      return error_json(HTTP_STATUS_400_BAD_REQUEST, "Not a valid PKG or exFAT image");
+    }
+
+    exfat_file_info_t root_entries[GAME_META_MAX_ENTRIES];
+    int root_count = exfat_read_directory(&ctx,
+        ctx.boot_sector.root_dir_first_cluster,
+        root_entries, GAME_META_MAX_ENTRIES);
+
+    for (int i = 0; i < root_count; i++) {
+      if (!root_entries[i].is_directory) continue;
+      if (strcasecmp(root_entries[i].filename, "sce_sys") != 0) continue;
+
+      exfat_file_info_t sce_entries[GAME_META_SCE_ENTRIES];
+      int sce_count = exfat_read_directory(&ctx,
+          root_entries[i].first_cluster,
+          sce_entries, GAME_META_SCE_ENTRIES);
+
+      for (int j = 0; j < sce_count; j++) {
+        if (sce_entries[j].is_directory) continue;
+        if (strcasecmp(sce_entries[j].filename, "icon0.png") != 0) continue;
+        if (sce_entries[j].data_length == 0 ||
+            sce_entries[j].data_length > GAME_META_MAX_ICON) continue;
+
+        icon_size = (size_t)sce_entries[j].data_length;
+        icon_data = (uint8_t *)malloc(icon_size);
+        if (icon_data) {
+          ssize_t got = exfat_extract_to_buffer(&ctx, &sce_entries[j],
+                                                 icon_data, icon_size);
+          if (got > 0) icon_size = (size_t)got;
+          else { free(icon_data); icon_data = NULL; icon_size = 0; }
+        }
+        break;
+      }
+      break;
+    }
+
+    exfat_cleanup(&ctx);
+  }
+
+  if (!icon_data || icon_size == 0) {
+    return error_json(HTTP_STATUS_404_NOT_FOUND, "Icon not found in image");
+  }
+
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  http_response_add_header(resp, "Content-Type", "image/png");
+  http_response_add_header(resp, "Cache-Control", "max-age=86400");
+  
+  if (http_response_set_body_owned(resp, icon_data, icon_size) != 0) {
+    free(icon_data);
+    http_response_destroy(resp);
+    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Failed to send icon");
+  }
+  return resp;
+}
+
+/*===========================================================================*
+ * ARCHIVE EXTRACTION (Phase 5 — libarchive)
+ *
+ *   POST /api/extract?path=<archive>&dst=<dir>
+ *     Extracts an archive to the destination directory using libarchive.
+ *     Runs in a background thread with progress tracking.
+ *
+ *   GET  /api/extract_progress
+ *     Returns extraction progress: { done, bytes_extracted, total_bytes, error }
+ *
+ *   POST /api/extract_cancel
+ *     Cancels the active extraction.
+ *
+ * NOTE: libarchive must be linked (-larchive) for this to compile.
+ *       When ENABLE_LIBARCHIVE is not defined, these return stub responses.
+ *===========================================================================*/
+
+/* Extraction state (single active extraction at a time) */
+static struct {
+  volatile int active;
+  volatile int done;
+  volatile int cancelled;
+  volatile int error;
+  volatile uint64_t bytes_extracted;
+  volatile uint64_t total_bytes;
+  char archive_path[1024];
+  char dest_path[1024];
+  char error_msg[256];
+} g_extract = {0};
+
+#if defined(ENABLE_LIBARCHIVE) && ENABLE_LIBARCHIVE
+#include <archive.h>
+#include <archive_entry.h>
+#include <pthread.h>
+
+static void *extract_thread(void *arg) {
+  (void)arg;
+  struct archive *a = archive_read_new();
+  struct archive *ext = archive_write_disk_new();
+
+  archive_read_support_format_all(a);
+  archive_read_support_filter_all(a);
+  archive_write_disk_set_options(ext,
+      ARCHIVE_EXTRACT_TIME | ARCHIVE_EXTRACT_PERM | ARCHIVE_EXTRACT_ACL |
+      ARCHIVE_EXTRACT_FFLAGS);
+  archive_write_disk_set_standard_lookup(ext);
+
+  if (archive_read_open_filename(a, g_extract.archive_path, 65536) != ARCHIVE_OK) {
+    snprintf(g_extract.error_msg, sizeof(g_extract.error_msg),
+             "Cannot open: %s", archive_error_string(a));
+    g_extract.error = 1;
+    g_extract.done = 1;
+    g_extract.active = 0;
+    archive_read_free(a);
+    archive_write_free(ext);
+    return NULL;
+  }
+
+  struct archive_entry *entry;
+  while (!g_extract.cancelled) {
+    int r = archive_read_next_header(a, &entry);
+    if (r == ARCHIVE_EOF) break;
+    if (r != ARCHIVE_OK && r != ARCHIVE_WARN) {
+      snprintf(g_extract.error_msg, sizeof(g_extract.error_msg),
+               "Read error: %s", archive_error_string(a));
+      g_extract.error = 1;
+      break;
+    }
+
+    /* Rewrite entry path to dest directory */
+    const char *name = archive_entry_pathname(entry);
+    char fullpath[2048];
+    if (g_extract.dest_path[strlen(g_extract.dest_path) - 1] == '/') {
+      snprintf(fullpath, sizeof(fullpath), "%s%s", g_extract.dest_path, name);
+    } else {
+      snprintf(fullpath, sizeof(fullpath), "%s/%s", g_extract.dest_path, name);
+    }
+    archive_entry_set_pathname(entry, fullpath);
+
+    r = archive_write_header(ext, entry);
+    if (r != ARCHIVE_OK) {
+      /* Skip this entry on write error but continue */
+      continue;
+    }
+
+    /* Copy data blocks */
+    if (archive_entry_size(entry) > 0) {
+      const void *buff;
+      size_t size;
+      int64_t offset;
+      while (!g_extract.cancelled) {
+        r = archive_read_data_block(a, &buff, &size, &offset);
+        if (r == ARCHIVE_EOF) break;
+        if (r != ARCHIVE_OK) break;
+        archive_write_data_block(ext, buff, size, offset);
+        g_extract.bytes_extracted += size;
+      }
+    }
+    archive_write_finish_entry(ext);
+  }
+
+  archive_read_close(a);
+  archive_read_free(a);
+  archive_write_close(ext);
+  archive_write_free(ext);
+
+  if (g_extract.cancelled) {
+    snprintf(g_extract.error_msg, sizeof(g_extract.error_msg), "Cancelled");
+  }
+  g_extract.done = 1;
+  g_extract.active = 0;
+  return NULL;
+}
+#endif /* ENABLE_LIBARCHIVE */
+
+static http_response_t *api_extract(const http_request_t *request) {
+  if (request->method != HTTP_METHOD_POST) {
+    return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED, "Use POST");
+  }
+
+  if (g_extract.active) {
+    return error_json(HTTP_STATUS_409_CONFLICT, "Extraction already in progress");
+  }
+
+  const char *query = strchr(request->uri, '?');
+  char path[1024] = "";
+  char dst[1024] = "/";
+  if (query) {
+    (void)parse_path_param(query, path, sizeof(path));
+    /* Parse dst param with URL decoding (%XX → byte) */
+    const char *dp = strstr(query, "dst=");
+    if (dp) {
+      dp += 4;
+      size_t ri = 0, wi = 0;
+      while (dp[ri] && dp[ri] != '&' && wi < sizeof(dst) - 1) {
+        if (dp[ri] == '%' && dp[ri + 1] && dp[ri + 2]) {
+          unsigned char hi = (unsigned char)dp[ri + 1];
+          unsigned char lo = (unsigned char)dp[ri + 2];
+          unsigned int vh = (hi >= '0' && hi <= '9') ? hi - '0' :
+                            (hi >= 'A' && hi <= 'F') ? 10 + hi - 'A' :
+                            (hi >= 'a' && hi <= 'f') ? 10 + hi - 'a' : 0xFF;
+          unsigned int vl = (lo >= '0' && lo <= '9') ? lo - '0' :
+                            (lo >= 'A' && lo <= 'F') ? 10 + lo - 'A' :
+                            (lo >= 'a' && lo <= 'f') ? 10 + lo - 'a' : 0xFF;
+          if (vh <= 0xF && vl <= 0xF) {
+            dst[wi++] = (char)((vh << 4) | vl);
+            ri += 3;
+            continue;
+          }
+        }
+        dst[wi++] = dp[ri++];
+      }
+      dst[wi] = '\0';
+    }
+  }
+
+  if (!path[0]) {
+    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing path parameter");
+  }
+
+  char safe_path[FTP_PATH_MAX];
+  char safe_dst[FTP_PATH_MAX];
+  if (!validate_path(path, safe_path, sizeof(safe_path)) ||
+      !validate_path(dst, safe_dst, sizeof(safe_dst))) {
+    return error_json(HTTP_STATUS_403_FORBIDDEN, "Path traversal blocked");
+  }
+
+#if defined(ENABLE_LIBARCHIVE) && ENABLE_LIBARCHIVE
+  /* Set up extraction state */
+  memset(&g_extract, 0, sizeof(g_extract));
+  strncpy(g_extract.archive_path, safe_path, sizeof(g_extract.archive_path) - 1);
+  strncpy(g_extract.dest_path, safe_dst, sizeof(g_extract.dest_path) - 1);
+  g_extract.active = 1;
+
+  /* Get archive size for progress tracking */
+  struct stat st;
+  if (stat(safe_path, &st) == 0) {
+    g_extract.total_bytes = (uint64_t)st.st_size;
+  }
+
+  /* Start extraction thread */
+  pthread_t tid;
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+  if (pthread_create(&tid, &attr, extract_thread, NULL) != 0) {
+    g_extract.active = 0;
+    pthread_attr_destroy(&attr);
+    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Failed to start extraction thread");
+  }
+  pthread_attr_destroy(&attr);
+
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  http_response_add_header(resp, "Content-Type", "application/json");
+  const char *body = "{\"ok\":true,\"message\":\"Extraction started\"}";
+  http_response_set_body(resp, body, strlen(body));
+  return resp;
+#else
+  return error_json(HTTP_STATUS_500_INTERNAL_ERROR,
+                    "libarchive not available — compile with ENABLE_LIBARCHIVE=1");
+#endif
+}
+
+static http_response_t *api_extract_progress(const http_request_t *request) {
+  (void)request;
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  http_response_add_header(resp, "Content-Type", "application/json");
+  http_response_add_header(resp, "Cache-Control", "no-store");
+
+  char body[256];
+  int len = snprintf(body, sizeof(body),
+      "{\"active\":%s,\"done\":%s,\"cancelled\":%s,\"error\":%s,"
+      "\"bytes_extracted\":%" PRIu64 ",\"total_bytes\":%" PRIu64
+      ",\"error_msg\":\"%s\"}",
+      g_extract.active ? "true" : "false",
+      g_extract.done ? "true" : "false",
+      g_extract.cancelled ? "true" : "false",
+      g_extract.error ? "true" : "false",
+      (uint64_t)g_extract.bytes_extracted,
+      (uint64_t)g_extract.total_bytes,
+      g_extract.error_msg);
+  http_response_set_body(resp, body, (size_t)len);
+  return resp;
+}
+
+static http_response_t *api_extract_cancel(const http_request_t *request) {
+  if (request->method != HTTP_METHOD_POST) {
+    return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED, "Use POST");
+  }
+  g_extract.cancelled = 1;
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  http_response_add_header(resp, "Content-Type", "application/json");
+  const char *body = "{\"ok\":true}";
+  http_response_set_body(resp, body, strlen(body));
+  return resp;
+}
+
+/*===========================================================================*
+ * DOWNLOAD MANAGER (Phase 6)
+ *
+ *   POST /api/download/start   { "url": "...", "dst": "/path/" }
+ *     Starts a background HTTP download to the console filesystem.
+ *
+ *   GET  /api/download/status
+ *     Returns all active downloads with progress.
+ *
+ *   POST /api/download/pause   { "id": N }
+ *   POST /api/download/cancel  { "id": N }
+ *
+ * NOTE: Requires a socket-based HTTP client. On PS5 this uses the
+ *       kernel's socket API directly. On desktop, libcurl can be used.
+ *       When neither is available, returns stub responses.
+ *===========================================================================*/
+
+#define DL_MAX_ACTIVE 4
+#define DL_URL_MAX    2048
+#define DL_READ_BUF   (256 * 1024)
+
+/* Download entry state */
+typedef struct {
+  int         active;
+  int         done;
+  int         paused;
+  int         error;
+  int         id;
+  char        url[DL_URL_MAX];
+  char        dst_path[1024];
+  char        filename[256];
+  char        error_msg[256];
+  uint64_t    total_size;
+  uint64_t    downloaded;
+  double      speed;         /* bytes/sec */
+  time_t      start_time;
+} dl_entry_t;
+
+static dl_entry_t g_downloads[DL_MAX_ACTIVE];
+static int g_dl_next_id = 1;
+
+static dl_entry_t *dl_find_slot(void) {
+  for (int i = 0; i < DL_MAX_ACTIVE; i++) {
+    if (!g_downloads[i].active && g_downloads[i].done == 0) return &g_downloads[i];
+  }
+  /* Reuse a completed slot */
+  for (int i = 0; i < DL_MAX_ACTIVE; i++) {
+    if (g_downloads[i].done) {
+      memset(&g_downloads[i], 0, sizeof(dl_entry_t));
+      return &g_downloads[i];
+    }
+  }
+  return NULL;
+}
+
+static dl_entry_t *dl_find_by_id(int id) {
+  for (int i = 0; i < DL_MAX_ACTIVE; i++) {
+    if (g_downloads[i].id == id) return &g_downloads[i];
+  }
+  return NULL;
+}
+
+/* Extract filename from URL (last path component) */
+static void dl_extract_filename(const char *url, char *out, size_t out_size) {
+  if (!url || !out || out_size == 0) return;
+  const char *last_slash = strrchr(url, '/');
+  const char *name = last_slash ? last_slash + 1 : url;
+  /* Strip query string */
+  const char *qmark = strchr(name, '?');
+  size_t len = qmark ? (size_t)(qmark - name) : strlen(name);
+  if (len == 0 || len >= out_size) {
+    snprintf(out, out_size, "download_%d", g_dl_next_id);
+    return;
+  }
+  memcpy(out, name, len);
+  out[len] = '\0';
+}
+
+#if defined(ENABLE_LIBCURL) && ENABLE_LIBCURL
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+#include "pal_curl.h"
+#else
+#include <curl/curl.h>
+#endif
+#include <pthread.h>
+
+struct dl_write_ctx {
+  dl_entry_t *dl;
+  int fd;
+};
+
+static size_t dl_curl_write(void *ptr, size_t size, size_t nmemb, void *userdata) {
+  struct dl_write_ctx *ctx = (struct dl_write_ctx *)userdata;
+  size_t total = size * nmemb;
+  if (ctx->dl->paused) return CURL_WRITEFUNC_PAUSE;
+  ssize_t w = write(ctx->fd, ptr, total);
+  if (w <= 0) return 0;
+  ctx->dl->downloaded += (uint64_t)w;
+  return (size_t)w;
+}
+
+static void *dl_thread(void *arg) {
+  dl_entry_t *dl = (dl_entry_t *)arg;
+  char filepath[2048];
+  snprintf(filepath, sizeof(filepath), "%s/%s", dl->dst_path, dl->filename);
+
+  int fd = open(filepath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  if (fd < 0) {
+    snprintf(dl->error_msg, sizeof(dl->error_msg), "Cannot create file: %s", strerror(errno));
+    dl->error = 1;
+    dl->done = 1;
+    dl->active = 0;
+    return NULL;
+  }
+
+  CURL *curl = curl_easy_init();
+  if (!curl) {
+    close(fd);
+    snprintf(dl->error_msg, sizeof(dl->error_msg), "curl_easy_init failed");
+    dl->error = 1;
+    dl->done = 1;
+    dl->active = 0;
+    return NULL;
+  }
+
+  struct dl_write_ctx wctx = { dl, fd };
+  curl_easy_setopt(curl, CURLOPT_URL, dl->url);
+  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, dl_curl_write);
+  curl_easy_setopt(curl, CURLOPT_WRITEDATA, &wctx);
+  curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+  curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 10L);
+  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
+  curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
+  curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);
+
+  CURLcode res = curl_easy_perform(curl);
+  if (res != CURLE_OK) {
+    snprintf(dl->error_msg, sizeof(dl->error_msg), "curl: %s", curl_easy_strerror(res));
+    dl->error = 1;
+  }
+
+  double total_size = 0;
+  curl_easy_getinfo(curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD, &total_size);
+  if (total_size > 0) dl->total_size = (uint64_t)total_size;
+
+  double speed = 0;
+  curl_easy_getinfo(curl, CURLINFO_SPEED_DOWNLOAD, &speed);
+  dl->speed = speed;
+
+  curl_easy_cleanup(curl);
+  close(fd);
+  dl->done = 1;
+  dl->active = 0;
+  return NULL;
+}
+#endif /* ENABLE_LIBCURL */
+
+static http_response_t *api_dl_start(const http_request_t *request) {
+  if (request->method != HTTP_METHOD_POST) {
+    return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED, "Use POST");
+  }
+
+  /* Parse JSON body: {"url":"...","dst":"..."} — simple extraction */
+  const char *body_data = request->body;
+  size_t body_len = request->body_length;
+  char url[DL_URL_MAX] = "";
+  char dst[1024] = "/";
+
+  if (body_data && body_len > 0) {
+    /* Simple JSON extraction for "url" and "dst" */
+    const char *u = strstr(body_data, "\"url\"");
+    if (u) {
+      u = strchr(u + 5, '"');
+      if (u) {
+        u++;
+        size_t i = 0;
+        while (*u && *u != '"' && i < sizeof(url) - 1) {
+          if (*u == '\\' && *(u + 1)) { u++; }
+          url[i++] = *u++;
+        }
+        url[i] = '\0';
+      }
+    }
+    const char *d = strstr(body_data, "\"dst\"");
+    if (d) {
+      d = strchr(d + 5, '"');
+      if (d) {
+        d++;
+        size_t i = 0;
+        while (*d && *d != '"' && i < sizeof(dst) - 1) {
+          if (*d == '\\' && *(d + 1)) { d++; }
+          dst[i++] = *d++;
+        }
+        dst[i] = '\0';
+      }
+    }
+  }
+
+  if (!url[0]) {
+    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing url parameter");
+  }
+
+  char safe_dst[FTP_PATH_MAX];
+  if (!validate_path(dst, safe_dst, sizeof(safe_dst))) {
+    return error_json(HTTP_STATUS_403_FORBIDDEN, "Invalid destination path");
+  }
+
+  dl_entry_t *dl = dl_find_slot();
+  if (!dl) {
+    return error_json(HTTP_STATUS_409_CONFLICT, "Max concurrent downloads reached");
+  }
+
+  memset(dl, 0, sizeof(dl_entry_t));
+  dl->id = g_dl_next_id++;
+  strncpy(dl->url, url, sizeof(dl->url) - 1);
+  strncpy(dl->dst_path, safe_dst, sizeof(dl->dst_path) - 1);
+  dl_extract_filename(url, dl->filename, sizeof(dl->filename));
+  dl->start_time = time(NULL);
+  dl->active = 1;
+
+#if defined(ENABLE_LIBCURL) && ENABLE_LIBCURL
+  pthread_t tid;
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+  if (pthread_create(&tid, &attr, dl_thread, dl) != 0) {
+    dl->active = 0;
+    pthread_attr_destroy(&attr);
+    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Failed to start download thread");
+  }
+  pthread_attr_destroy(&attr);
+#else
+  /* Without libcurl, mark as error immediately */
+  snprintf(dl->error_msg, sizeof(dl->error_msg),
+           "Download not available — compile with ENABLE_LIBCURL=1");
+  dl->error = 1;
+  dl->done = 1;
+  dl->active = 0;
+#endif
+
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  http_response_add_header(resp, "Content-Type", "application/json");
+  char rbody[256];
+  int rlen = snprintf(rbody, sizeof(rbody),
+      "{\"ok\":true,\"id\":%d,\"name\":\"%s\",\"size\":0}",
+      dl->id, dl->filename);
+  http_response_set_body(resp, rbody, (size_t)rlen);
+  return resp;
+}
+
+static http_response_t *api_dl_status(const http_request_t *request) {
+  (void)request;
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  http_response_add_header(resp, "Content-Type", "application/json");
+  http_response_add_header(resp, "Cache-Control", "no-store");
+
+  /* Build JSON array of all download entries */
+  char body[4096];
+  int pos = 0;
+  pos += snprintf(body + pos, sizeof(body) - (size_t)pos, "{\"downloads\":[");
+
+  int first = 1;
+  for (int i = 0; i < DL_MAX_ACTIVE; i++) {
+    dl_entry_t *dl = &g_downloads[i];
+    if (dl->id == 0) continue;
+    if (!first) pos += snprintf(body + pos, sizeof(body) - (size_t)pos, ",");
+    first = 0;
+
+    int progress = 0;
+    if (dl->total_size > 0) {
+      progress = (int)(dl->downloaded * 100 / dl->total_size);
+      if (progress > 100) progress = 100;
+    }
+
+    pos += snprintf(body + pos, sizeof(body) - (size_t)pos,
+        "{\"id\":%d,\"name\":\"%s\",\"url\":\"%.*s\","
+        "\"progress\":%d,\"downloaded\":%" PRIu64 ",\"total_size\":%" PRIu64 ","
+        "\"speed\":%.0f,\"done\":%s,\"error\":\"%s\",\"paused\":%s}",
+        dl->id, dl->filename,
+        (int)(sizeof(body) - (size_t)pos > 200 ? 100 : 40), dl->url,
+        progress, (uint64_t)dl->downloaded, (uint64_t)dl->total_size,
+        dl->speed, dl->done ? "true" : "false",
+        dl->error ? dl->error_msg : "",
+        dl->paused ? "true" : "false");
+  }
+  pos += snprintf(body + pos, sizeof(body) - (size_t)pos, "]}");
+
+  http_response_set_body(resp, body, (size_t)pos);
+  return resp;
+}
+
+static http_response_t *api_dl_pause(const http_request_t *request) {
+  if (request->method != HTTP_METHOD_POST) {
+    return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED, "Use POST");
+  }
+  /* Parse {"id": N} from body */
+  int id = 0;
+  if (request->body && request->body_length > 0) {
+    const char *idp = strstr(request->body, "\"id\"");
+    if (idp) {
+      idp += 4;
+      while (*idp == ' ' || *idp == ':' || *idp == '\t') idp++;
+      id = atoi(idp);
+    }
+  }
+
+  dl_entry_t *dl = dl_find_by_id(id);
+  if (!dl) return error_json(HTTP_STATUS_404_NOT_FOUND, "Download not found");
+
+  dl->paused = !dl->paused;
+
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  http_response_add_header(resp, "Content-Type", "application/json");
+  char body[64];
+  int len = snprintf(body, sizeof(body), "{\"ok\":true,\"paused\":%s}",
+                     dl->paused ? "true" : "false");
+  http_response_set_body(resp, body, (size_t)len);
+  return resp;
+}
+
+static http_response_t *api_dl_cancel(const http_request_t *request) {
+  if (request->method != HTTP_METHOD_POST) {
+    return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED, "Use POST");
+  }
+  int id = 0;
+  if (request->body && request->body_length > 0) {
+    const char *idp = strstr(request->body, "\"id\"");
+    if (idp) {
+      idp += 4;
+      while (*idp == ' ' || *idp == ':' || *idp == '\t') idp++;
+      id = atoi(idp);
+    }
+  }
+
+  dl_entry_t *dl = dl_find_by_id(id);
+  if (!dl) return error_json(HTTP_STATUS_404_NOT_FOUND, "Download not found");
+
+  dl->error = 1;
+  snprintf(dl->error_msg, sizeof(dl->error_msg), "Cancelled by user");
+  dl->done = 1;
+  dl->active = 0;
+
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  http_response_add_header(resp, "Content-Type", "application/json");
+  const char *body = "{\"ok\":true}";
+  http_response_set_body(resp, body, strlen(body));
+  return resp;
+}
+
+/*===========================================================================*
  * STATIC RESOURCE SERVING
  *===========================================================================*/
 
+/*---------------------------------------------------------------------------*
+ * MIME type lookup — maps file extension to Content-Type.
+ * Covers all file types used by the modular web UI.
+ *---------------------------------------------------------------------------*/
+static const char *mime_for_ext(const char *path) {
+  const char *dot = strrchr(path, '.');
+  if (dot == NULL) return "application/octet-stream";
+  dot++; /* skip the '.' */
+  if (strcasecmp(dot, "html") == 0) return "text/html; charset=utf-8";
+  if (strcasecmp(dot, "css")  == 0) return "text/css; charset=utf-8";
+  if (strcasecmp(dot, "js")   == 0) return "application/javascript; charset=utf-8";
+  if (strcasecmp(dot, "json") == 0) return "application/json; charset=utf-8";
+  if (strcasecmp(dot, "png")  == 0) return "image/png";
+  if (strcasecmp(dot, "jpg")  == 0) return "image/jpeg";
+  if (strcasecmp(dot, "jpeg") == 0) return "image/jpeg";
+  if (strcasecmp(dot, "gif")  == 0) return "image/gif";
+  if (strcasecmp(dot, "svg")  == 0) return "image/svg+xml";
+  if (strcasecmp(dot, "ico")  == 0) return "image/x-icon";
+  if (strcasecmp(dot, "webp") == 0) return "image/webp";
+  if (strcasecmp(dot, "woff") == 0) return "font/woff";
+  if (strcasecmp(dot, "woff2")== 0) return "font/woff2";
+  if (strcasecmp(dot, "ttf")  == 0) return "font/ttf";
+  if (strcasecmp(dot, "map")  == 0) return "application/json";
+  return "application/octet-stream";
+}
+
+/*---------------------------------------------------------------------------*
+ * serve_static — read files from HTTP_WEB_ROOT on the filesystem.
+ *
+ * Replaces the previous embedded-resource approach (http_resources.c).
+ * Files are read from disk at request time, which:
+ *   1. Reduces payload binary size by ~10 MB
+ *   2. Allows hot-reloading during development
+ *   3. Supports the new modular CSS/JS file structure
+ *
+ * Path traversal is prevented by rejecting any URI containing "..".
+ *---------------------------------------------------------------------------*/
 static http_response_t *serve_static(const http_request_t *request) {
   const char *path = request->uri;
   if (path[0] == '/') {
@@ -2795,60 +3922,124 @@ static http_response_t *serve_static(const http_request_t *request) {
     path = "index.html";
   }
 
-  size_t size = 0;
-  const char *content = http_get_resource(path, &size);
+  /* ── Strip query string (e.g. "?v=3" cache busting) ──
+   *
+   *  "css/base.css?v=3"  →  "css/base.css"
+   *                 ^── stop here                        */
+  char clean_path[1024];
+  {
+    const char *qmark = strchr(path, '?');
+    size_t plen = qmark ? (size_t)(qmark - path) : strlen(path);
+    if (plen >= sizeof(clean_path)) plen = sizeof(clean_path) - 1;
+    memcpy(clean_path, path, plen);
+    clean_path[plen] = '\0';
+  }
+  path = clean_path;
 
-  if (content == NULL) {
+  /* Block path traversal */
+  if (strstr(path, "..") != NULL) {
+    return error_json(HTTP_STATUS_403_FORBIDDEN, "Path traversal blocked");
+  }
+
+  /* Build full filesystem path: HTTP_WEB_ROOT + relative path */
+  char fspath[1024];
+  int n = snprintf(fspath, sizeof(fspath), "%s%s", HTTP_WEB_ROOT, path);
+  if (n < 0 || (size_t)n >= sizeof(fspath)) {
+    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Path too long");
+  }
+
+  /* Open and stat the file */
+  struct stat st;
+  if (stat(fspath, &st) != 0 || !S_ISREG(st.st_mode)) {
+    /* Fallback: try embedded resources (backward compat during transition) */
+    size_t esize = 0;
+    const char *econtent = http_get_resource(path, &esize);
+    if (econtent != NULL) {
+      http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+      http_response_add_header(resp, "Content-Type", mime_for_ext(path));
+      if (http_response_set_body(resp, econtent, esize) != 0) {
+        (void)http_response_set_body_ref(resp, econtent, esize);
+      }
+      return resp;
+    }
     http_response_t *resp = http_response_create(HTTP_STATUS_404_NOT_FOUND);
     const char *msg = "404 Not Found";
     http_response_set_body(resp, msg, strlen(msg));
     return resp;
   }
 
-  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  size_t size = (size_t)st.st_size;
 
-  /* MIME type detection & Token Injection */
-  if (strstr(path, ".html") != NULL) {
-    http_response_add_header(resp, "Content-Type", "text/html; charset=utf-8");
+  /* Read file into memory */
+  FILE *fp = fopen(fspath, "rb");
+  if (fp == NULL) {
+    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Cannot open file");
+  }
+  char *content = (char *)malloc(size + 1);
+  if (content == NULL) {
+    fclose(fp);
+    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+  }
+  size_t got = fread(content, 1, size, fp);
+  fclose(fp);
+  content[got] = '\0';
+
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  http_response_add_header(resp, "Content-Type", mime_for_ext(path));
+  http_response_add_header(resp, "Cache-Control", "no-cache");
 
 #if ENABLE_WEB_UPLOAD
-    /* Inject CSRF token into HTML */
-    if (strstr(path, "index.html") != NULL) {
-      const char *token = http_csrf_get_token();
-      char meta_tag[128];
-      snprintf(meta_tag, sizeof(meta_tag),
-               "<meta name=\"csrf-token\" content=\"%s\">", token);
+  /* Inject CSRF token into HTML */
+  if (strstr(path, "index.html") != NULL) {
+    const char *token = http_csrf_get_token();
+    char meta_tag[128];
+    snprintf(meta_tag, sizeof(meta_tag),
+             "<meta name=\"csrf-token\" content=\"%s\">", token);
 
-      /* Identify placeholder: <!-- CSRF_TOKEN --> */
-      const char *placeholder = "<!-- CSRF_TOKEN -->";
-      const char *found = strstr(content, placeholder);
+    const char *placeholder = "<!-- CSRF_TOKEN -->";
+    const char *found = strstr(content, placeholder);
 
-      if (found != NULL) {
-        size_t prefix_len = (size_t)(found - content);
-        size_t suffix_len = size - prefix_len - strlen(placeholder);
-        if (http_response_set_body_splice(
-                resp, content, prefix_len, meta_tag, strlen(meta_tag),
-                found + strlen(placeholder), suffix_len) == 0) {
-          return resp;
-        }
+    if (found != NULL) {
+      size_t prefix_len = (size_t)(found - content);
+      size_t suffix_len = got - prefix_len - strlen(placeholder);
+      if (http_response_set_body_splice(
+              resp, content, prefix_len, meta_tag, strlen(meta_tag),
+              found + strlen(placeholder), suffix_len) == 0) {
+        free(content);
+        return resp;
       }
     }
+  }
 #endif
-  } else if (strstr(path, ".css") != NULL) {
-    http_response_add_header(resp, "Content-Type", "text/css; charset=utf-8");
-  } else if (strstr(path, ".js") != NULL) {
-    http_response_add_header(resp, "Content-Type",
-                             "application/javascript; charset=utf-8");
-  } else if (strstr(path, ".png") != NULL) {
-    http_response_add_header(resp, "Content-Type", "image/png");
-  } else {
-    http_response_add_header(resp, "Content-Type", "application/octet-stream");
-  }
 
-  if (http_response_set_body(resp, content, size) != 0) {
-    (void)http_response_set_body_ref(resp, content, size);
+  /*
+   * Two paths for sending file content:
+   *
+   *   SMALL FILE  (<= ~7 KB): set_body copies into resp->data inline
+   *   LARGE FILE  (> ~7 KB):  set_body_owned transfers ownership of the
+   *                            malloc'd buffer; http_handle_request()
+   *                            streams it via the mem_body path after
+   *                            sending headers.
+   *
+   *   ┌──────────────────────────────────────────────────┐
+   *   │  resp->data (8 KB)   │  mem_body (heap, any sz)  │
+   *   │  [headers + body]    │  [large body streamed]    │
+   *   └──────────────────────────────────────────────────┘
+   */
+  if (http_response_set_body(resp, content, got) == 0) {
+    /* Small file — fully contained in resp->data */
+    free(content);
+    return resp;
   }
-  return resp;
+  /* Large file — transfer ownership of malloc'd content */
+  if (http_response_set_body_owned(resp, content, got) == 0) {
+    /* content ownership transferred, do NOT free */
+    return resp;
+  }
+  /* Both paths failed (should not happen) */
+  http_response_destroy(resp);
+  free(content);
+  return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Body allocation failed");
 }
 
 /*===========================================================================*
@@ -2949,5 +4140,51 @@ static http_response_t *api_network_reset(const http_request_t *request) {
   }
 
   http_response_set_body(resp, body, strlen(body));
+  return resp;
+}
+
+/*===========================================================================*
+ * GET /api/admin/fan?threshold=...
+ * Sets the fan threshold on PS4/PS5 using /dev/icc_fan ioctl 0xC01C8F07.
+ *===========================================================================*/
+static http_response_t *api_admin_fan(const http_request_t *request) {
+  const char *query = strchr(request->uri, '?');
+  if (!query) {
+    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing threshold parameter");
+  }
+
+  int threshold = 0;
+  if (sscanf(query, "?threshold=%d", &threshold) != 1) {
+    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Invalid threshold parameter format");
+  }
+
+  /* Clamp to safe operating values */
+  if (threshold < 40) { threshold = 40; }
+  if (threshold > 90) { threshold = 90; }
+
+#ifndef _WIN32
+  int fd = open("/dev/icc_fan", O_RDONLY, 0);
+  if (fd < 0) {
+    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Failed to open /dev/icc_fan (Unsupported OS)");
+  }
+
+  char data[10] = {0x00, 0x00, 0x00, 0x00, 0x00, (char)threshold, 0x00, 0x00, 0x00, 0x00};
+  int ret = ioctl(fd, 0xC01C8F07, data);
+  close(fd);
+
+  if (ret < 0) {
+    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Fan control ioctl failed");
+  }
+#else
+  /* Mock for development environments */
+  (void)threshold;
+#endif
+
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK, "application/json");
+  if (!resp) return NULL;
+  
+  char body[128];
+  int blen = snprintf(body, sizeof(body), "{\"status\":\"ok\",\"threshold\":%d}", threshold);
+  http_response_set_body(resp, body, (size_t)blen);
   return resp;
 }

@@ -122,8 +122,8 @@ SOFTWARE.
 #ifndef PAL_FILE_COPY_BUFFER_SIZE
 #if defined(PLATFORM_PS5)
 #define PAL_FILE_COPY_BUFFER_SIZE                                              \
-  (8U * 1024U *                                                                \
-   1024U) /* 8 MB — NVMe ~500+ MB/s, reduces pthread sync overhead */
+  (4U * 1024U *                                                                \
+   1024U) /* 4 MB — NVMe ~215 MB/s, T_write=19ms covers T_read=12ms */
 #elif defined(PLATFORM_PS4)
 #define PAL_FILE_COPY_BUFFER_SIZE                                              \
   (1024U * 1024U) /* 1 MB — HDD ~85 MB/s,  T_write=12ms covers T_read=3ms  */

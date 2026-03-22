@@ -37,6 +37,7 @@ SOFTWARE.
 #include "ftp_log.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -504,7 +505,7 @@ uint16_t pal_sockaddr_get_port(const struct sockaddr_in *addr) {
 }
 
 /**
- * @brief Create sockaddr from IP and port
+ * @brief Create sockaddr from IP and port (IPv4 only, legacy)
  */
 ftp_error_t pal_make_sockaddr(const char *ip, uint16_t port,
                               struct sockaddr_in *addr) {
@@ -532,6 +533,105 @@ ftp_error_t pal_make_sockaddr(const char *ip, uint16_t port,
   /* Set port (convert to network byte order) */
   addr->sin_port = PAL_HTONS(port);
 
+  return FTP_OK;
+}
+
+/**
+ * @brief Create sockaddr from IP:port string with IPv6 bracket support
+ *
+ * Parses:
+ *   - "192.168.1.1:8888"        → IPv4
+ *   - "[::1]:8888"              → IPv6 loopback
+ *   - "[fe80::1%eth0]:8888"     → IPv6 with zone ID
+ *
+ * @param addr_str  Address string with embedded port (e.g., "[::1]:8888")
+ * @param out_addr  Output sockaddr_storage (IPv4 or IPv6)
+ * @param out_len   Output length (sizeof(sockaddr_in) or sizeof(sockaddr_in6))
+ *
+ * @return FTP_OK on success, FTP_ERR_INVALID_PARAM on parse error
+ */
+ftp_error_t pal_make_sockaddr_ex(const char *addr_str,
+                                  struct sockaddr_storage *out_addr,
+                                  socklen_t *out_len) {
+  if ((addr_str == NULL) || (out_addr == NULL) || (out_len == NULL)) {
+    return FTP_ERR_INVALID_PARAM;
+  }
+
+  memset(out_addr, 0, sizeof(*out_addr));
+
+  /* Check for IPv6 bracket notation: [ipv6]:port */
+  if (addr_str[0] == '[') {
+    /* IPv6 address */
+    const char *close_bracket = strchr(addr_str, ']');
+    if (close_bracket == NULL) {
+      return FTP_ERR_INVALID_PARAM;
+    }
+
+    /* Extract IPv6 address (between [ and ]) */
+    size_t ipv6_len = (size_t)(close_bracket - addr_str - 1);
+    if (ipv6_len == 0 || ipv6_len >= INET6_ADDRSTRLEN) {
+      return FTP_ERR_INVALID_PARAM;
+    }
+
+    char ipv6_str[INET6_ADDRSTRLEN];
+    memcpy(ipv6_str, addr_str + 1, ipv6_len);
+    ipv6_str[ipv6_len] = '\0';
+
+    /* Parse port after ] */
+    const char *port_str = close_bracket + 1;
+    if (*port_str != ':') {
+      return FTP_ERR_INVALID_PARAM;
+    }
+    port_str++;
+
+    uint16_t port = (uint16_t)strtoul(port_str, NULL, 10);
+    if (port == 0U) {
+      return FTP_ERR_INVALID_PARAM;
+    }
+
+    /* Build sockaddr_in6 */
+    struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *)out_addr;
+    addr6->sin6_family = AF_INET6;
+    addr6->sin6_port = PAL_HTONS(port);
+
+    if (PAL_INET_PTON(AF_INET6, ipv6_str, &addr6->sin6_addr) != 1) {
+      return FTP_ERR_INVALID_PARAM;
+    }
+
+    *out_len = (socklen_t)sizeof(struct sockaddr_in6);
+    return FTP_OK;
+  }
+
+  /* IPv4: "192.168.1.1:port" */
+  const char *colon = strchr(addr_str, ':');
+  if (colon == NULL) {
+    return FTP_ERR_INVALID_PARAM;
+  }
+
+  size_t ipv4_len = (size_t)(colon - addr_str);
+  if (ipv4_len == 0 || ipv4_len >= INET_ADDRSTRLEN) {
+    return FTP_ERR_INVALID_PARAM;
+  }
+
+  char ipv4_str[INET_ADDRSTRLEN];
+  memcpy(ipv4_str, addr_str, ipv4_len);
+  ipv4_str[ipv4_len] = '\0';
+
+  uint16_t port = (uint16_t)strtoul(colon + 1, NULL, 10);
+  if (port == 0U) {
+    return FTP_ERR_INVALID_PARAM;
+  }
+
+  /* Build sockaddr_in */
+  struct sockaddr_in *addr4 = (struct sockaddr_in *)out_addr;
+  addr4->sin_family = AF_INET;
+  addr4->sin_port = PAL_HTONS(port);
+
+  if (PAL_INET_PTON(AF_INET, ipv4_str, &addr4->sin_addr) != 1) {
+    return FTP_ERR_INVALID_PARAM;
+  }
+
+  *out_len = (socklen_t)sizeof(struct sockaddr_in);
   return FTP_OK;
 }
 

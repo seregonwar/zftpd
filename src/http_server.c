@@ -440,9 +440,9 @@ static int is_safe_filename_local(const char *name) {
  * CREATE / DESTROY
  *===========================================================================*/
 
-http_server_t *http_server_create(event_loop_t *loop, uint16_t port,
+http_server_t *http_server_create(event_loop_t *loop, const char *bind_addr,
                                   const char *root_path) {
-  if ((loop == NULL) || (root_path == NULL)) {
+  if ((loop == NULL) || (bind_addr == NULL) || (root_path == NULL)) {
     return NULL;
   }
 
@@ -453,7 +453,6 @@ http_server_t *http_server_create(event_loop_t *loop, uint16_t port,
   memset(&g_http_server, 0, sizeof(g_http_server));
   g_http_server.listen_fd = -1;
   g_http_server.loop = loop;
-  g_http_server.port = port;
   atomic_store(&g_http_server.connection_count, 0);
 
   /* Store root path for filesystem confinement */
@@ -468,8 +467,29 @@ http_server_t *http_server_create(event_loop_t *loop, uint16_t port,
 
   http_connections_init();
 
-  /* Create TCP listen socket */
-  g_http_server.listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+  /* Parse bind address (supports "[::1]:8888" and "0.0.0.0:8888") */
+  struct sockaddr_storage addr_storage;
+  socklen_t addr_len;
+  if (pal_make_sockaddr_ex(bind_addr, &addr_storage, &addr_len) != FTP_OK) {
+    return NULL;
+  }
+
+  /* Determine address family and extract port */
+  int af = addr_storage.ss_family;
+  uint16_t port = 0;
+  if (af == AF_INET6) {
+    struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *)&addr_storage;
+    port = ntohs(addr6->sin6_port);
+  } else if (af == AF_INET) {
+    struct sockaddr_in *addr4 = (struct sockaddr_in *)&addr_storage;
+    port = ntohs(addr4->sin_port);
+  } else {
+    return NULL;
+  }
+  g_http_server.port = port;
+
+  /* Create TCP listen socket with detected address family */
+  g_http_server.listen_fd = socket(af, SOCK_STREAM, 0);
   if (g_http_server.listen_fd < 0) {
     return NULL;
   }
@@ -478,14 +498,16 @@ http_server_t *http_server_create(event_loop_t *loop, uint16_t port,
   setsockopt(g_http_server.listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuse,
              sizeof(reuse));
 
-  struct sockaddr_in addr;
-  memset(&addr, 0, sizeof(addr));
-  addr.sin_family = AF_INET;
-  addr.sin_port = htons(port);
-  addr.sin_addr.s_addr = INADDR_ANY;
+  /* Dual-stack: accept both IPv4 and IPv6 on a single [::] socket.
+   * FreeBSD/PS5 defaults IPV6_V6ONLY=1, so we must explicitly disable it. */
+  if (af == AF_INET6) {
+    int v6only = 0;
+    setsockopt(g_http_server.listen_fd, IPPROTO_IPV6, IPV6_V6ONLY,
+               &v6only, sizeof(v6only));
+  }
 
-  if (bind(g_http_server.listen_fd, (struct sockaddr *)&addr, sizeof(addr)) <
-      0) {
+  if (bind(g_http_server.listen_fd, (struct sockaddr *)&addr_storage,
+           addr_len) < 0) {
     close(g_http_server.listen_fd);
     g_http_server.listen_fd = -1;
     return NULL;
@@ -538,7 +560,7 @@ static int http_accept_callback(int fd, uint32_t events, void *data) {
   http_server_t *server = (http_server_t *)data;
   (void)events;
 
-  struct sockaddr_in client_addr;
+  struct sockaddr_storage client_addr;
   socklen_t addr_len = sizeof(client_addr);
 
   int client_fd = accept(fd, (struct sockaddr *)&client_addr, &addr_len);

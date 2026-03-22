@@ -396,6 +396,26 @@ uint16_t pal_sockaddr_get_port(const struct sockaddr_in *addr);
 ftp_error_t pal_make_sockaddr(const char *ip, uint16_t port,
                               struct sockaddr_in *addr);
 
+/**
+ * @brief Create sockaddr from address:port string with IPv6 bracket support
+ *
+ * Parses both IPv4 and IPv6 addresses:
+ *   - "192.168.1.1:8888"        → IPv4
+ *   - "[::1]:8888"              → IPv6 loopback
+ *   - "[fe80::2e4:21ff:fef5:240d]:8888"  → IPv6 link-local
+ *
+ * @param addr_str  Address string with embedded port
+ * @param out_addr  Output sockaddr_storage (union of IPv4/IPv6)
+ * @param out_len   Output length (sizeof(sockaddr_in) or sizeof(sockaddr_in6))
+ *
+ * @return FTP_OK on success, FTP_ERR_INVALID_PARAM on parse error
+ *
+ * @note Thread-safety: Safe (no shared state)
+ */
+ftp_error_t pal_make_sockaddr_ex(const char *addr_str,
+                                  struct sockaddr_storage *out_addr,
+                                  socklen_t *out_len);
+
 #endif /* PAL_NETWORK_H */
 
 /*===========================================================================*

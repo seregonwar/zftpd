@@ -1,0 +1,311 @@
+/* ══ SETTINGS VIEW ════════════════════════════════════════════════════════
+ * Styling for the settings panel: sections, toggles, selects, about.
+ * ═════════════════════════════════════════════════════════════════════════ */
+
+/* ── Page Header ── */
+
+.sett-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 20px;
+  font-weight: 800;
+  color: var(--tx);
+  margin-bottom: 28px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--bd);
+}
+
+.sett-header svg {
+  color: var(--ac);
+}
+
+/* ── Sections ── */
+
+.sett-section {
+  background: var(--sf);
+  border: 1px solid var(--bd);
+  border-radius: var(--radius-md);
+  padding: 0;
+  margin-bottom: 16px;
+  overflow: hidden;
+}
+
+.sett-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--tx2);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--bd);
+  background: var(--sf2);
+}
+
+.sett-section-title svg {
+  color: var(--ac);
+  flex-shrink: 0;
+}
+
+/* ── Setting Row ── */
+
+.sett-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--bd);
+  transition: background var(--transition-fast);
+}
+
+.sett-row:last-child {
+  border-bottom: none;
+}
+
+.sett-row:hover {
+  background: var(--sf2);
+}
+
+.sett-label {
+  flex: 1;
+  min-width: 0;
+}
+
+.sett-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--tx);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sett-desc {
+  font-size: 11px;
+  color: var(--tx3);
+  margin-top: 2px;
+  line-height: 1.4;
+}
+
+/* ── Select Dropdown ── */
+
+.sett-select {
+  background: var(--sf2);
+  color: var(--tx);
+  border: 1px solid var(--bd2);
+  border-radius: 8px;
+  padding: 7px 32px 7px 12px;
+  font-size: 12px;
+  font-family: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+  min-width: 140px;
+  transition: border-color var(--transition-fast);
+  background-image: url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%237a94b8' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+
+.sett-select:focus {
+  border-color: var(--ac);
+}
+
+/* ══ TOGGLE SWITCH ════════════════════════════════════════════════════════
+ *
+ *   OFF state:          ON state:
+ *   ┌─────────────┐     ┌─────────────┐
+ *   │ ○            │     │           ● │
+ *   └─────────────┘     └─────────────┘
+ *   (track: --bd2)      (track: --ac)
+ *
+ * ═════════════════════════════════════════════════════════════════════════ */
+
+.sett-toggle {
+  position: relative;
+  display: inline-block;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.sett-toggle input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.sett-toggle-track {
+  display: block;
+  width: 44px;
+  height: 24px;
+  border-radius: 12px;
+  background: var(--bd2);
+  position: relative;
+  transition: background .25s ease, box-shadow .25s ease;
+}
+
+.sett-toggle-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0,0,0,.3);
+  transition: transform .25s cubic-bezier(.4, 0, .2, 1);
+}
+
+/* Checked state */
+.sett-toggle input:checked + .sett-toggle-track {
+  background: var(--ac);
+  box-shadow: 0 0 12px rgba(var(--acR), .4);
+}
+
+.sett-toggle input:checked + .sett-toggle-track .sett-toggle-thumb {
+  transform: translateX(20px);
+}
+
+/* Danger track variant (for system folders) */
+.sett-toggle input:checked + .sett-toggle-track.danger {
+  background: var(--wn);
+  box-shadow: 0 0 12px rgba(240, 165, 0, .4);
+}
+
+/* ── Warning dot beside label ── */
+
+.sett-warn-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--wn);
+  box-shadow: 0 0 6px var(--wn);
+}
+
+/* ══ DANGER INFO ═════════════════════════════════════════════════════════ */
+
+.sett-danger-info {
+  border-color: rgba(240, 165, 0, .2);
+}
+
+.sett-danger-info .sett-section-title {
+  color: var(--wn);
+}
+
+.sett-danger-info .sett-section-title svg {
+  color: var(--wn);
+}
+
+.sett-danger-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 14px 18px;
+}
+
+.sett-danger-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: 'SF Mono', 'Menlo', monospace;
+  color: var(--wn);
+  background: rgba(240, 165, 0, .08);
+  border: 1px solid rgba(240, 165, 0, .2);
+}
+
+/* ══ ABOUT SECTION ═══════════════════════════════════════════════════════ */
+
+.sett-about {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 20px 18px;
+}
+
+.sett-about-logo img {
+  filter: drop-shadow(0 0 12px rgba(var(--acR), .5));
+}
+
+.sett-about-name {
+  font-size: 18px;
+  font-weight: 800;
+  background: linear-gradient(90deg, var(--ac), var(--ac2));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.sett-about-ver {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--ac);
+  background: var(--tg);
+  border: 1px solid var(--tgb);
+  border-radius: 4px;
+  padding: 1px 6px;
+  margin-top: 4px;
+}
+
+.sett-about-desc {
+  font-size: 11px;
+  color: var(--tx3);
+  margin-top: 6px;
+  line-height: 1.5;
+}
+
+.sett-about-link {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--ac);
+  margin-top: 8px;
+  font-weight: 600;
+}
+
+.sett-about-link svg {
+  flex-shrink: 0;
+}
+
+/* ── Settings content wrapper ── */
+
+#settings-content {
+  max-width: 680px;
+  margin: 0 auto;
+}
+
+/* ══ MOBILE RESPONSIVE ═══════════════════════════════════════════════════ */
+
+@media (max-width: 768px) {
+  .sett-header {
+    font-size: 17px;
+    margin-bottom: 20px;
+    padding-bottom: 12px;
+  }
+
+  .sett-row {
+    padding: 12px 14px;
+  }
+
+  .sett-select {
+    min-width: 110px;
+    font-size: 11px;
+  }
+
+  .sett-about {
+    flex-direction: column;
+    text-align: center;
+  }
+}

@@ -45,6 +45,24 @@ SOFTWARE.
 #define HTTP_DEBUG_LOG_HEADERS 0
 #endif
 
+/*---------------------------------------------------------------------------*
+ * Web root directory — static files are served from this path.
+ *
+ * When set, serve_static() reads files from disk instead of the embedded
+ * http_resources.c blob.  This decouples the web UI from the payload binary,
+ * making development faster and the payload ~10 MB smaller.
+ *
+ * On PS5: /data/zftpd/web/
+ * On desktop (dev): ./web/ (relative to cwd)
+ *---------------------------------------------------------------------------*/
+#ifndef HTTP_WEB_ROOT
+#if defined(PS5) || defined(PLATFORM_PS5) || defined(PS4) || defined(PLATFORM_PS4)
+#define HTTP_WEB_ROOT "/data/zftpd/web/"
+#else
+#define HTTP_WEB_ROOT "web/"
+#endif
+#endif
+
 /* Server configuration */
 #define HTTP_DEFAULT_PORT 8888
 #define HTTP_MAX_CONNECTIONS 100

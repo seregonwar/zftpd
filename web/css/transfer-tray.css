@@ -1,0 +1,248 @@
+/* ══ TRANSFER TRAY ═══════════════════════════════════════════════════════ */
+
+.xfer-tray {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 8500;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+  max-width: 340px;
+}
+
+.xfer-card {
+  pointer-events: auto;
+  background: var(--sf);
+  border: 1px solid var(--bd2);
+  border-radius: 12px;
+  padding: 12px 14px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, .55);
+  animation: slideUp .2s ease;
+  min-width: 280px;
+}
+
+.xc-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.xc-op {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--ac);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+
+.xc-speed {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--tx2);
+}
+
+.xc-time {
+  font-size: 11px;
+  color: var(--tx3);
+  margin-left: 4px;
+}
+
+.xc-pct {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--ok);
+}
+
+.xc-name {
+  font-size: 12px;
+  color: var(--tx);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-bottom: 2px;
+}
+
+.xc-dest {
+  font-size: 11px;
+  color: var(--tx2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-bottom: 6px;
+  opacity: .75;
+}
+
+.xc-dest .xc-arrow {
+  color: var(--ac);
+  font-weight: 700;
+}
+
+.xc-bar {
+  height: 5px;
+  border-radius: var(--radius-pill);
+  background: var(--bd);
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.xc-bf {
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(90deg, var(--ac), var(--ac2));
+  transition: width .15s ease;
+}
+
+.xc-btns {
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+}
+
+.xc-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 5px 16px;
+  border-radius: 7px;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all .12s;
+  border: none;
+}
+
+.xc-btn.pause {
+  background: var(--sf2);
+  color: var(--wn);
+  border: 1px solid var(--bd2);
+}
+
+.xc-btn.pause:hover {
+  background: var(--sf3);
+  border-color: var(--wn);
+}
+
+.xc-btn.cancel {
+  background: rgba(255, 95, 87, .12);
+  color: var(--er);
+  border: 1px solid rgba(255, 95, 87, .25);
+}
+
+.xc-btn.cancel:hover {
+  background: rgba(255, 95, 87, .22);
+}
+
+/* ── Indeterminate progress ── */
+
+@keyframes xferPulse {
+  0%   { left: -40%; width: 40%; }
+  50%  { left: 30%;  width: 50%; }
+  100% { left: 100%; width: 40%; }
+}
+
+.xc-bf.indeterminate {
+  position: relative;
+  width: 100% !important;
+  background: var(--bd);
+}
+
+.xc-bf.indeterminate::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(90deg, var(--ac), var(--ac2));
+  animation: xferPulse 1.5s ease-in-out infinite;
+}
+
+/* ── Drop overlay ── */
+
+.drop {
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(8, 11, 16, .82);
+  backdrop-filter: blur(8px);
+  z-index: 300;
+}
+
+.drop.on {
+  display: flex;
+  animation: fadeIn .15s ease;
+}
+
+.drop-card {
+  width: min(460px, 88vw);
+  text-align: center;
+  border: 2px dashed var(--ac);
+  border-radius: var(--radius-lg);
+  padding: 32px 24px;
+  background: var(--sf);
+  position: relative;
+}
+
+.d-ico {
+  margin-bottom: 14px;
+  opacity: .85;
+  color: var(--ac);
+}
+
+.d-title {
+  font-weight: 800;
+  font-size: 20px;
+  margin-bottom: 6px;
+}
+
+.d-sub {
+  color: var(--tx2);
+  font-size: 12px;
+  margin-bottom: 16px;
+}
+
+.d-bar {
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--bd);
+  overflow: hidden;
+}
+
+.d-bf {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--ac), var(--ac2));
+  transition: width .1s ease;
+}
+
+.drop-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  background: none;
+  border: none;
+  color: var(--tx2);
+  font-size: 24px;
+  cursor: pointer;
+  padding: 0;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  transition: all .15s ease;
+}
+
+.drop-close:hover {
+  background: var(--bd);
+  color: var(--tx);
+}

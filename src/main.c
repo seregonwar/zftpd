@@ -303,7 +303,7 @@ int main(void) {
 
   {
     char notify_msg[128];
-    (void)snprintf(notify_msg, sizeof(notify_msg), "zftpd v%s (PS4) started",
+    (void)snprintf(notify_msg, sizeof(notify_msg), "zftpd by SeregonWar v%s (PS4) started",
                    RELEASE_VERSION);
     pal_notification_send(notify_msg);
 
@@ -323,8 +323,11 @@ int main(void) {
   http_api_set_server_ctx(&g_server_ctx);
   g_event_loop = event_loop_create();
   if (g_event_loop != NULL) {
+    char http_bind[64];
+    (void)snprintf(http_bind, sizeof(http_bind), "[::]:%u",
+                   (unsigned)HTTP_DEFAULT_PORT);
     g_http_server =
-        http_server_create(g_event_loop, HTTP_DEFAULT_PORT, root_path);
+        http_server_create(g_event_loop, http_bind, root_path);
     if (g_http_server != NULL) {
       pthread_t http_thread;
       int rc = start_http_thread(&http_thread, g_event_loop);
@@ -543,7 +546,7 @@ int main(void) {
 
   {
     char notify_msg[128];
-    (void)snprintf(notify_msg, sizeof(notify_msg), "zftpd v%s (PS5) started",
+    (void)snprintf(notify_msg, sizeof(notify_msg), "zftpd by SeregonWar v%s (PS5) started",
                    RELEASE_VERSION);
     pal_notification_send(notify_msg);
 
@@ -563,7 +566,10 @@ int main(void) {
   http_api_set_server_ctx(&g_server_ctx);
   g_event_loop = event_loop_create();
   if (g_event_loop != NULL) {
-    g_http_server = http_server_create(g_event_loop, HTTP_DEFAULT_PORT, "/");
+    char http_bind[64];
+    (void)snprintf(http_bind, sizeof(http_bind), "[::]:%u",
+                   (unsigned)HTTP_DEFAULT_PORT);
+    g_http_server = http_server_create(g_event_loop, http_bind, "/");
     if (g_http_server != NULL) {
       pthread_t http_thread;
       int rc = start_http_thread(&http_thread, g_event_loop);
@@ -791,7 +797,10 @@ int main(int argc, char **argv) {
   }
   g_event_loop = event_loop_create();
   if (g_event_loop != NULL) {
-    g_http_server = http_server_create(g_event_loop, http_port, root_path);
+    char http_bind[64];
+    (void)snprintf(http_bind, sizeof(http_bind), "[::]:%u",
+                   (unsigned)http_port);
+    g_http_server = http_server_create(g_event_loop, http_bind, root_path);
     if (g_http_server != NULL) {
       pthread_t http_thread;
       int rc = start_http_thread(&http_thread, g_event_loop);

@@ -1,0 +1,287 @@
+/* ══ FILE LIST HEADER ═════════════════════════════════════════════════════ */
+
+.fl-header {
+  display: flex;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.fl-count {
+  font-size: 11px;
+  color: var(--tx3);
+}
+
+.fl-count b {
+  color: var(--ac);
+  font-weight: 700;
+}
+
+/* ══ FILE TYPE ICON COLORS ════════════════════════════════════════════════ */
+
+.fi-wrap {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.fi-dir     { color: #4da6ff; }
+.fi-code    { color: #f7c948; }
+.fi-web     { color: #4fc3f7; }
+.fi-style   { color: #f06292; }
+.fi-data    { color: #81c784; }
+.fi-doc     { color: #90caf9; }
+.fi-img     { color: #ce93d8; }
+.fi-video   { color: #ff8a65; }
+.fi-audio   { color: #a5d6a7; }
+.fi-arch    { color: #ffb74d; }
+.fi-script  { color: #80cbc4; }
+.fi-bin     { color: #ef9a9a; }
+.fi-db      { color: #80deea; }
+.fi-lock    { color: #ffe082; }
+.fi-log     { color: #b0bec5; }
+.fi-sheet   { color: #a5d6a7; }
+.fi-slide   { color: #ffab40; }
+.fi-game    { color: #7c4dff; }
+.fi-generic { color: var(--tx2); }
+
+/* ══ GRID VIEW ════════════════════════════════════════════════════════════ */
+
+.fl.vg-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(152px, 1fr));
+  gap: 9px;
+}
+
+.fl.vg-grid .card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 12px 11px;
+  border: 1px solid var(--bd);
+  background: var(--sf);
+  border-radius: 13px;
+  cursor: pointer;
+  text-align: center;
+  transition: border-color .15s, background .15s, transform .2s, box-shadow .2s;
+  position: relative;
+  overflow: hidden;
+}
+
+.fl.vg-grid .card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse at 50% -10%, rgba(var(--acR), .18), transparent 65%);
+  transition: opacity .2s;
+}
+
+.fl.vg-grid .card:hover {
+  border-color: var(--ac);
+  background: var(--sf2);
+  transform: translateY(-3px);
+  box-shadow: 0 10px 32px rgba(0, 0, 0, .4), 0 0 0 1px rgba(var(--acR), .35);
+}
+
+.fl.vg-grid .card:hover::before { opacity: 1; }
+
+/* Game card with cover art */
+.fl.vg-grid .card.game-card {
+  padding: 0;
+  overflow: hidden;
+}
+
+.fl.vg-grid .card.game-card .card-cover {
+  width: 100%;
+  height: 152px; /* Set a fixed height as min-width is 152px */
+  object-fit: cover;
+  border-radius: 12px 12px 0 0;
+}
+
+.fl.vg-grid .card.game-card .card-info {
+  padding: 8px 10px 10px;
+  width: 100%;
+}
+
+.c-ico {
+  width: 50px;
+  height: 50px;
+  border-radius: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--gw);
+  border: 1px solid rgba(255, 255, 255, .06);
+}
+
+.c-name {
+  font-size: 12px;
+  font-weight: 600;
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.c-meta {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  width: 100%;
+  min-height: 18px;
+}
+
+/* ══ LIST VIEW ════════════════════════════════════════════════════════════ */
+
+.fl.vg-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.fl.vg-list .card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+  border: 1px solid var(--bd);
+  background: var(--sf);
+  border-radius: 9px;
+  cursor: pointer;
+  transition: border-color .12s, background .12s;
+}
+
+.fl.vg-list .card:hover {
+  border-color: var(--ac);
+  background: var(--sf2);
+}
+
+.fl.vg-list .c-ico {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  flex-shrink: 0;
+  background: var(--gw);
+  border: 1px solid rgba(255, 255, 255, .05);
+}
+
+.fl.vg-list .c-name {
+  font-size: 13px;
+  font-weight: 600;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.c-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* ══ DETAILS VIEW (TABLE) ═════════════════════════════════════════════════ */
+
+.fl.vg-details { display: block; }
+
+.dtbl {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.dtbl thead th {
+  text-align: left;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--tx3);
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--bd2);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.dtbl thead th:hover { color: var(--ac); }
+.sort-a { color: var(--ac); margin-left: 3px; font-size: 10px; }
+
+.dtbl tbody tr {
+  border-bottom: 1px solid var(--bd);
+  cursor: pointer;
+  transition: background .1s;
+}
+
+.dtbl tbody tr:hover { background: var(--sf2); }
+
+.dtbl tbody td {
+  padding: 9px 14px;
+  font-size: 12px;
+  vertical-align: middle;
+}
+
+.t-ic { width: 36px; text-align: center; }
+.t-nm { font-weight: 600; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.t-ex { width: 72px; }
+.t-sz { width: 88px; color: var(--tx2); white-space: nowrap; }
+.t-dt { color: var(--tx2); white-space: nowrap; font-size: 11px; }
+.t-tp { width: 76px; color: var(--tx3); font-size: 11px; white-space: nowrap; }
+
+/* ══ EMPTY / LOADING / ERROR STATES ═══════════════════════════════════════ */
+
+.s-card {
+  grid-column: 1/-1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 52px 24px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--bd);
+  background: var(--sf);
+  color: var(--tx2);
+  font-size: 13px;
+}
+
+.s-ico { opacity: .4; color: var(--tx2); }
+
+.s-err {
+  border-color: rgba(255, 95, 87, .28);
+  background: rgba(255, 95, 87, .05);
+  color: #ffb0ab;
+}
+
+.s-err .s-ico { opacity: .9; color: #ff8080; }
+
+/* ══ MOBILE ACTION BUTTON ═════════════════════════════════════════════════ */
+
+.c-action {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: 1px solid var(--bd2);
+  background: var(--sf2);
+  color: var(--tx2);
+  font-size: 16px;
+  font-weight: 700;
+  cursor: pointer;
+  flex-shrink: 0;
+  line-height: 1;
+  letter-spacing: 1px;
+}
+
+.c-action:hover {
+  border-color: var(--ac);
+  color: var(--tx);
+}
