@@ -503,14 +503,18 @@ int main(void) {
 
   install_signal_handlers();
 
-  /* Get PS5 IP address (simplified) */
+  /*
+   * Get PS5 primary IP for display/notifications.
+   * Bind on 0.0.0.0 so loopback (127.0.0.1 localhost) is also reachable.
+   */
+  const char *bind_ip = "0.0.0.0";
   char ip_address[INET_ADDRSTRLEN];
   if (pal_network_get_primary_ip(ip_address, sizeof(ip_address)) != FTP_OK) {
     (void)snprintf(ip_address, sizeof(ip_address), "%s", "0.0.0.0");
   }
 
   uint16_t selected_port = FTP_DEFAULT_PORT;
-  ftp_error_t err = server_init_with_fallback(ip_address, FTP_DEFAULT_PORT, "/",
+  ftp_error_t err = server_init_with_fallback(bind_ip, FTP_DEFAULT_PORT, "/",
                                               &selected_port);
 
   if (err != FTP_OK) {
