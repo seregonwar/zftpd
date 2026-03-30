@@ -4207,8 +4207,9 @@ static http_response_t *api_admin_fan(const http_request_t *request) {
   (void)threshold;
 #endif
 
-  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK, "application/json");
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
   if (!resp) return NULL;
+  http_response_add_header(resp, "Content-Type", "application/json");
   
   char body[128];
   int blen = snprintf(body, sizeof(body), "{\"status\":\"ok\",\"threshold\":%d}", threshold);
@@ -4221,9 +4222,31 @@ static http_response_t *api_admin_fan(const http_request_t *request) {
  *===========================================================================*/
 static http_response_t *api_admin_launch(const http_request_t *request) {
     char title_id[64] = {0};
-    if (http_get_query_param(request, "id", title_id, sizeof(title_id)) < 0) {
+
+  const char *query = strchr(request->uri, '?');
+  if (query == NULL) {
+    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing query string");
+  }
+
+  const char *id_param = strstr(query, "id=");
+  if (id_param == NULL) {
         return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing 'id' parameter");
     }
+
+  id_param += 3; /* skip "id=" */
+  size_t id_len = 0U;
+  while ((id_param[id_len] != '\0') && (id_param[id_len] != '&')) {
+    if (id_len >= (sizeof(title_id) - 1U)) {
+      return error_json(HTTP_STATUS_400_BAD_REQUEST, "'id' parameter too long");
+    }
+    title_id[id_len] = id_param[id_len];
+    id_len++;
+  }
+  title_id[id_len] = '\0';
+
+  if (title_id[0] == '\0') {
+    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing 'id' parameter");
+  }
 
 #if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
     /*
@@ -4245,7 +4268,7 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
         if (f_sceUserServiceGetForegroundUser && f_sceLncUtilLaunchApp) {
             uint32_t userId = 0;
             if (f_sceUserServiceGetForegroundUser(&userId) < 0) {
-                return error_json(HTTP_STATUS_500_INTERNAL_SERVER_ERROR, "Failed to get Foreground User");
+                return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Failed to get Foreground User");
             }
 
             LncAppParam param;
@@ -4269,13 +4292,13 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
                 return resp;
             } else {
                 (void)snprintf(msg, sizeof(msg), "Game Launch failed with error: 0x%08X", res);
-                return error_json(HTTP_STATUS_500_INTERNAL_SERVER_ERROR, msg);
+                return error_json(HTTP_STATUS_500_INTERNAL_ERROR, msg);
             }
         } else {
-            return error_json(HTTP_STATUS_500_INTERNAL_SERVER_ERROR, "Failed to resolve Launch API symbols");
+              return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Failed to resolve Launch API symbols");
         }
     } else {
-        return error_json(HTTP_STATUS_500_INTERNAL_SERVER_ERROR, "Failed to dynamically load Sony SPRX modules");
+            return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Failed to dynamically load Sony SPRX modules");
     }
 #else
     /* Mock fallback for local tests */
