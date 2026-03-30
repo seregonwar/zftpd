@@ -160,6 +160,46 @@ var ZFTPD = ZFTPD || {};
     return '/api/game/icon?path=' + Z.E(path);
   };
 
+  /* ── Games management ── */
+  api.gamesInstalled = function () {
+    return get('/api/admin/games/installed');
+  };
+
+  api.gameInstalledIconUrl = function (id, path) {
+    var u = '/api/admin/games/icon?id=' + Z.E(id || '');
+    if (path) u += '&path=' + Z.E(path);
+    return u;
+  };
+
+  api.gamesRepairVisibility = function (id) {
+    var u = '/api/admin/games/repair_visibility';
+    if (id) u += '?id=' + Z.E(id);
+    return post(u);
+  };
+
+  api.gameLaunch = function (id, path) {
+    if (id) {
+      return get('/api/admin/launch?id=' + Z.E(id));
+    }
+    return get('/api/admin/launch?path=' + Z.E(path || ''));
+  };
+
+  api.gameUninstall = function (id) {
+    return post('/api/admin/games/uninstall?id=' + Z.E(id || ''));
+  };
+
+  api.gameInstall = function (path) {
+    return post('/api/admin/games/install?path=' + Z.E(path || ''));
+  };
+
+  api.gameReinstall = function (path) {
+    return post('/api/admin/games/reinstall?path=' + Z.E(path || ''));
+  };
+
+  api.gameInstallStatus = function () {
+    return get('/api/admin/games/install_status');
+  };
+
   /* ── File copy cancel (Phase 5 — stub) ── */
   api.copyCancel = function () {
     return post('/api/copy_cancel');

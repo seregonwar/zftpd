@@ -228,11 +228,15 @@ var ZFTPD = ZFTPD || {};
           '<div class="dash-loc-box-sub">Choose an action for this game</div>' +
           '<div class="dash-loc-list" style="display:flex;flex-direction:column;gap:10px;padding:10px;">';
 
-    if (titleId) {
-      var launchJs = "fetch('/api/admin/launch?id=" + encodeURIComponent(titleId) + "').then(function(r){return r.json();}).then(function(j){ Z.toast(j.message || 'Launch signal sent', j.status==='ok'?'success':'error'); var m=document.getElementById('dash-action-modal'); if(m)m.parentNode.removeChild(m); }).catch(function(){Z.toast('Launch failed','error');})";
+    var launchPath = (ug.locations && ug.locations[0] && ug.locations[0].path) ? ug.locations[0].path : null;
+    if (titleId || launchPath) {
+      var launchUrl = titleId
+        ? ("/api/admin/launch?id=" + encodeURIComponent(titleId))
+        : ("/api/admin/launch?path=" + encodeURIComponent(launchPath));
+      var launchJs = "fetch('" + launchUrl + "').then(function(r){return r.json();}).then(function(j){ ZFTPD.toast((j&&j.message) || 'Launch signal sent', (j&&j.status)==='ok'?'success':'error'); var m=document.getElementById('dash-action-modal'); if(m)m.parentNode.removeChild(m); }).catch(function(){ZFTPD.toast('Launch failed','error');})";
       html += 
         '<button class="btn" style="background:var(--ac);color:#fff;border:none;padding:12px;border-radius:8px;cursor:pointer;font-weight:bold;display:flex;align-items:center;justify-content:center;gap:8px;" onclick="' + launchJs + '">' +
-          ICO.gamepad + ' Launch Game (' + titleId + ')' +
+          ICO.gamepad + ' Launch Game' + (titleId ? (' (' + titleId + ')') : '') +
         '</button>';
     }
 

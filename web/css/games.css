@@ -1,0 +1,140 @@
+/* ══ GAMES VIEW — PS4 XMB STYLE ═════════════════════════════════════════ */
+
+.games-xmb { display:flex; flex-direction:column; gap:14px; }
+
+.games-xmb-header {
+  display:flex; align-items:flex-end; justify-content:space-between;
+  padding:4px 2px;
+}
+.games-xmb-title { font-size:28px; font-weight:700; color:var(--tx); letter-spacing:.01em; }
+.games-xmb-sub { margin-top:3px; font-size:12px; color:var(--tx3); }
+.games-xmb-tools { display:flex; gap:8px; }
+
+.games-actions {
+  border:1px solid var(--bd);
+  border-radius:14px;
+  background:linear-gradient(180deg, rgba(255,255,255,.02), rgba(255,255,255,0));
+  padding:12px;
+}
+
+.games-actions-row {
+  display:grid;
+  grid-template-columns:1fr auto auto auto;
+  gap:8px;
+}
+
+.games-input {
+  width:100%;
+  border:1px solid var(--bd2);
+  background:var(--sf2);
+  color:var(--tx);
+  border-radius:10px;
+  padding:9px 11px;
+  font-size:12px;
+}
+
+.games-install-status {
+  margin-top:10px;
+  border:1px solid var(--bd2);
+  border-radius:10px;
+  background:var(--sf2);
+  color:var(--tx2);
+  font-size:11px;
+  padding:8px 10px;
+}
+.games-install-status.ok { border-color: rgba(40, 200, 120, .45); color:#8df3b7; }
+.games-install-status.er { border-color: rgba(255, 90, 90, .5); color:#ff8a8a; }
+
+.games-shelf {
+  border:1px solid var(--bd);
+  border-radius:14px;
+  background:var(--sf);
+  padding:10px;
+}
+.games-shelf-title {
+  color:var(--tx2);
+  font-size:12px;
+  font-weight:700;
+  letter-spacing:.04em;
+  text-transform:uppercase;
+  margin:2px 2px 8px;
+}
+
+.games-xmb-row {
+  display:flex;
+  gap:12px;
+  overflow-x:auto;
+  overflow-y:hidden;
+  padding:2px;
+  min-height:255px;
+}
+
+.games-card {
+  position:relative;
+  width:190px;
+  flex:0 0 190px;
+  border-radius:14px;
+  border:1px solid var(--bd);
+  background:var(--sf2);
+  overflow:hidden;
+  transition:transform .14s ease, border-color .14s ease, box-shadow .14s ease;
+}
+.games-card:hover {
+  transform:translateY(-2px) scale(1.01);
+  border-color:var(--ac);
+  box-shadow:0 12px 28px rgba(0,0,0,.45);
+}
+
+.games-card-cover {
+  width:100%;
+  height:190px;
+  object-fit:cover;
+  display:block;
+  background:linear-gradient(135deg, #1f2f4e, #152033);
+}
+
+.games-card-body { padding:10px; }
+.games-card-title {
+  color:var(--tx);
+  font-size:12px;
+  font-weight:700;
+  line-height:1.25;
+  min-height:30px;
+  display:-webkit-box;
+  line-clamp:2;
+  -webkit-line-clamp:2;
+  -webkit-box-orient:vertical;
+  overflow:hidden;
+}
+.games-card-meta {
+  margin-top:5px;
+  color:var(--tx3);
+  font-size:10px;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+
+.games-card-actions {
+  display:flex;
+  gap:6px;
+  margin-top:8px;
+}
+.games-card-actions .btn {
+  flex:1;
+  padding:6px 8px;
+  font-size:10px;
+  line-height:1;
+}
+
+.games-empty {
+  color:var(--tx3);
+  font-size:12px;
+  text-align:center;
+  width:100%;
+  padding:40px 10px;
+}
+
+@media (max-width: 1100px) {
+  .games-actions-row { grid-template-columns:1fr 1fr; }
+}

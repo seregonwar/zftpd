@@ -36,7 +36,7 @@ var ZFTPD = ZFTPD || {};
 
   /* ── View switching ── */
   Z.switchView = function (viewId) {
-    var valid = { dashboard: 1, explorer: 1, filemanager: 1, downloads: 1, settings: 1 };
+    var valid = { dashboard: 1, explorer: 1, filemanager: 1, downloads: 1, games: 1, settings: 1 };
     if (!valid[viewId]) return;
 
     Z.state.view = viewId;
@@ -76,6 +76,9 @@ var ZFTPD = ZFTPD || {};
     }
     if (viewId === 'downloads' && Z.downloadMgr && Z.downloadMgr.refresh) {
       Z.downloadMgr.refresh();
+    }
+    if (viewId === 'games' && Z.gamesView && Z.gamesView.refresh) {
+      Z.gamesView.refresh();
     }
     if (viewId === 'settings' && Z.settingsView && Z.settingsView.refresh) {
       Z.settingsView.refresh();
