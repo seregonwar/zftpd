@@ -232,7 +232,6 @@ int main(void) {
   (void)pal_notification_init();
 
   (void)syscall(SYS_thr_set_name, -1, "zftpd.elf");
-  signal(SIGPIPE, SIG_IGN);
 
   const char *bind_ip = "0.0.0.0";
   char display_ip[INET_ADDRSTRLEN];

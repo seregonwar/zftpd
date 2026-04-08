@@ -313,7 +313,7 @@ typedef struct {
  *            Incorrect values will cause a kernel panic.
  *
  * Sources:
- *   - https://github.com/ps5-payload-dev/ps5-kstuff  (kstuff offset tables)
+ *   - https://github.com/EchoStretch/kstuff  (kstuff offset tables)
  *   - https://github.com/john-tornblom/ps5-payload-sdk (known offsets)
  *   - PS5 kernel research by Specter, ChendoChap, and the fail0verflow team
  */
@@ -338,17 +338,31 @@ static const ps5_fw_entry_t g_fw_table[] = {
      *   4. Find struct thread layout via known curthread pattern from pcpu.
      *   5. Update this table.
      */
-    {403, 0x01534190ULL, 0x008ULL, 0x060ULL},  /* FW 4.03 */
-    {700, 0x01560A00ULL, 0x008ULL, 0x060ULL},  /* FW 7.00 */
-    {761, 0x01563400ULL, 0x008ULL, 0x060ULL},  /* FW 7.61 */
-    {820, 0x01571000ULL, 0x008ULL, 0x060ULL},  /* FW 8.20 */
-    {860, 0x01575800ULL, 0x008ULL, 0x060ULL},  /* FW 8.60 */
-    {900, 0x01580200ULL, 0x008ULL, 0x060ULL},  /* FW 9.00 */
-    {940, 0x01583100ULL, 0x008ULL, 0x060ULL},  /* FW 9.40 */
-    {960, 0x01586000ULL, 0x008ULL, 0x060ULL},  /* FW 9.60 */
-    {1000, 0x015A0000ULL, 0x008ULL, 0x060ULL}, /* FW 10.00 */
-    {1001, 0x015A0200ULL, 0x008ULL, 0x060ULL}, /* FW 10.01 */
-    {1050, 0x015A4000ULL, 0x008ULL, 0x060ULL}, /* FW 10.50 */
+    {403, 0x001709C0ULL, 0x008ULL, 0x060ULL},  /* FW 4.03 - verified kstuff */
+    {700, 0x001B7030ULL, 0x008ULL, 0x060ULL},  /* FW 7.00 - verified kstuff */
+    {761, 0x001B7260ULL, 0x008ULL, 0x060ULL},  /* FW 7.61 - verified kstuff */
+    {820, 0x001A7DB0ULL, 0x008ULL, 0x060ULL},  /* FW 8.20 - verified kstuff */
+    {860, 0x001A7DB0ULL, 0x008ULL, 0x060ULL},  /* FW 8.60 - verified kstuff */
+    {900, 0x001AAC10ULL, 0x008ULL, 0x060ULL},  /* FW 9.00 - verified kstuff */
+    {905, 0x001AAC10ULL, 0x008ULL, 0x060ULL},  /* FW 9.05 - verified kstuff */
+    {920, 0x001AAC60ULL, 0x008ULL, 0x060ULL},  /* FW 9.20 - verified kstuff */
+    {940, 0x001AAC60ULL, 0x008ULL, 0x060ULL},  /* FW 9.40 - verified kstuff */
+    {960, 0x001AAC60ULL, 0x008ULL, 0x060ULL},  /* FW 9.60 - verified kstuff */
+    {1000, 0x001AD100ULL, 0x008ULL, 0x060ULL}, /* FW 10.00 - verified kstuff */
+    {1001, 0x001AD100ULL, 0x008ULL, 0x060ULL}, /* FW 10.01 - verified kstuff */
+    {1020, 0x001AD120ULL, 0x008ULL, 0x060ULL}, /* FW 10.20 - verified kstuff */
+    {1040, 0x001AD120ULL, 0x008ULL, 0x060ULL}, /* FW 10.40 - verified kstuff */
+    {1060, 0x001AD120ULL, 0x008ULL, 0x060ULL}, /* FW 10.60 - verified kstuff */
+    {1100, 0x001B0B70ULL, 0x008ULL, 0x060ULL}, /* FW 11.00 - verified kstuff */
+    {1120, 0x001B0B70ULL, 0x008ULL, 0x060ULL}, /* FW 11.20 - verified kstuff */
+    {1140, 0x001B0B20ULL, 0x008ULL, 0x060ULL}, /* FW 11.40 - verified kstuff */
+    {1160, 0x001B08E0ULL, 0x008ULL, 0x060ULL}, /* FW 11.60 - verified kstuff */
+    {1200, 0x001AF4D0ULL, 0x008ULL, 0x060ULL}, /* FW 12.00 - verified kstuff */
+    {1202, 0x001AF4D0ULL, 0x008ULL, 0x060ULL}, /* FW 12.02 - same as 12.00 */
+    {1220, 0x001AF4D0ULL, 0x008ULL, 0x060ULL}, /* FW 12.20 - same as 12.00 */
+    {1240, 0x001AF4D0ULL, 0x008ULL, 0x060ULL}, /* FW 12.40 - same as 12.00 */
+    {1260, 0x001AF4D0ULL, 0x008ULL, 0x060ULL}, /* FW 12.60 - same as 12.00 */
+    {1270, 0x001AF4D0ULL, 0x008ULL, 0x060ULL}, /* FW 12.70 - same as 12.00 */
 };
 
 #define FW_TABLE_COUNT (sizeof(g_fw_table) / sizeof(g_fw_table[0]))
