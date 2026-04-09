@@ -1,5 +1,5 @@
 /*
- * GNU GPLv3 License — Copyright (c) 2026 SeregonWar
+ * MIT License — Copyright (c) 2026 SeregonWar
  * See LICENSE for full text.
  */
 
@@ -154,6 +154,7 @@ typedef enum {
     PS5_NET_FILTER_ERR_KWRITE_FAILED   = -6, /**< kernel_copyin() failed */
     PS5_NET_FILTER_ERR_FW_DETECT       = -7, /**< Could not read firmware version */
     PS5_NET_FILTER_ERR_SYSENT_INVALID  = -8, /**< Sysent sanity check failed */
+    PS5_NET_FILTER_ERR_EXTERNAL_HOOK   = -9, /**< Another payload already hooked sysent */
 } ps5_net_filter_err_t;
 
 /*===========================================================================*

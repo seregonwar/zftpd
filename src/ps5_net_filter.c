@@ -949,6 +949,71 @@ static int alloc_kernel_exec_page(uintptr_t *kaddr) {
 }
 
 /*===========================================================================*
+ * EXTERNAL HOOK DETECTION
+ *===========================================================================*/
+
+/**
+ * @brief Check if another payload has already patched sysent.
+ *
+ * Reads the current sysent[SYS_CONNECT].sy_call and checks if it points
+ * to the kernel text (original) or to a DMAP page (external hook).
+ *
+ * @param fw_entry  Firmware entry with sysent offset info.
+ *
+ * @return 1 if external hook detected (another payload installed),
+ *         0 if sysent is clean (points to kernel text or is invalid).
+ */
+static int is_external_hook_installed(const ps5_fw_entry_t *fw_entry) {
+  if (fw_entry == NULL || fw_entry->sysent_connect_off == 0) {
+    return 0;  /* Cannot determine, assume clean */
+  }
+
+  /* Calculate sysent[SYS_CONNECT].sy_call kernel address */
+  uintptr_t sysent_kaddr = fw_entry->sysent_base + fw_entry->sysent_connect_off +
+                           SYSENT_SY_CALL_OFFSET;
+
+  /* Read current handler address via kernel_copyout */
+  uintptr_t current_handler = 0U;
+  if (kernel_copyout((intptr_t)sysent_kaddr, &current_handler,
+                     sizeof(current_handler)) != 0) {
+    return 0;  /* Cannot read, assume clean to allow our install attempt */
+  }
+
+  if (current_handler == 0U) {
+    return 0;  /* No handler installed, definitely clean */
+  }
+
+  /*
+   * Check if the handler is in kernel text or DMAP (hook page).
+   * On PS5 FreeBSD:
+   *   - Kernel text is typically at 0xFFFFFFFF80000000+
+   *   - DMAP starts at 0xFFFF800000000000 (DMAP_BASE_ADDR)
+   *
+   * If the handler is in DMAP range, it's a hook page from another payload.
+   */
+  const uintptr_t KERNEL_TEXT_START = 0xFFFFFFFF80000000ULL;
+  const uintptr_t KERNEL_TEXT_END   = 0xFFFFFFFFFFE00000ULL;
+
+  if (current_handler >= KERNEL_TEXT_START && current_handler < KERNEL_TEXT_END) {
+    /* Points to kernel text - clean, original handler */
+    return 0;
+  }
+
+  /*
+   * If not in kernel text and looks like a valid kernel VA,
+   * it's likely an external hook.
+   */
+  if (current_handler >= DMAP_BASE_ADDR) {
+    ftp_log_line(FTP_LOG_WARN,
+                 "[net_filter] External hook detected at 0x%llx (another payload active)",
+                 (unsigned long long)current_handler);
+    return 1;
+  }
+
+  return 0;  /* Unknown address, assume clean to allow install attempt */
+}
+
+/*===========================================================================*
  * PUBLIC API IMPLEMENTATION
  *===========================================================================*/
 
@@ -1023,6 +1088,15 @@ int ps5_net_filter_install(const ps5_net_filter_config_t *cfg) {
                    fw_version / 100U, fw_version % 100U);
     ftp_log_line(FTP_LOG_WARN, msg);
     rc = PS5_NET_FILTER_ERR_FW_UNSUPPORTED;
+    goto fail;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Step 2b: Check for external hooks from other payloads             */
+  /* ------------------------------------------------------------------ */
+
+  if (is_external_hook_installed(fw_entry)) {
+    rc = PS5_NET_FILTER_ERR_EXTERNAL_HOOK;
     goto fail;
   }
 
@@ -1367,6 +1441,8 @@ const char *ps5_net_filter_strerror(int err) {
     return "Firmware detection failed";
   case PS5_NET_FILTER_ERR_SYSENT_INVALID:
     return "Sysent validation failed";
+  case PS5_NET_FILTER_ERR_EXTERNAL_HOOK:
+    return "Another payload already hooked sysent";
   default:
     return "Unknown error";
   }
