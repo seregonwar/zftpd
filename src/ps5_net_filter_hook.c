@@ -439,6 +439,37 @@ int hook_sys_connect(void *td, void *uap)
     }
 
     /*
+     * copyin() can sleep while resolving a page fault.  FreeBSD forbids
+     * sleeping while a non-sleepable lock is held (INVARIANTS will panic).
+     *
+     * Some system threads (e.g. SceSpZeroConfMain) call connect() while
+     * holding a non-sleepable lock.  Detect this by checking the thread's
+     * critical-section nesting counter and lock count:
+     *
+     *   struct thread:
+     *     td_critnest  — incremented by critical_enter(), must be 0 to sleep
+     *     td_locks     — number of non-sleepable locks held, must be 0
+     *
+     * Offsets on FreeBSD 11 amd64 (PS5): td_critnest=0x1CC, td_locks=0x1D0.
+     * These are stable across all PS5 firmware versions that match our table.
+     * If we cannot confirm both are zero, fall through to the original handler
+     * (safe: we skip filtering for that call rather than panic the kernel).
+     *
+     * NOTE: FreeBSD td_critnest is u_int (4 bytes); td_locks is int (4 bytes).
+     */
+    {
+        const u8 *td_bytes = (const u8 *)td;
+        u32 critnest = 0U;
+        s32 locks    = 0;
+        __builtin_memcpy(&critnest, td_bytes + 0x1CCU, sizeof(u32));
+        __builtin_memcpy(&locks,    td_bytes + 0x1D0U, sizeof(s32));
+        if ((critnest != 0U) || (locks != 0)) {
+            /* Cannot sleep — skip copyin, allow the connection */
+            goto allow_other;
+        }
+    }
+
+    /*
      * copyin() the first 8 bytes of the sockaddr from userland.
      * We only need sa_family (2 bytes) and sin_addr (4 bytes at offset 4).
      * Reading 8 bytes covers both safely.
@@ -582,6 +613,18 @@ int hook_sys_sendto(void *td, void *uap)
 
     if (sockaddr_uptr == NULL) {
         goto sendto_call_original;
+    }
+
+    /* Same sleep-safety check as in hook_sys_connect — see comment there. */
+    {
+        const u8 *td_bytes = (const u8 *)td;
+        u32 critnest = 0U;
+        s32 locks    = 0;
+        __builtin_memcpy(&critnest, td_bytes + 0x1CCU, sizeof(u32));
+        __builtin_memcpy(&locks,    td_bytes + 0x1D0U, sizeof(s32));
+        if ((critnest != 0U) || (locks != 0)) {
+            goto sendto_call_original;
+        }
     }
 
     u8 sa_buf[8] = {0};

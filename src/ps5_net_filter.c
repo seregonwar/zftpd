@@ -599,20 +599,41 @@ static const uint8_t g_hook_connect_code[] = {
      * the kernel page, which starts at g_hook_page_kaddr.
      *
      * The actual original_connect pointer at shared+0x00 is jumped to
-     * via: JMP QWORD PTR [RIP + offset_to_shared]
+     * via: JMP QWORD PTR [RIP + 0]
      *
-     * Encoded as: FF 25 <rel32>
-     * Offset is filled in by ps5_net_filter_install() (see PATCH_OFFSET).
+     * Encoded as: FF 25 00 00 00 00 <8-byte address>
+     *
+     *   Offset  Bytes     Meaning
+     *   0..15   90 × 16   NOP sled
+     *   16..21  FF 25 00 00 00 00   JMP QWORD PTR [RIP+0]
+     *   22..29  00 × 8    64-bit absolute address (patched at install)
+     *              ^--- HOOK_CONNECT_JMP_PATCH_OFFSET = 22
+     *
+     * After the JMP executes, RIP = 22. [RIP+0] reads bytes 22–29.
+     * The 8-byte slot MUST be fully initialised (8 bytes, not 6).
      */
-    0xFF, 0x25, 0x00, 0x00, 0x00, 0x00, /* JMP [RIP+0] — patched at install */
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, /* absolute 64-bit address           */
+    0xFF, 0x25, 0x00, 0x00, 0x00, 0x00, /* JMP QWORD PTR [RIP+0]        */
+    0x00, 0x00, 0x00, 0x00,             /* absolute 64-bit addr: lo32   */
+    0x00, 0x00, 0x00, 0x00,             /* absolute 64-bit addr: hi32   */
 };
 
 /**
  * Offset within g_hook_connect_code[] where the absolute target address
  * must be written at install time.
+ *
+ * Layout: [16 NOP bytes][6 bytes: FF 25 00 00 00 00][8 bytes: addr slot]
+ *         ^0            ^16                          ^22
+ *
+ * The JMP instruction is 6 bytes (FF 25 + rel32). After it executes,
+ * RIP points to byte 22 (the next instruction). With rel32=0, the CPU
+ * reads QWORD PTR [RIP+0] = the 8 bytes starting at offset 22.
+ * Therefore the address must be patched at offset 22, NOT 18.
+ *
+ * BUG HISTORY: was 18 (inside the JMP instruction's rel32 field), which
+ * corrupted the instruction encoding and caused a wild jump from ring-0
+ * into user-space, producing SIGILL "privileged instruction fault".
  */
-#define HOOK_CONNECT_JMP_PATCH_OFFSET 18U
+#define HOOK_CONNECT_JMP_PATCH_OFFSET 22U
 
 /** Size of the connect hook code in bytes. */
 #define HOOK_CONNECT_CODE_SIZE sizeof(g_hook_connect_code)
@@ -625,14 +646,31 @@ _Static_assert(HOOK_CONNECT_CODE_SIZE <= HOOK_SENDTO_CODE_OFFSET,
  *
  * Same logic as hook_sys_connect but for sendto(2) [SYS_SENDTO = 133].
  * Extracts the destination address from uap->to (arg 5, in rsp+N on stack).
+ *
+ * Layout:
+ *   Offset   Bytes          Meaning
+ *   0..7     90 × 8         NOP sled
+ *   8..13    FF 25 00 00 00 00   JMP QWORD PTR [RIP+0]
+ *   14..21   00 × 8         64-bit absolute address (patched at install)
+ *               ^--- HOOK_SENDTO_JMP_PATCH_OFFSET = 14
  */
 static const uint8_t g_hook_sendto_code[] = {
     /* Placeholder: passthrough JMP */
-    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0xFF, 0x25,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, /* 8x NOP              */
+    0xFF, 0x25, 0x00, 0x00, 0x00, 0x00,              /* JMP QWORD PTR [RIP+0] */
+    0x00, 0x00, 0x00, 0x00,                          /* absolute addr: lo32  */
+    0x00, 0x00, 0x00, 0x00,                          /* absolute addr: hi32  */
 };
 
-#define HOOK_SENDTO_JMP_PATCH_OFFSET 10U
+/**
+ * Offset within g_hook_sendto_code[] where the 8-byte absolute address
+ * must be written at install time.
+ *
+ * 8 NOP bytes + 6-byte JMP instruction = patch starts at byte 14.
+ * BUG HISTORY: was 10 (inside the rel32 field), causing the same
+ * wild-JMP crash as the connect hook.
+ */
+#define HOOK_SENDTO_JMP_PATCH_OFFSET 14U
 #define HOOK_SENDTO_CODE_SIZE sizeof(g_hook_sendto_code)
 
 /*===========================================================================*
