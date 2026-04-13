@@ -126,6 +126,128 @@ static ftp_error_t start_async_copy(ftp_session_t *session,
                                     const char *src_ftp_path,
                                     const char *dst_ftp_path, int is_move);
 
+static ftp_error_t send_control_raw(ftp_session_t *session,
+                                    const char *payload) {
+  if ((session == NULL) || (payload == NULL)) {
+    return FTP_ERR_INVALID_PARAM;
+  }
+
+  if (session->ctrl_fd < 0) {
+    return FTP_ERR_SOCKET_SEND;
+  }
+
+  size_t len = strlen(payload);
+  if (len == 0U) {
+    return FTP_OK;
+  }
+
+  ssize_t sent = pal_send_all(session->ctrl_fd, payload, len, 0);
+  if (sent != (ssize_t)len) {
+    return FTP_ERR_SOCKET_SEND;
+  }
+
+  session->last_activity = time(NULL);
+  return FTP_OK;
+}
+
+static const char *mlsx_type_from_mode(uint32_t mode) {
+  return (((mode & (uint32_t)S_IFMT) == (uint32_t)S_IFDIR)) ? "dir" : "file";
+}
+
+static void mlsx_format_modify_time(int64_t mtime, char *buffer,
+                                    size_t size) {
+  if ((buffer == NULL) || (size == 0U)) {
+    return;
+  }
+
+  time_t unix_time = (time_t)mtime;
+  struct tm tm_time;
+  memset(&tm_time, 0, sizeof(tm_time));
+  gmtime_r(&unix_time, &tm_time);
+  (void)strftime(buffer, size, "%Y%m%d%H%M%S", &tm_time);
+}
+
+static ftp_error_t ftp_path_to_client_path(const ftp_session_t *session,
+                                           const char *resolved,
+                                           char *output, size_t size) {
+  if ((session == NULL) || (resolved == NULL) || (output == NULL)) {
+    return FTP_ERR_INVALID_PARAM;
+  }
+
+  if (size < 2U) {
+    return FTP_ERR_PATH_TOO_LONG;
+  }
+
+  if (strcmp(session->root_path, "/") == 0) {
+    size_t len = strlen(resolved);
+    if ((len + 1U) > size) {
+      return FTP_ERR_PATH_TOO_LONG;
+    }
+    memcpy(output, resolved, len + 1U);
+    return FTP_OK;
+  }
+
+  size_t root_len = strlen(session->root_path);
+  if (strncmp(resolved, session->root_path, root_len) != 0) {
+    return FTP_ERR_PATH_INVALID;
+  }
+
+  const char *suffix = resolved + root_len;
+  if (*suffix == '\0') {
+    output[0] = '/';
+    output[1] = '\0';
+    return FTP_OK;
+  }
+
+  if (*suffix == '/') {
+    size_t len = strlen(suffix);
+    if ((len + 1U) > size) {
+      return FTP_ERR_PATH_TOO_LONG;
+    }
+    memcpy(output, suffix, len + 1U);
+    return FTP_OK;
+  }
+
+  int n = snprintf(output, size, "/%s", suffix);
+  if ((n < 0) || ((size_t)n >= size)) {
+    return FTP_ERR_PATH_TOO_LONG;
+  }
+
+  return FTP_OK;
+}
+
+static ftp_error_t mlsx_format_line(const vfs_stat_t *st,
+                                    const char *display_name,
+                                    int leading_space, char *buffer,
+                                    size_t size) {
+  if ((st == NULL) || (display_name == NULL) || (buffer == NULL) ||
+      (size == 0U)) {
+    return FTP_ERR_INVALID_PARAM;
+  }
+
+  char timebuf[20];
+  memset(timebuf, 0, sizeof(timebuf));
+  mlsx_format_modify_time(st->mtime, timebuf, sizeof(timebuf));
+
+  const char *type_str = mlsx_type_from_mode(st->mode);
+  unsigned long long size_value =
+      (((st->mode & (uint32_t)S_IFMT) == (uint32_t)S_IFDIR))
+          ? 0ULL
+          : (unsigned long long)st->size;
+  unsigned mode_value = (unsigned)(st->mode & 07777U);
+  const char *prefix = (leading_space != 0) ? " " : "";
+
+  int n = snprintf(buffer, size,
+                   "%stype=%s;size=%llu;modify=%s;unix.mode=%04o; %s\r\n",
+                   prefix, type_str, size_value, timebuf, mode_value,
+                   display_name);
+  if ((n < 0) || ((size_t)n >= size)) {
+    return FTP_ERR_PATH_TOO_LONG;
+  }
+
+  return FTP_OK;
+}
+
 /*===========================================================================*
  * AUTHENTICATION AND CONTROL
  *===========================================================================*/
@@ -152,6 +274,7 @@ ftp_error_t cmd_USER(ftp_session_t *session, const char *args) {
   session->user_ok = 1U;
   session->authenticated = 1U;
   session->auth_attempts = 0U;
+  atomic_store(&session->state, FTP_STATE_AUTHENTICATED);
   return ftp_session_send_reply(session, FTP_REPLY_230_LOGGED_IN, NULL);
 }
 
@@ -168,6 +291,7 @@ ftp_error_t cmd_PASS(ftp_session_t *session, const char *args) {
   /* Already logged in from USER — accept PASS as harmless no-op */
   session->authenticated = 1U;
   session->auth_attempts = 0U;
+  atomic_store(&session->state, FTP_STATE_AUTHENTICATED);
   return ftp_session_send_reply(session, FTP_REPLY_230_LOGGED_IN, NULL);
 }
 
@@ -572,29 +696,10 @@ ftp_error_t cmd_MLSD(ftp_session_t *session, const char *args) {
         }
       }
 
-      /* Format modify time: YYYYMMDDHHMMSS */
-      struct tm tm_time;
-      time_t mtime = (time_t)st.mtime;
-      gmtime_r(&mtime, &tm_time);
-      char timebuf[20];
-      strftime(timebuf, sizeof(timebuf), "%Y%m%d%H%M%S", &tm_time);
-
-      /*
-       * RFC 3659 fact line format:
-       *
-       *   type=dir;size=0;modify=20250222120000; dirname\r\n
-       *   type=file;size=1234;modify=20250222120000; filename\r\n
-       *                                            ^
-       *                                   space before name is required
-       */
-      const char *type_str = (((st.mode & S_IFMT) == S_IFDIR)) ? "dir" : "file";
-
-      n = snprintf(line_buffer, sizeof(line_buffer),
-                   "type=%s;size=%lld;modify=%s; %s\r\n", type_str,
-                   (long long)st.size, timebuf, entry->d_name);
-
-      if ((n > 0) && ((size_t)n < sizeof(line_buffer))) {
-        (void)ftp_session_send_data(session, line_buffer, (size_t)n);
+      if (mlsx_format_line(&st, entry->d_name, 0, line_buffer,
+                           sizeof(line_buffer)) == FTP_OK) {
+        size_t line_len = strlen(line_buffer);
+        (void)ftp_session_send_data(session, line_buffer, line_len);
       }
     }
 
@@ -611,8 +716,62 @@ ftp_error_t cmd_MLSD(ftp_session_t *session, const char *args) {
  * @brief MLST command - Machine list single file (RFC 3659)
  */
 ftp_error_t cmd_MLST(ftp_session_t *session, const char *args) {
-  /* Redirect to STAT which provides per-file info on the control channel */
-  return cmd_STAT(session, args);
+  if (session == NULL) {
+    return FTP_ERR_INVALID_PARAM;
+  }
+
+  const char *path_arg = ((args != NULL) && (args[0] != '\0')) ? args
+                                                                : session->cwd;
+
+  char resolved[FTP_PATH_MAX];
+  ftp_error_t err =
+      ftp_path_resolve(session, path_arg, resolved, sizeof(resolved));
+  if (err != FTP_OK) {
+    return ftp_session_send_reply(session, FTP_REPLY_550_FILE_ERROR,
+                                  "Invalid path.");
+  }
+
+  vfs_stat_t st;
+  err = vfs_stat(resolved, &st);
+  if (err != FTP_OK) {
+    return ftp_session_send_reply(session, FTP_REPLY_550_FILE_ERROR,
+                                  "File not found.");
+  }
+
+  char client_path[FTP_PATH_MAX];
+  err = ftp_path_to_client_path(session, resolved, client_path,
+                                sizeof(client_path));
+  if (err != FTP_OK) {
+    return ftp_session_send_reply(session, FTP_REPLY_550_FILE_ERROR,
+                                  "Invalid path.");
+  }
+
+  char listing_line[FTP_LIST_LINE_SIZE];
+  err = mlsx_format_line(&st, client_path, 1, listing_line,
+                         sizeof(listing_line));
+  if (err != FTP_OK) {
+    return ftp_session_send_reply(session, FTP_REPLY_451_LOCAL_ERROR,
+                                  "MLST formatting failed.");
+  }
+
+  char reply[FTP_REPLY_BUFFER_SIZE];
+  int n = snprintf(reply, sizeof(reply), "250-Listing %s\r\n", client_path);
+  if ((n < 0) || ((size_t)n >= sizeof(reply))) {
+    return ftp_session_send_reply(session, FTP_REPLY_451_LOCAL_ERROR,
+                                  "MLST formatting failed.");
+  }
+
+  err = send_control_raw(session, reply);
+  if (err != FTP_OK) {
+    return err;
+  }
+
+  err = send_control_raw(session, listing_line);
+  if (err != FTP_OK) {
+    return err;
+  }
+
+  return send_control_raw(session, "250 End\r\n");
 }
 
 /*===========================================================================*
@@ -2540,7 +2699,7 @@ ftp_error_t cmd_FEAT(ftp_session_t *session, const char *args) {
 #endif
 #if FTP_ENABLE_MLST
                             " MLSD",
-                            " MLST",
+                            " MLST type*;size*;modify*;unix.mode*;",
 #endif
 #if FTP_ENABLE_CRYPTO
                             " XCRYPT",

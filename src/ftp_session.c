@@ -671,6 +671,10 @@ ftp_error_t ftp_session_open_data_connection(ftp_session_t *session) {
    */
   (void)pal_socket_configure_data(session->data_fd);
 
+  if (atomic_load(&session->state) != FTP_STATE_TERMINATING) {
+    atomic_store(&session->state, FTP_STATE_TRANSFERRING);
+  }
+
   return FTP_OK;
 }
 
@@ -702,6 +706,12 @@ void ftp_session_close_data_connection(ftp_session_t *session) {
 
   session->data_mode = FTP_DATA_MODE_NONE;
   session->restart_offset = 0;
+
+  if (atomic_load(&session->state) != FTP_STATE_TERMINATING) {
+    atomic_store(&session->state,
+                 (session->authenticated != 0U) ? FTP_STATE_AUTHENTICATED
+                                                : FTP_STATE_CONNECTED);
+  }
 }
 
 /**

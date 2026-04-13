@@ -262,6 +262,44 @@ ifeq ($(ENABLE_ZHTTPD),1)
 endif
 
 #============================================================================
+# Enable with ENABLE_MCP=1 
+#============================================================================
+
+ifeq ($(ENABLE_MCP),)
+    ifneq ($(filter $(TARGET),ps4 ps5),)
+        ENABLE_MCP ?= 1
+    else
+        ENABLE_MCP ?= 0
+    endif
+endif
+
+ifeq ($(ENABLE_MCP),1)
+    CFLAGS += -DENABLE_MCP=1
+    CFLAGS += -I./mcp/include
+    CFLAGS += -I./external/sJson-main/src
+    # JSON configuration for sJson
+    CFLAGS += -DJSON_MAX_DEPTH=32
+    CFLAGS += -DJSON_MAX_STRING_LEN=65536
+    CFLAGS += -DJSON_MAX_NODES=16384
+    SOURCES += mcp/src/mcp_protocol.c
+    SOURCES += mcp/src/mcp_server.c
+    SOURCES += mcp/src/mcp_handlers.c
+    SOURCES += external/sJson-main/src/sJson.c
+    SOURCES += src/event_loop_kqueue.c
+    # Execution modules
+    SOURCES += mcp/src/mcp_execution/payload.c
+    SOURCES += mcp/src/mcp_execution/syscall_race.c
+    # Hunter modules (Zero-Day detection)
+    SOURCES += mcp/src/mcp_hunter/process_monitor.c
+    SOURCES += mcp/src/mcp_hunter/vuln_fuzzer.c
+    SOURCES += mcp/src/mcp_hunter/exploit_chain.c
+    SOURCES += mcp/src/mcp_hunter/jit_compiler.c
+    # Additional include path for hunter headers
+    CFLAGS += -I./mcp/src/mcp_hunter
+    $(info [INFO] MCP kernel analysis module enabled (with Zero-Day Hunter))
+endif
+
+#============================================================================
 # OPTIONAL LIBRARIES — enable with ENABLE_LIBARCHIVE=1 / ENABLE_LIBCURL=1
 #
 # When enabled, the Makefile verifies that the required header is actually
@@ -336,8 +374,9 @@ ifeq ($(ENABLE_LIBCURL),1)
     endif
 endif
 
-# Object files
-OBJECTS := $(patsubst src/%.c,$(OBJ_DIR)/%.o,$(SOURCES))
+# Object files (handle both src/ and mcp/src/ paths)
+OBJECTS := $(patsubst src/%.c,$(OBJ_DIR)/%.o,$(filter src/%.c,$(SOURCES)))
+OBJECTS += $(patsubst mcp/src/%.c,$(OBJ_DIR)/mcp/%.o,$(filter mcp/src/%.c,$(SOURCES)))
 
 # FFI Object files
 FFI_SOURCES := ffi/c_core/pal_ffi.c
@@ -347,7 +386,8 @@ FFI_OBJECTS := $(patsubst ffi/%.c,$(OBJ_DIR)/ffi/%.o,$(FFI_SOURCES))
 LIB_OBJECTS := $(filter-out $(OBJ_DIR)/main.o,$(OBJECTS))
 
 # Dependency files
-DEPENDS := $(patsubst $(OBJ_DIR)/%.o,$(DEP_DIR)/%.d,$(OBJECTS))
+DEPENDS := $(patsubst $(OBJ_DIR)/%.o,$(DEP_DIR)/%.d,$(filter-out $(OBJ_DIR)/mcp/%.o,$(OBJECTS)))
+DEPENDS += $(patsubst $(OBJ_DIR)/mcp/%.o,$(DEP_DIR)/mcp/%.d,$(filter $(OBJ_DIR)/mcp/%.o,$(OBJECTS)))
 
 #============================================================================
 # BUILD TARGETS
@@ -433,7 +473,7 @@ FFI_OUTPUT := $(BIN_DIR)/libzftpd_ffi.so
 FFI_LDFLAGS := -shared
 endif
 
-$(BIN_DIR) $(OBJ_DIR) $(DEP_DIR) $(BUILD_DIR)/tests $(OBJ_DIR)/ffi/c_core:
+$(BIN_DIR) $(OBJ_DIR) $(DEP_DIR) $(BUILD_DIR)/tests $(OBJ_DIR)/ffi/c_core $(OBJ_DIR)/mcp:
 	@mkdir -p $@
 
 ifeq ($(filter $(TARGET),ps4 ps5),)
@@ -584,6 +624,12 @@ $(OBJ_DIR)/ffi/%.o: ffi/%.c | $(OBJ_DIR)/ffi/c_core
 	@mkdir -p $(dir $@) $(dir $(DEP_DIR)/ffi/$*.d)
 	@$(CC) $(CFLAGS) -fPIC -MMD -MP -MF $(DEP_DIR)/ffi/$*.d -MT $@ -c $< -o $@
 
+# Compile MCP C source files
+$(OBJ_DIR)/mcp/%.o: mcp/src/%.c | $(OBJ_DIR)/mcp
+	@echo "  [CC]  $< (MCP)"
+	@mkdir -p $(dir $@) $(dir $(DEP_DIR)/mcp/$*.d)
+	@$(CC) $(CFLAGS) -MMD -MP -MF $(DEP_DIR)/mcp/$*.d -MT $@ -c $< -o $@
+
 # Include dependency files
 -include $(DEPENDS)
 
@@ -627,6 +673,7 @@ TEST_BINS += $(BUILD_DIR)/tests/test_path_security
 TEST_BINS += $(BUILD_DIR)/tests/test_buffer_pool
 TEST_BINS += $(BUILD_DIR)/tests/test_scratch
 TEST_BINS += $(BUILD_DIR)/tests/test_alloc
+TEST_BINS += $(BUILD_DIR)/tests/test_mlst_ascii
 TEST_BINS += $(BUILD_DIR)/tests/test_http_query
 TEST_BINS += $(BUILD_DIR)/tests/test_http_confinement
 

@@ -100,6 +100,17 @@ static int start_http_thread(pthread_t *thread, event_loop_t *loop) {
 }
 #endif /* ENABLE_ZHTTPD */
 
+/*---------------------------------------------------------------------------*
+ * MCP (Model Context Protocol) — Native Kernel Analysis Module
+ *---------------------------------------------------------------------------*/
+#ifndef ENABLE_MCP
+#define ENABLE_MCP 0
+#endif
+
+#if ENABLE_MCP
+#include "mcp_server.h"
+#endif /* ENABLE_MCP */
+
 #if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
 #include "pal_scratch.h"
 #include <stdint.h>
@@ -315,6 +326,9 @@ int main(void) {
    * ZHTTPD — Start Web File Explorer
    *=========================================================================*/
 #if ENABLE_ZHTTPD
+#if ENABLE_MCP
+  static mcp_server_t *g_mcp_server = NULL;
+#endif
   if (http_csrf_init() != 0) {
     ftp_log_line(FTP_LOG_WARN, "CSRF init failed: web upload disabled");
   }
@@ -345,6 +359,36 @@ int main(void) {
         printf("[PS4 HTTP] Failed to start HTTP thread (rc=%d)\n", rc);
       }
     }
+
+    /*=========================================================================*
+     * MCP — Start Kernel Analysis Server
+     *=========================================================================*/
+#if ENABLE_MCP
+    printf("[PS4 MCP] Initializing MCP server...\n");
+    pal_notification_send("MCP: Initializing server...");
+    
+    if (g_event_loop == NULL) {
+      printf("[PS4 MCP] ERROR: Event loop not initialized!\n");
+      pal_notification_send("MCP ERROR: No event loop");
+    } else {
+      char mcp_bind[64];
+      (void)snprintf(mcp_bind, sizeof(mcp_bind), "0.0.0.0:%u", (unsigned)MCP_PORT);
+      printf("[PS4 MCP] Binding to %s\n", mcp_bind);
+      
+      g_mcp_server = mcp_server_create(g_event_loop, mcp_bind);
+      if (g_mcp_server != NULL) {
+        printf("[PS4 MCP] SUCCESS: Server listening on tcp://%s:%u\n", 
+               display_ip, (unsigned)MCP_PORT);
+        char msg[128];
+        (void)snprintf(msg, sizeof(msg), "MCP Ready: %s:%u", display_ip,
+                       (unsigned)MCP_PORT);
+        pal_notification_send(msg);
+      } else {
+        printf("[PS4 MCP] ERROR: Failed to create MCP server (check logs)\n");
+        pal_notification_send("MCP ERROR: Server failed");
+      }
+    }
+#endif /* ENABLE_MCP */
   }
 #endif
 
@@ -367,6 +411,13 @@ int main(void) {
     http_server_destroy(g_http_server);
     g_http_server = NULL;
   }
+#if ENABLE_MCP
+  if (g_mcp_server != NULL) {
+    mcp_server_destroy(g_mcp_server);
+    g_mcp_server = NULL;
+    printf("[PS4 MCP] Stopped\n");
+  }
+#endif
   if (g_event_loop != NULL) {
     event_loop_destroy(g_event_loop);
     g_event_loop = NULL;
@@ -562,6 +613,9 @@ int main(void) {
    * ZHTTPD — Start Web File Explorer
    *=========================================================================*/
 #if ENABLE_ZHTTPD
+#if ENABLE_MCP
+  static mcp_server_t *g_mcp_server = NULL;
+#endif
   if (http_csrf_init() != 0) {
     ftp_log_line(FTP_LOG_WARN, "CSRF init failed: web upload disabled");
   }
@@ -590,6 +644,27 @@ int main(void) {
         printf("[PS5 HTTP] Failed to start HTTP thread (rc=%d)\n", rc);
       }
     }
+
+    /*=========================================================================*
+     * MCP — Start Kernel Analysis Server
+     *=========================================================================*/
+#if ENABLE_MCP
+    char mcp_bind[64];
+    (void)snprintf(mcp_bind, sizeof(mcp_bind), "0.0.0.0:%u", (unsigned)MCP_PORT);
+    g_mcp_server = mcp_server_create(g_event_loop, mcp_bind);
+    if (g_mcp_server != NULL) {
+      printf("[PS5 MCP] Kernel analysis: tcp://%s:%u\n", ip_address,
+             (unsigned)MCP_PORT);
+      {
+        char msg[128];
+        (void)snprintf(msg, sizeof(msg), "MCP: %s:%u", ip_address,
+                       (unsigned)MCP_PORT);
+        pal_notification_send(msg);
+      }
+    } else {
+      printf("[PS5 MCP] Failed to create MCP server\n");
+    }
+#endif /* ENABLE_MCP */
   }
 #endif
 
@@ -648,6 +723,13 @@ int main(void) {
     http_server_destroy(g_http_server);
     g_http_server = NULL;
   }
+#if ENABLE_MCP
+  if (g_mcp_server != NULL) {
+    mcp_server_destroy(g_mcp_server);
+    g_mcp_server = NULL;
+    printf("[PS5 MCP] Stopped\n");
+  }
+#endif
   if (g_event_loop != NULL) {
     event_loop_destroy(g_event_loop);
     g_event_loop = NULL;
