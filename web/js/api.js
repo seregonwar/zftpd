@@ -28,8 +28,17 @@ var ZFTPD = ZFTPD || {};
       opts.body = JSON.stringify(body);
     }
     return fetch(url, opts).then(function (r) {
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      return r.json();
+      return r.json().then(function (j) {
+        if (!r.ok) {
+          throw new Error((j && j.message) ? j.message : ('HTTP ' + r.status));
+        }
+        return j;
+      }).catch(function (e) {
+        if (!r.ok && e && /^Unexpected/.test(String(e.message || ''))) {
+          throw new Error('HTTP ' + r.status);
+        }
+        throw e;
+      });
     });
   }
 
@@ -148,7 +157,7 @@ var ZFTPD = ZFTPD || {};
 
   /* ── Download URL ── */
   api.downloadUrl = function (path) {
-    return '/api/download?path=' + Z.E(path);
+    return '/api/file/get?path=' + Z.E(path);
   };
 
   /* ── Game metadata (Phase 4 — stub for now) ── */

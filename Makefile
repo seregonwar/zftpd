@@ -250,6 +250,7 @@ STRIP ?= strip
 ifeq ($(ENABLE_ZHTTPD),1)
     CFLAGS += -DENABLE_ZHTTPD=1
     CFLAGS += -DENABLE_WEB_UPLOAD=1
+    ENABLE_LIBCURL ?= 1
     SOURCES += src/event_loop_kqueue.c
     SOURCES += src/http_server.c
     SOURCES += src/http_parser.c

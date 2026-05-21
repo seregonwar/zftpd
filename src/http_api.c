@@ -54,6 +54,7 @@ SOFTWARE.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/time.h>
@@ -1390,6 +1391,14 @@ http_response_t *http_api_handle(const http_request_t *request) {
   }
   if (strncmp(request->uri, "/api/download/cancel", 20) == 0) {
     return api_dl_cancel(request);
+  }
+
+  /*
+   * Browser-safe alias for local file downloads. Some browsers/extensions
+   * block URLs named "/api/download" as suspicious/insecure downloads.
+   */
+  if (strncmp(request->uri, "/api/file/get", 13) == 0) {
+    return api_download(request);
   }
 
   /*  /api/download?path=...  (file download — generic, MUST come after /start etc) */
@@ -5250,6 +5259,68 @@ static dl_entry_t *dl_find_by_id(int id) {
   return NULL;
 }
 
+static int dl_has_scheme(const char *url, const char *scheme) {
+  size_t n = scheme ? strlen(scheme) : 0U;
+  return url != NULL && scheme != NULL && strncasecmp(url, scheme, n) == 0;
+}
+
+static int dl_url_is_supported(const char *url, char *reason,
+                               size_t reason_size) {
+  if (reason && reason_size > 0U) {
+    reason[0] = '\0';
+  }
+  if (url == NULL || url[0] == '\0') {
+    if (reason && reason_size > 0U) {
+      snprintf(reason, reason_size, "Missing url parameter");
+    }
+    return 0;
+  }
+  if (dl_has_scheme(url, "magnet:")) {
+    if (reason && reason_size > 0U) {
+      snprintf(reason, reason_size,
+               "Magnet links need a BitTorrent/DHT engine; this build supports direct HTTP URLs only");
+    }
+    return 0;
+  }
+  if (dl_has_scheme(url, "https://")) {
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+    if (reason && reason_size > 0U) {
+      snprintf(reason, reason_size,
+               "HTTPS URL downloads need TLS support; the PS4/PS5 downloader currently supports HTTP URLs only");
+    }
+    return 0;
+#else
+    return 1;
+#endif
+  }
+  if (dl_has_scheme(url, "http://")) {
+    return 1;
+  }
+  if (reason && reason_size > 0U) {
+    snprintf(reason, reason_size,
+             "Unsupported URL scheme; use a direct http:// URL");
+  }
+  return 0;
+}
+
+static void dl_sanitize_filename(char *name) {
+  if (name == NULL || name[0] == '\0') {
+    return;
+  }
+  for (size_t i = 0; name[i] != '\0'; i++) {
+    unsigned char c = (unsigned char)name[i];
+    if (c < 32U || name[i] == '/' || name[i] == '\\' || name[i] == ':' ||
+        name[i] == '*' || name[i] == '?' || name[i] == '"' ||
+        name[i] == '<' || name[i] == '>' || name[i] == '|') {
+      name[i] = '_';
+    }
+  }
+  if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+    name[0] = '_';
+    name[1] = '\0';
+  }
+}
+
 /* Extract filename from URL (last path component) */
 static void dl_extract_filename(const char *url, char *out, size_t out_size) {
   if (!url || !out || out_size == 0) return;
@@ -5264,6 +5335,7 @@ static void dl_extract_filename(const char *url, char *out, size_t out_size) {
   }
   memcpy(out, name, len);
   out[len] = '\0';
+  dl_sanitize_filename(out);
 }
 
 #if defined(ENABLE_LIBCURL) && ENABLE_LIBCURL
@@ -5391,6 +5463,11 @@ static http_response_t *api_dl_start(const http_request_t *request) {
     return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing url parameter");
   }
 
+  char unsupported_reason[256];
+  if (!dl_url_is_supported(url, unsupported_reason, sizeof(unsupported_reason))) {
+    return error_json(HTTP_STATUS_400_BAD_REQUEST, unsupported_reason);
+  }
+
   char safe_dst[FTP_PATH_MAX];
   if (!validate_path(dst, safe_dst, sizeof(safe_dst))) {
     return error_json(HTTP_STATUS_403_FORBIDDEN, "Invalid destination path");
@@ -5461,17 +5538,39 @@ static http_response_t *api_dl_status(const http_request_t *request) {
     if (dl->total_size > 0) {
       progress = (int)(dl->downloaded * 100 / dl->total_size);
       if (progress > 100) progress = 100;
+    } else if (dl->done && !dl->error) {
+      progress = 100;
     }
 
+    char esc_name[512];
+    char esc_url[512];
+    char esc_error[512];
+    size_t esc_pos = 0U;
+    esc_name[0] = '\0';
+    esc_url[0] = '\0';
+    esc_error[0] = '\0';
+    (void)json_escape_append(esc_name, sizeof(esc_name), &esc_pos,
+                             dl->filename);
+    esc_name[(esc_pos < sizeof(esc_name)) ? esc_pos : sizeof(esc_name) - 1U] =
+        '\0';
+    esc_pos = 0U;
+    (void)json_escape_append(esc_url, sizeof(esc_url), &esc_pos, dl->url);
+    esc_url[(esc_pos < sizeof(esc_url)) ? esc_pos : sizeof(esc_url) - 1U] =
+        '\0';
+    esc_pos = 0U;
+    (void)json_escape_append(esc_error, sizeof(esc_error), &esc_pos,
+                             dl->error ? dl->error_msg : "");
+    esc_error[(esc_pos < sizeof(esc_error)) ? esc_pos
+                                            : sizeof(esc_error) - 1U] = '\0';
+
     pos += snprintf(body + pos, sizeof(body) - (size_t)pos,
-        "{\"id\":%d,\"name\":\"%s\",\"url\":\"%.*s\","
+        "{\"id\":%d,\"name\":\"%s\",\"url\":\"%s\","
         "\"progress\":%d,\"downloaded\":%" PRIu64 ",\"total_size\":%" PRIu64 ","
         "\"speed\":%.0f,\"done\":%s,\"error\":\"%s\",\"paused\":%s}",
-        dl->id, dl->filename,
-        (int)(sizeof(body) - (size_t)pos > 200 ? 100 : 40), dl->url,
+        dl->id, esc_name, esc_url,
         progress, (uint64_t)dl->downloaded, (uint64_t)dl->total_size,
         dl->speed, dl->done ? "true" : "false",
-        dl->error ? dl->error_msg : "",
+        esc_error,
         dl->paused ? "true" : "false");
   }
   pos += snprintf(body + pos, sizeof(body) - (size_t)pos, "]}");
