@@ -68,7 +68,7 @@ ftpd.log
 /zFrame
 *.plist
 test_mc_ping.py
-*.txt
+
 /backup
 
 docs/ps4_ps5_syscall_report.md
@@ -93,3 +93,5 @@ zftpd-patched (1).zip
 /mcp
 /logs
 race
+/external
+log.txt

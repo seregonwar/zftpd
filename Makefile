@@ -67,7 +67,7 @@ ifeq ($(TARGET),ps4)
     export LLVM_CONFIG := $(ORBIS_LLVM_CONFIG)
     include $(PS4_PAYLOAD_SDK)/toolchain/orbis.mk
     PLATFORM_DEFS := -DPLATFORM_PS4 -DPS4
-    PLATFORM_LIBS := -lkernel -lpthread
+    PLATFORM_LIBS := -lkernel -lpthread -lSceSysmodule -lSceSystemService -lSceUserService
     PLATFORM_LDFLAGS :=
 endif
 
@@ -219,7 +219,7 @@ endif
 #============================================================================
 
 ifneq ($(filter $(TARGET),ps4 ps5),)
-    ENABLE_ZHTTPD ?= 0
+    ENABLE_ZHTTPD ?= 1
 else
     ENABLE_ZHTTPD ?= 1
 endif
@@ -266,11 +266,7 @@ endif
 #============================================================================
 
 ifeq ($(ENABLE_MCP),)
-    ifneq ($(filter $(TARGET),ps4 ps5),)
-        ENABLE_MCP ?= 1
-    else
-        ENABLE_MCP ?= 0
-    endif
+    ENABLE_MCP ?= 0
 endif
 
 ifeq ($(ENABLE_MCP),1)

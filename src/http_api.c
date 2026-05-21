@@ -61,6 +61,13 @@ SOFTWARE.
 #include <sys/ioctl.h>
 #endif
 
+#define SCE_LNC_UTIL_ERROR_ALREADY_RUNNING 0x8094000CU
+#define SCE_LNC_UTIL_ERROR_ALREADY_INITIALIZED 0x80940018U
+#define SCE_LNC_UTIL_ERROR_INVALID_PARAM 0x80940005U
+#define SCE_LNC_ERROR_APP_NOT_FOUND 0x80940031U
+#define SCE_LNC_APP_ID_BIG_BASE 0x60000000U
+#define SCE_LNC_APP_ID_TYPE_MASK 0xFF000000U
+
 #if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
 #include <dlfcn.h>
 
@@ -380,8 +387,10 @@ static void launch_diag_log(const char *stage, const char *title_id, int code,
                  "[LAUNCH-DIAG] stage=%s title=%s code=0x%08X detail=%s", s,
                  t, (unsigned)code, d);
   fprintf(stderr, "%s\n", line);
-  ftp_log_line((code == 0 || (uint32_t)code == 0x8094000CU ||
-                (((uint32_t)code & 0xFF000000U) == 0x60000000U))
+  ftp_log_line((code == 0 ||
+                (uint32_t)code == SCE_LNC_UTIL_ERROR_ALREADY_RUNNING ||
+                (((uint32_t)code & SCE_LNC_APP_ID_TYPE_MASK) ==
+                 SCE_LNC_APP_ID_BIG_BASE))
                    ? FTP_LOG_INFO
                    : FTP_LOG_ERROR,
                line);
@@ -389,9 +398,74 @@ static void launch_diag_log(const char *stage, const char *title_id, int code,
 
 #if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
 static int launch_result_is_success(uint32_t res) {
-  return (res == 0U) || (res == 0x8094000CU) ||
-         ((res & 0xFF000000U) == 0x60000000U);
+  return (res == 0U) || (res == SCE_LNC_UTIL_ERROR_ALREADY_RUNNING) ||
+         ((res & SCE_LNC_APP_ID_TYPE_MASK) == SCE_LNC_APP_ID_BIG_BASE);
 }
+
+static int psx_user_id_is_valid(int32_t user_id) {
+  return user_id >= 0;
+}
+
+#if defined(PLATFORM_PS4)
+__attribute__((weak))
+int sceKernelLoadStartModule(const char *, size_t, const void *, uint32_t,
+                             void *, void *);
+__attribute__((weak))
+int sceKernelDlsym(int, const char *, void **);
+__attribute__((weak))
+int sceUserServiceGetForegroundUser(int32_t *);
+__attribute__((weak))
+int sceUserServiceInitialize(void *);
+__attribute__((weak))
+int sceUserServiceGetLoginUserIdList(void *);
+__attribute__((weak))
+int sceUserServiceGetInitialUser(int32_t *);
+__attribute__((weak))
+uint32_t sceLncUtilLaunchApp(const char *, const char **, LncAppParam *);
+__attribute__((weak))
+int sceSystemServiceLaunchApp(const char *, const char **, void *);
+__attribute__((weak))
+int sceSystemServiceLoadExec(const char *, const char **);
+__attribute__((weak))
+int sceLncUtilInitialize(void);
+__attribute__((weak))
+int sceLncUtilGetAppId(const char *);
+
+static int ps4_load_prx_symbol(const char *module_path, const char *symbol,
+                               void **out_symbol) {
+  if (module_path == NULL || symbol == NULL || out_symbol == NULL) {
+    return -1;
+  }
+  *out_symbol = NULL;
+
+  int module_id = -1;
+  if (sceKernelLoadStartModule != NULL) {
+    module_id =
+        sceKernelLoadStartModule(module_path, 0U, NULL, 0U, NULL, NULL);
+  }
+
+  if (module_id < 0) {
+    module_id = -1;
+    long load_rc = syscall(594, module_path, 0, &module_id, 0);
+    if (load_rc < 0 || module_id < 0) {
+      return (int)load_rc;
+    }
+  }
+
+  if (sceKernelDlsym != NULL) {
+    int dlsym_rc = sceKernelDlsym(module_id, symbol, out_symbol);
+    if (dlsym_rc >= 0 && *out_symbol != NULL) {
+      return 0;
+    }
+  }
+
+  long dyn_rc = syscall(591, module_id, symbol, out_symbol);
+  if (dyn_rc < 0 || *out_symbol == NULL) {
+    return (int)dyn_rc;
+  }
+  return 0;
+}
+#endif
 #endif
 
 /*===========================================================================*
@@ -6006,8 +6080,8 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
       launch_diag_log("sysmodule", title_id, mrc, "USER_SERVICE");
     }
 
-    int (*f_sceUserServiceGetForegroundUser)(uint32_t *) =
-        (int (*)(uint32_t *))dlsym(RTLD_DEFAULT,
+    int (*f_sceUserServiceGetForegroundUser)(int32_t *) =
+        (int (*)(int32_t *))dlsym(RTLD_DEFAULT,
                                    "sceUserServiceGetForegroundUser");
 
     int (*f_sceUserServiceInitialize)(void *) =
@@ -6016,6 +6090,9 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
     int (*f_sceUserServiceGetLoginUserIdList)(void *) =
       (int (*)(void *))dlsym(RTLD_DEFAULT,
                              "sceUserServiceGetLoginUserIdList");
+
+    int (*f_sceUserServiceGetInitialUser)(int32_t *) =
+      (int (*)(int32_t *))dlsym(RTLD_DEFAULT, "sceUserServiceGetInitialUser");
 
     uint32_t (*f_sceLncUtilLaunchApp)(const char *, const char **,
                                       LncAppParam *) =
@@ -6038,6 +6115,53 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
 
     int (*f_sceLncUtilGetAppId)(const char *) =
       (int (*)(const char *))dlsym(RTLD_DEFAULT, "sceLncUtilGetAppId");
+
+#if defined(PLATFORM_PS4)
+    if (f_sceUserServiceGetForegroundUser == NULL &&
+        sceUserServiceGetForegroundUser != NULL) {
+      f_sceUserServiceGetForegroundUser = sceUserServiceGetForegroundUser;
+      launch_diag_log("ps4_import", title_id, 0,
+                      "sceUserServiceGetForegroundUser");
+    }
+    if (f_sceUserServiceInitialize == NULL &&
+        sceUserServiceInitialize != NULL) {
+      f_sceUserServiceInitialize = sceUserServiceInitialize;
+      launch_diag_log("ps4_import", title_id, 0, "sceUserServiceInitialize");
+    }
+    if (f_sceUserServiceGetLoginUserIdList == NULL &&
+        sceUserServiceGetLoginUserIdList != NULL) {
+      f_sceUserServiceGetLoginUserIdList = sceUserServiceGetLoginUserIdList;
+      launch_diag_log("ps4_import", title_id, 0,
+                      "sceUserServiceGetLoginUserIdList");
+    }
+    if (f_sceUserServiceGetInitialUser == NULL &&
+        sceUserServiceGetInitialUser != NULL) {
+      f_sceUserServiceGetInitialUser = sceUserServiceGetInitialUser;
+      launch_diag_log("ps4_import", title_id, 0, "sceUserServiceGetInitialUser");
+    }
+    if (f_sceLncUtilLaunchApp == NULL && sceLncUtilLaunchApp != NULL) {
+      f_sceLncUtilLaunchApp = sceLncUtilLaunchApp;
+      launch_diag_log("ps4_import", title_id, 0, "sceLncUtilLaunchApp");
+    }
+    if (f_sceSystemServiceLaunchApp == NULL &&
+        sceSystemServiceLaunchApp != NULL) {
+      f_sceSystemServiceLaunchApp = sceSystemServiceLaunchApp;
+      launch_diag_log("ps4_import", title_id, 0, "sceSystemServiceLaunchApp");
+    }
+    if (f_sceSystemServiceLoadExec == NULL &&
+        sceSystemServiceLoadExec != NULL) {
+      f_sceSystemServiceLoadExec = sceSystemServiceLoadExec;
+      launch_diag_log("ps4_import", title_id, 0, "sceSystemServiceLoadExec");
+    }
+    if (f_sceLncUtilInitialize == NULL && sceLncUtilInitialize != NULL) {
+      f_sceLncUtilInitialize = sceLncUtilInitialize;
+      launch_diag_log("ps4_import", title_id, 0, "sceLncUtilInitialize");
+    }
+    if (f_sceLncUtilGetAppId == NULL && sceLncUtilGetAppId != NULL) {
+      f_sceLncUtilGetAppId = sceLncUtilGetAppId;
+      launch_diag_log("ps4_import", title_id, 0, "sceLncUtilGetAppId");
+    }
+#endif
 
     if (f_sceLncUtilLaunchApp == NULL || f_sceLncUtilInitialize == NULL) {
       lncUtil = dlopen("/system/common/lib/libSceLncUtil.sprx",
@@ -6067,19 +6191,45 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
       }
     }
 
-    if (f_sceSystemServiceLaunchApp == NULL) {
+    if ((f_sceSystemServiceLaunchApp == NULL) ||
+        (f_sceSystemServiceLoadExec == NULL) ||
+        (f_sceLncUtilLaunchApp == NULL) ||
+        (f_sceLncUtilInitialize == NULL) ||
+        (f_sceLncUtilGetAppId == NULL)) {
       sysService = dlopen("/system/common/lib/libSceSystemService.sprx",
                           RTLD_NOW | RTLD_GLOBAL);
       if (sysService != NULL) {
         launch_diag_log("dlopen", title_id, 0, "libSceSystemService.sprx");
-        f_sceSystemServiceLaunchApp =
-            (int (*)(const char *, const char **,
-                     void *))dlsym(sysService,
-                                  "sceSystemServiceLaunchApp");
+        if (f_sceSystemServiceLaunchApp == NULL) {
+          f_sceSystemServiceLaunchApp =
+              (int (*)(const char *, const char **,
+                       void *))dlsym(sysService,
+                                    "sceSystemServiceLaunchApp");
+        }
         if (f_sceSystemServiceLoadExec == NULL) {
           f_sceSystemServiceLoadExec =
             (int (*)(const char *, const char **))dlsym(
               sysService, "sceSystemServiceLoadExec");
+        }
+        /*
+         * On PS4 the LncUtil entrypoints are commonly exported by
+         * libSceSystemService rather than a standalone libSceLncUtil.sprx.
+         * Itemzflow links these stubs directly; dynamic payloads need to
+         * resolve them from the loaded module.
+         */
+        if (f_sceLncUtilLaunchApp == NULL) {
+          f_sceLncUtilLaunchApp =
+              (uint32_t(*)(const char *, const char **,
+                           LncAppParam *))dlsym(sysService,
+                                                "sceLncUtilLaunchApp");
+        }
+        if (f_sceLncUtilInitialize == NULL) {
+          f_sceLncUtilInitialize =
+              (int (*)(void))dlsym(sysService, "sceLncUtilInitialize");
+        }
+        if (f_sceLncUtilGetAppId == NULL) {
+          f_sceLncUtilGetAppId =
+              (int (*)(const char *))dlsym(sysService, "sceLncUtilGetAppId");
         }
       } else {
         const char *err = dlerror();
@@ -6088,15 +6238,83 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
       }
     }
 
-    if (f_sceUserServiceGetForegroundUser == NULL) {
+#if defined(PLATFORM_PS4)
+    if ((f_sceSystemServiceLaunchApp == NULL) ||
+        (f_sceSystemServiceLoadExec == NULL) ||
+        (f_sceLncUtilLaunchApp == NULL) ||
+        (f_sceLncUtilInitialize == NULL) ||
+        (f_sceLncUtilGetAppId == NULL)) {
+      const char *sys_path = "/system/common/lib/libSceSystemService.sprx";
+      void *sym = NULL;
+      int ps4_rc = 0;
+
+      if (f_sceSystemServiceLaunchApp == NULL) {
+        sym = NULL;
+        ps4_rc =
+            ps4_load_prx_symbol(sys_path, "sceSystemServiceLaunchApp", &sym);
+        launch_diag_log("ps4_prx_dlsym", title_id, ps4_rc,
+                        "sceSystemServiceLaunchApp");
+        if (sym != NULL) {
+          f_sceSystemServiceLaunchApp =
+              (int (*)(const char *, const char **, void *))sym;
+        }
+      }
+      if (f_sceSystemServiceLoadExec == NULL) {
+        sym = NULL;
+        ps4_rc = ps4_load_prx_symbol(sys_path, "sceSystemServiceLoadExec",
+                                     &sym);
+        launch_diag_log("ps4_prx_dlsym", title_id, ps4_rc,
+                        "sceSystemServiceLoadExec");
+        if (sym != NULL) {
+          f_sceSystemServiceLoadExec =
+              (int (*)(const char *, const char **))sym;
+        }
+      }
+      if (f_sceLncUtilLaunchApp == NULL) {
+        sym = NULL;
+        ps4_rc = ps4_load_prx_symbol(sys_path, "sceLncUtilLaunchApp", &sym);
+        launch_diag_log("ps4_prx_dlsym", title_id, ps4_rc,
+                        "sceLncUtilLaunchApp");
+        if (sym != NULL) {
+          f_sceLncUtilLaunchApp =
+              (uint32_t(*)(const char *, const char **, LncAppParam *))sym;
+        }
+      }
+      if (f_sceLncUtilInitialize == NULL) {
+        sym = NULL;
+        ps4_rc = ps4_load_prx_symbol(sys_path, "sceLncUtilInitialize", &sym);
+        launch_diag_log("ps4_prx_dlsym", title_id, ps4_rc,
+                        "sceLncUtilInitialize");
+        if (sym != NULL) {
+          f_sceLncUtilInitialize = (int (*)(void))sym;
+        }
+      }
+      if (f_sceLncUtilGetAppId == NULL) {
+        sym = NULL;
+        ps4_rc = ps4_load_prx_symbol(sys_path, "sceLncUtilGetAppId", &sym);
+        launch_diag_log("ps4_prx_dlsym", title_id, ps4_rc,
+                        "sceLncUtilGetAppId");
+        if (sym != NULL) {
+          f_sceLncUtilGetAppId = (int (*)(const char *))sym;
+        }
+      }
+    }
+#endif
+
+    if ((f_sceUserServiceGetForegroundUser == NULL) ||
+        (f_sceUserServiceInitialize == NULL) ||
+        (f_sceUserServiceGetLoginUserIdList == NULL) ||
+        (f_sceUserServiceGetInitialUser == NULL)) {
       userService = dlopen("/system/common/lib/libSceUserService.sprx",
                            RTLD_NOW | RTLD_GLOBAL);
       launch_diag_log("dlopen", title_id, (userService != NULL) ? 0 : -12,
                       "libSceUserService.sprx");
       if (userService != NULL) {
-        f_sceUserServiceGetForegroundUser =
-            (int (*)(uint32_t *))dlsym(userService,
-                                       "sceUserServiceGetForegroundUser");
+        if (f_sceUserServiceGetForegroundUser == NULL) {
+          f_sceUserServiceGetForegroundUser =
+              (int (*)(int32_t *))dlsym(userService,
+                                        "sceUserServiceGetForegroundUser");
+        }
         if (f_sceUserServiceInitialize == NULL) {
           f_sceUserServiceInitialize =
               (int (*)(void *))dlsym(userService,
@@ -6107,8 +6325,66 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
               (int (*)(void *))dlsym(userService,
                                      "sceUserServiceGetLoginUserIdList");
         }
+        if (f_sceUserServiceGetInitialUser == NULL) {
+          f_sceUserServiceGetInitialUser =
+              (int (*)(int32_t *))dlsym(userService,
+                                        "sceUserServiceGetInitialUser");
+        }
       }
     }
+
+#if defined(PLATFORM_PS4)
+    if ((f_sceUserServiceGetForegroundUser == NULL) ||
+        (f_sceUserServiceInitialize == NULL) ||
+        (f_sceUserServiceGetLoginUserIdList == NULL) ||
+        (f_sceUserServiceGetInitialUser == NULL)) {
+      const char *user_path = "/system/common/lib/libSceUserService.sprx";
+      void *sym = NULL;
+      int ps4_rc = 0;
+
+      if (f_sceUserServiceGetForegroundUser == NULL) {
+        sym = NULL;
+        ps4_rc = ps4_load_prx_symbol(user_path,
+                                     "sceUserServiceGetForegroundUser", &sym);
+        launch_diag_log("ps4_prx_dlsym", title_id, ps4_rc,
+                        "sceUserServiceGetForegroundUser");
+        if (sym != NULL) {
+          f_sceUserServiceGetForegroundUser = (int (*)(int32_t *))sym;
+        }
+      }
+      if (f_sceUserServiceInitialize == NULL) {
+        sym = NULL;
+        ps4_rc =
+            ps4_load_prx_symbol(user_path, "sceUserServiceInitialize", &sym);
+        launch_diag_log("ps4_prx_dlsym", title_id, ps4_rc,
+                        "sceUserServiceInitialize");
+        if (sym != NULL) {
+          f_sceUserServiceInitialize = (int (*)(void *))sym;
+        }
+      }
+      if (f_sceUserServiceGetLoginUserIdList == NULL) {
+        sym = NULL;
+        ps4_rc = ps4_load_prx_symbol(user_path,
+                                     "sceUserServiceGetLoginUserIdList", &sym);
+        launch_diag_log("ps4_prx_dlsym", title_id, ps4_rc,
+                        "sceUserServiceGetLoginUserIdList");
+        if (sym != NULL) {
+          f_sceUserServiceGetLoginUserIdList = (int (*)(void *))sym;
+        }
+      }
+      if (f_sceUserServiceGetInitialUser == NULL) {
+        sym = NULL;
+        ps4_rc =
+            ps4_load_prx_symbol(user_path, "sceUserServiceGetInitialUser",
+                                &sym);
+        launch_diag_log("ps4_prx_dlsym", title_id, ps4_rc,
+                        "sceUserServiceGetInitialUser");
+        if (sym != NULL) {
+          f_sceUserServiceGetInitialUser = (int (*)(int32_t *))sym;
+        }
+      }
+    }
+#endif
 
     if ((f_sceLncUtilLaunchApp == NULL) &&
         (f_sceSystemServiceLaunchApp == NULL)) {
@@ -6126,11 +6402,29 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
           -3);
     }
 
+#if defined(PLATFORM_PS4)
+    if (f_sceLncUtilLaunchApp == NULL) {
+      launch_diag_log("symbols", title_id, -4,
+                      "PS4 requires sceLncUtilLaunchApp; SystemService fallback disabled");
+      if (userService != NULL)
+        dlclose(userService);
+      if (lncUtil != NULL)
+        dlclose(lncUtil);
+      if (sysService != NULL)
+        dlclose(sysService);
+      return status_json_200(
+          0,
+          "Launch blocked: PS4 LncUtil unavailable (SystemService fallback can crash ShellUI)",
+          -4);
+    }
+#endif
+
     if (f_sceLncUtilInitialize != NULL) {
       int init_rc = f_sceLncUtilInitialize();
       launch_diag_log("lnc_init", title_id, init_rc,
                       "sceLncUtilInitialize");
-      if ((init_rc < 0) && ((uint32_t)init_rc != 0x80940018U)) {
+      if ((init_rc < 0) &&
+          ((uint32_t)init_rc != SCE_LNC_UTIL_ERROR_ALREADY_INITIALIZED)) {
         if (userService != NULL)
           dlclose(userService);
         if (lncUtil != NULL)
@@ -6157,13 +6451,29 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
     int32_t userId = 0;
     int have_fg_user = 0;
     if (f_sceUserServiceGetForegroundUser != NULL) {
-      if (f_sceUserServiceGetForegroundUser((uint32_t *)&userId) < 0) {
+      int urc = f_sceUserServiceGetForegroundUser(&userId);
+      if (urc < 0) {
         launch_diag_log("user", title_id, -20,
                         "sceUserServiceGetForegroundUser failed");
+      } else if (!psx_user_id_is_valid(userId)) {
+        launch_diag_log("user", title_id, userId,
+                        "sceUserServiceGetForegroundUser invalid user");
       } else {
         have_fg_user = 1;
         launch_diag_log("user", title_id, 0,
                         "sceUserServiceGetForegroundUser ok");
+      }
+    }
+
+    if (!have_fg_user && (f_sceUserServiceGetInitialUser != NULL)) {
+      int irc = f_sceUserServiceGetInitialUser(&userId);
+      if ((irc >= 0) && psx_user_id_is_valid(userId)) {
+        have_fg_user = 1;
+        launch_diag_log("user", title_id, 0,
+                        "fallback sceUserServiceGetInitialUser ok");
+      } else {
+        launch_diag_log("user", title_id, (irc < 0) ? irc : userId,
+                        "fallback sceUserServiceGetInitialUser failed");
       }
     }
 
@@ -6178,7 +6488,7 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
       int lrc = f_sceUserServiceGetLoginUserIdList((void *)&login_list);
       if (lrc >= 0) {
         for (size_t i = 0; i < 4; i++) {
-          if (login_list.userId[i] >= 0) {
+          if (psx_user_id_is_valid(login_list.userId[i])) {
             userId = login_list.userId[i];
             have_fg_user = 1;
             launch_diag_log("user", title_id, 0,
@@ -6210,7 +6520,11 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
     param.user_id = (uint32_t)userId;
     param.app_opt = 0;
     param.crash_report = 0;
+#if defined(PLATFORM_PS4)
+    param.check_flag = LNC_SKIP_SYSTEM_UPDATE_CHECK;
+#else
     param.check_flag = LNC_FLAG_NONE;
+#endif
 
     uint32_t res = 0xFFFFFFFFU;
     if (f_sceLncUtilLaunchApp != NULL) {
@@ -6219,8 +6533,13 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
       candidates[candidate_count++] = (uint32_t)userId;
 
       const LncAppParamFlag flag_candidates[] = {
+#if defined(PLATFORM_PS4)
+          LNC_SKIP_SYSTEM_UPDATE_CHECK,
+          LNC_FLAG_NONE,
+#else
           LNC_FLAG_NONE,
           LNC_SKIP_SYSTEM_UPDATE_CHECK,
+#endif
           LNC_SKIP_LAUNCH_CHECK,
       };
 
@@ -6250,10 +6569,10 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
           res = f_sceLncUtilLaunchApp(title_id, NULL, &param);
           launch_diag_log("launch_try_result", title_id, (int)res, detail);
 
-          if (res == 0 || res == 0x8094000cU) {
+          if (res == 0 || res == SCE_LNC_UTIL_ERROR_ALREADY_RUNNING) {
             break;
           }
-          if (res == 0x80940005U) {
+          if (res == SCE_LNC_UTIL_ERROR_INVALID_PARAM) {
             /* invalid param: try another flag/uid */
             continue;
           }
@@ -6261,12 +6580,15 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
           break;
         }
 
-        if ((res == 0) || (res == 0x8094000cU) || (res != 0x80940005U)) {
+        if ((res == 0) ||
+            (res == SCE_LNC_UTIL_ERROR_ALREADY_RUNNING) ||
+            (res != SCE_LNC_UTIL_ERROR_INVALID_PARAM)) {
           break;
         }
       }
 
-      if (res == 0x80940005U) {
+#if !defined(PLATFORM_PS4)
+      if (res == SCE_LNC_UTIL_ERROR_INVALID_PARAM) {
         launch_diag_log("launch_call", title_id, 0,
                         "sceLncUtilLaunchApp param=NULL");
         res = f_sceLncUtilLaunchApp(title_id, NULL, NULL);
@@ -6274,14 +6596,15 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
                         "sceLncUtilLaunchApp param=NULL");
       }
 
-      if ((res == 0x80940005U) && (f_sceSystemServiceLaunchApp != NULL)) {
+      if ((res == SCE_LNC_UTIL_ERROR_INVALID_PARAM) &&
+          (f_sceSystemServiceLaunchApp != NULL)) {
         launch_diag_log("launch_call", title_id, 0,
                         "sceSystemServiceLaunchApp argv=NULL,param=NULL");
         res = (uint32_t)f_sceSystemServiceLaunchApp(title_id, NULL, NULL);
         launch_diag_log("launch_try_result", title_id, (int)res,
                         "sceSystemServiceLaunchApp argv=NULL,param=NULL");
 
-        if (res == 0x80940005U) {
+        if (res == SCE_LNC_UTIL_ERROR_INVALID_PARAM) {
           param.check_flag = LNC_FLAG_NONE;
           launch_diag_log("launch_call", title_id, 0,
                           "sceSystemServiceLaunchApp argv=NULL,param=&LncAppParam(flag=0x0)");
@@ -6291,6 +6614,12 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
                           "sceSystemServiceLaunchApp argv=NULL,param=&LncAppParam(flag=0x0)");
         }
       }
+#else
+      if (res == SCE_LNC_UTIL_ERROR_INVALID_PARAM) {
+        launch_diag_log("launch_result", title_id, (int)res,
+                        "PS4 LncUtil rejected all parameter variants; unsafe fallbacks skipped");
+      }
+#endif
     } else {
       /* Fallback path on systems where LncUtil symbol is unavailable */
       launch_diag_log("launch_call", title_id, 0,
@@ -6299,13 +6628,17 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
       launch_diag_log("launch_try_result", title_id, (int)res,
                       "sceSystemServiceLaunchApp argv=NULL,param=NULL");
 
-      if (res == 0x80940005U) {
+      if (res == SCE_LNC_UTIL_ERROR_INVALID_PARAM) {
         uint32_t candidates[1];
         size_t candidate_count = 0U;
         candidates[candidate_count++] = (uint32_t)userId;
 
         const LncAppParamFlag flag_candidates[] = {
+#if defined(PLATFORM_PS4)
+            LNC_SKIP_SYSTEM_UPDATE_CHECK,
+#else
             LNC_FLAG_NONE,
+#endif
         };
 
         for (size_t i = 0; i < candidate_count; i++) {
@@ -6338,20 +6671,21 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
             if (launch_result_is_success(res)) {
               break;
             }
-            if (res == 0x80940005U) {
+            if (res == SCE_LNC_UTIL_ERROR_INVALID_PARAM) {
               continue;
             }
             break;
           }
 
-          if (launch_result_is_success(res) || (res != 0x80940005U)) {
+          if (launch_result_is_success(res) ||
+              (res != SCE_LNC_UTIL_ERROR_INVALID_PARAM)) {
             break;
           }
         }
       }
     }
 
-    if (res == 0x80940031U) {
+    if (res == SCE_LNC_ERROR_APP_NOT_FOUND) {
       int fix_tables = 0;
       int fix_rows = 0;
       int fix_rc = psx_repair_appdb_visibility_for_title(title_id, &fix_tables,
@@ -6365,26 +6699,36 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
       if (fix_rc == 0) {
         if (f_sceLncUtilLaunchApp != NULL) {
           param.user_id = have_fg_user ? (uint32_t)userId : 0U;
+#if defined(PLATFORM_PS4)
+          param.check_flag = LNC_SKIP_SYSTEM_UPDATE_CHECK;
+#else
           param.check_flag = LNC_FLAG_NONE;
+#endif
           launch_diag_log("launch_call", title_id, 0,
-                          "post-repair sceLncUtilLaunchApp uid=fg/0 flag=0x0");
+                          "post-repair sceLncUtilLaunchApp uid=fg/0");
           res = f_sceLncUtilLaunchApp(title_id, NULL, &param);
           launch_diag_log("launch_try_result", title_id, (int)res,
-                          "post-repair sceLncUtilLaunchApp uid=fg/0 flag=0x0");
+                          "post-repair sceLncUtilLaunchApp uid=fg/0");
         } else if (f_sceSystemServiceLaunchApp != NULL) {
           param.user_id = have_fg_user ? (uint32_t)userId : 0U;
+#if defined(PLATFORM_PS4)
+          param.check_flag = LNC_SKIP_SYSTEM_UPDATE_CHECK;
+#else
           param.check_flag = LNC_FLAG_NONE;
+#endif
           launch_diag_log("launch_call", title_id, 0,
-                          "post-repair sceSystemServiceLaunchApp uid=fg/0 flag=0x0");
+                          "post-repair sceSystemServiceLaunchApp uid=fg/0");
           res =
               (uint32_t)f_sceSystemServiceLaunchApp(title_id, NULL, &param);
           launch_diag_log("launch_try_result", title_id, (int)res,
-                          "post-repair sceSystemServiceLaunchApp uid=fg/0 flag=0x0");
+                          "post-repair sceSystemServiceLaunchApp uid=fg/0");
         }
       }
     }
 
-    if ((res == 0x80940031U) && (f_sceSystemServiceLoadExec != NULL)) {
+#if !defined(PLATFORM_PS4)
+    if ((res == SCE_LNC_ERROR_APP_NOT_FOUND) &&
+        (f_sceSystemServiceLoadExec != NULL)) {
       char eboot_path[FTP_PATH_MAX];
       int en = snprintf(eboot_path, sizeof(eboot_path), "/user/app/%s/eboot.bin",
                         title_id);
@@ -6396,6 +6740,13 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
                         "fallback sceSystemServiceLoadExec /user/app/<TITLE_ID>/eboot.bin");
       }
     }
+#else
+    if ((res == SCE_LNC_ERROR_APP_NOT_FOUND) &&
+        (f_sceSystemServiceLoadExec != NULL)) {
+      launch_diag_log("launch_result", title_id, (int)res,
+                      "PS4 LoadExec fallback skipped to preserve ShellUI user context");
+    }
+#endif
     launch_diag_log("launch_result", title_id, (int)res,
                     "launch API returned");
 
@@ -6415,7 +6766,10 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
       http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
       http_response_add_header(resp, "Content-Type", "application/json");
       http_response_set_body(resp, (const uint8_t *)msg, strlen(msg));
+      /* PS4 ShellUI can crash if a system notification races app focus change. */
+#if !defined(PLATFORM_PS4)
       pal_notification_send("Game Launch executed.");
+#endif
       return resp;
     }
 
