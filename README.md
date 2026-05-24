@@ -397,7 +397,7 @@ I would like to express our sincere thanks to:
 
 ## Contributors
 
-Special thanks to **M///Class ** for contributing to the project through testing and for the steady commitment shown in following its development.
+Special thanks to **M///Class** for contributing to the project through testing and for the steady commitment shown in following its development.
 
 ---
 
