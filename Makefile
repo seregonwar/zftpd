@@ -207,6 +207,7 @@ SOURCES += src/ftp_buffer_pool.c
 SOURCES += src/ftp_log.c
 SOURCES += src/ftp_crypto.c
 SOURCES += src/main.c
+SOURCES += src/pal_resilient_server.c
 
 # PS5-specific modules
 ifeq ($(TARGET),ps5)
@@ -685,11 +686,11 @@ endif
 
 $(BUILD_DIR)/tests/test_http_query: tests/test_http_query.c $(LIB_OBJECTS) | $(BUILD_DIR)/tests
 	@echo "  [CC]  $<"
-	@$(CC) $(CFLAGS) -DFTP_AUTH_DELAY=0 -o $@ $< $(LIB_OBJECTS) $(LDFLAGS) $(LIBS)
+	@$(CC) $(CFLAGS) -DFTP_AUTH_DELAY=0 -DFTP_PORT_ALLOW_FOREIGN_IP=1 -o $@ $< $(LIB_OBJECTS) $(LDFLAGS) $(LIBS)
 
 $(BUILD_DIR)/tests/%: tests/%.c $(LIB_OBJECTS) | $(BUILD_DIR)/tests
 	@echo "  [CC]  $<"
-	@$(CC) $(CFLAGS) -DFTP_AUTH_DELAY=0 -o $@ $< $(LIB_OBJECTS) $(LDFLAGS) $(LIBS)
+	@$(CC) $(CFLAGS) -DFTP_AUTH_DELAY=0 -DFTP_PORT_ALLOW_FOREIGN_IP=1 -o $@ $< $(LIB_OBJECTS) $(LDFLAGS) $(LIBS)
 
 bin: $(OUTPUT_BIN)
 

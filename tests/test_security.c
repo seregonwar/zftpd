@@ -30,7 +30,7 @@ int main(void)
     struct sockaddr_in client_addr;
     memset(&client_addr, 0, sizeof(client_addr));
     client_addr.sin_family = AF_INET;
-    (void)inet_pton(AF_INET, "10.0.0.2", &client_addr.sin_addr);
+    (void)inet_pton(AF_INET, "127.0.0.1", &client_addr.sin_addr);
     client_addr.sin_port = htons(12345);
 
     ftp_session_t session;

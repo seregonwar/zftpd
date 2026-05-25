@@ -35,6 +35,7 @@ SOFTWARE.
 #include "ftp_server.h"
 #include "ftp_session.h"
 #include "pal_network.h"
+#include "pal_resilient_server.h"
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
@@ -312,17 +313,14 @@ static void* server_accept_thread(void *arg)
         struct sockaddr_in client_addr;
         socklen_t addr_len = sizeof(client_addr);
         
-        int client_fd = PAL_ACCEPT(ctx->listen_fd,
-                                    (struct sockaddr*)&client_addr,
-                                    &addr_len);
+        int client_fd = pal_resilient_accept(&ctx->listen_fd,
+                                             &ctx->listen_addr,
+                                             (struct sockaddr*)&client_addr,
+                                             &addr_len,
+                                             &ctx->running);
         
         if (client_fd < 0) {
-            /* Accept failed - check if server is stopping */
-            if (atomic_load(&ctx->running) == 0) {
-                break;
-            }
-            
-            continue; /* Try again */
+            continue; /* pal_resilient_accept handled errors and shutdown check internally */
         }
         
         /* Configure client socket */
