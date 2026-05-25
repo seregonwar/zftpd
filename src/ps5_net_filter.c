@@ -31,18 +31,20 @@
  *    FreeBSD sysent entry (amd64, FreeBSD 11):
  *
  *      struct sysent {
- *          int         sy_narg;         // +0x00  (4 bytes)
- *          int         sy_pad;          // +0x04  (4 bytes)
- *          u_int32_t   sy_flags;        // +0x08  (4 bytes)
- *          u_int32_t   _pad2;           // +0x0C  (4 bytes)
- *          sy_call_t  *sy_call;         // +0x10  (8 bytes)  ← we patch this
- *          au_event_t  sy_auevent;      // +0x18  (2 bytes)
- *          ...
- *      };  // sizeof = 72 bytes on amd64
+ *          u_int32_t   n_arg;           // +0x00  (4 bytes)
+ *          u_int32_t   pad;             // +0x04  (4 bytes)
+ *          sy_call_t  *sy_call;         // +0x08  (8 bytes)  ← we patch this
+ *          u_int64_t   sy_auevent;      // +0x10  (8 bytes)
+ *          u_int64_t   sy_systrace;     // +0x18  (8 bytes)
+ *          u_int32_t   sy_entry;        // +0x20  (4 bytes)
+ *          u_int32_t   sy_return;       // +0x24  (4 bytes)
+ *          u_int32_t   sy_flags;        // +0x28  (4 bytes)
+ *          u_int32_t   sy_thrcnt;       // +0x2C  (4 bytes)
+ *      };  // sizeof = 48 bytes on PS5 PPR
  *
- *    sysent[SYS_CONNECT]  = sysent_base + 98  * 72
- *    sysent[SYS_SENDTO]   = sysent_base + 133 * 72
- *    sy_call offset within entry = 0x10
+ *    sysent[SYS_CONNECT]  = sysent_base + 98  * 48
+ *    sysent[SYS_SENDTO]   = sysent_base + 133 * 48
+ *    sy_call offset within entry = 0x08
  *
  * 3. HOOK FUNCTION DESIGN
  *    The hook runs in kernel context (supervisor mode, kernel stack).
@@ -61,10 +63,10 @@
  *      e) Otherwise                                          → allow
  *
  * 4. FIRMWARE TABLE
- *    The sysent table base address is firmware-specific (KASLR randomises
- *    the kernel base, but the *relative offset* of sysent from kernel_base
- *    is fixed per firmware version).  We maintain a table of these offsets
- *    for all supported firmware versions.
+ *    The sysent table base address is firmware-specific. The kstuff offsets
+ *    used here are relative to KERNEL_ADDRESS_DATA_BASE, not the kernel
+ *    .text base. We maintain a table of these offsets for all supported
+ *    firmware versions.
  *
  *    Offsets are derived from public PS5 kernel symbol dumps and verified
  *    against known kstuff research.
@@ -101,8 +103,7 @@
  *   kernel_mprotect / kernel_set_vmem_protection
  *   kernel_get_proc / KERNEL_OFFSET_PROC_P_VMSPACE
  *
- * We build three helpers the net filter requires:
- *   kernel_get_base()        → KERNEL_ADDRESS_TEXT_BASE
+ * We build two helpers the net filter requires:
  *   kernel_get_phys_addr()   → CR3 page-table walk
  *   kernel_clear_pte_nx()    → SDK mprotect wrappers
  *=======================================================================*/
@@ -115,13 +116,6 @@
 #define PTE_PS (1ULL << 7)
 #define PTE_NX (1ULL << 63)
 #define PTE_ADDR_MASK 0x000FFFFFFFFFF000ULL /* bits [51:12] */
-
-/**
- * @brief Return the kernel .text base address.
- */
-static inline uint64_t kernel_get_base(void) {
-  return (uint64_t)KERNEL_ADDRESS_TEXT_BASE;
-}
 
 /**
  * @brief Read one 8-byte PTE via the DMAP region.
@@ -248,11 +242,11 @@ static int kernel_clear_pte_nx(uintptr_t va) {
  * INTERNAL CONSTANTS
  *===========================================================================*/
 
-/** FreeBSD amd64 sizeof(struct sysent) */
-#define SYSENT_ENTRY_SIZE 72U
+/** PS5 PPR sizeof(struct sysent) */
+#define SYSENT_ENTRY_SIZE 48U
 
 /** Offset of sy_call within struct sysent */
-#define SYSENT_SY_CALL_OFFSET 0x10U
+#define SYSENT_SY_CALL_OFFSET 0x08U
 
 /** Syscall numbers (FreeBSD) */
 #define SYS_CONNECT 98U
@@ -301,7 +295,7 @@ static int kernel_clear_pte_nx(uintptr_t va) {
  */
 typedef struct {
   uint32_t fw_version;      /**< Encoded firmware version (e.g. 403 = 4.03) */
-  uint64_t sysent_offset;   /**< sysent[] offset from kernel_base */
+  uint64_t sysent_offset;   /**< sysent[] offset from KERNEL_ADDRESS_DATA_BASE */
   uint64_t thread_proc_off; /**< td->td_proc offset within struct thread */
   uint64_t proc_pid_off;    /**< p_pid offset within struct proc */
 } ps5_fw_entry_t;
@@ -321,7 +315,7 @@ static const ps5_fw_entry_t g_fw_table[] = {
     /*
      * fw_version | sysent_offset      | thread_proc_off | proc_pid_off
      * -----------+--------------------+-----------------+-------------
-     * Values are relative to kernel_base (the KASLR slide is added at runtime).
+     * Values are relative to KERNEL_ADDRESS_DATA_BASE.
      *
      * NOTE: These offsets are placeholders derived from public research.
      *       They MUST be validated against the actual kernel image for each
@@ -964,13 +958,19 @@ static int alloc_kernel_exec_page(uintptr_t *kaddr) {
  *         0 if sysent is clean (points to kernel text or is invalid).
  */
 static int is_external_hook_installed(const ps5_fw_entry_t *fw_entry) {
-  if (fw_entry == NULL || fw_entry->sysent_connect_off == 0) {
+  if (fw_entry == NULL || fw_entry->sysent_offset == 0U) {
+    return 0;  /* Cannot determine, assume clean */
+  }
+
+  uint64_t kdata_base = (uint64_t)KERNEL_ADDRESS_DATA_BASE;
+  if (kdata_base == 0U) {
     return 0;  /* Cannot determine, assume clean */
   }
 
   /* Calculate sysent[SYS_CONNECT].sy_call kernel address */
-  uintptr_t sysent_kaddr = fw_entry->sysent_base + fw_entry->sysent_connect_off +
-                           SYSENT_SY_CALL_OFFSET;
+  uintptr_t sysent_kaddr =
+      (uintptr_t)(kdata_base + fw_entry->sysent_offset) +
+      (uintptr_t)(SYS_CONNECT * SYSENT_ENTRY_SIZE) + SYSENT_SY_CALL_OFFSET;
 
   /* Read current handler address via kernel_copyout */
   uintptr_t current_handler = 0U;
@@ -1004,9 +1004,12 @@ static int is_external_hook_installed(const ps5_fw_entry_t *fw_entry) {
    * it's likely an external hook.
    */
   if (current_handler >= DMAP_BASE_ADDR) {
-    ftp_log_line(FTP_LOG_WARN,
-                 "[net_filter] External hook detected at 0x%llx (another payload active)",
-                 (unsigned long long)current_handler);
+    char msg[128];
+    (void)snprintf(
+        msg, sizeof(msg),
+        "[net_filter] External hook detected at 0x%llx (another payload active)",
+        (unsigned long long)current_handler);
+    ftp_log_line(FTP_LOG_WARN, msg);
     return 1;
   }
 
@@ -1104,13 +1107,13 @@ int ps5_net_filter_install(const ps5_net_filter_config_t *cfg) {
   /* Step 3: Locate and validate sysent table                            */
   /* ------------------------------------------------------------------ */
 
-  uint64_t kernel_base = kernel_get_base();
-  if (kernel_base == 0U) {
+  uint64_t kdata_base = (uint64_t)KERNEL_ADDRESS_DATA_BASE;
+  if (kdata_base == 0U) {
     rc = PS5_NET_FILTER_ERR_FW_DETECT;
     goto fail;
   }
 
-  uintptr_t sysent_kaddr = (uintptr_t)(kernel_base + fw_entry->sysent_offset);
+  uintptr_t sysent_kaddr = (uintptr_t)(kdata_base + fw_entry->sysent_offset);
 
   if (validate_sysent(sysent_kaddr) != 0) {
     ftp_log_line(FTP_LOG_ERROR,
@@ -1322,12 +1325,12 @@ int ps5_net_filter_uninstall(void) {
   /* Detect firmware to recompute sysent addresses */
   uint32_t fw_version = 0U;
   const ps5_fw_entry_t *fw_entry = NULL;
-  uint64_t kernel_base = kernel_get_base();
+  uint64_t kdata_base = (uint64_t)KERNEL_ADDRESS_DATA_BASE;
 
   if ((detect_firmware_version(&fw_version) == 0) &&
-      (lookup_fw_entry(fw_version, &fw_entry) == 0) && (kernel_base != 0U)) {
+      (lookup_fw_entry(fw_version, &fw_entry) == 0) && (kdata_base != 0U)) {
 
-    uintptr_t sysent_kaddr = (uintptr_t)(kernel_base + fw_entry->sysent_offset);
+    uintptr_t sysent_kaddr = (uintptr_t)(kdata_base + fw_entry->sysent_offset);
 
     uintptr_t connect_slot = sysent_kaddr +
                              (uintptr_t)(SYS_CONNECT * SYSENT_ENTRY_SIZE) +
