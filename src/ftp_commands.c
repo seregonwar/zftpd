@@ -116,6 +116,74 @@ static int pfs_mutex_lock_timeout(pthread_mutex_t *mtx, int timeout_s) {
   }
   return ETIMEDOUT;
 }
+
+/*
+ * pfs_needs_serialisation — detect whether O_CREAT needs the PFS mutex.
+ *
+ *   On PS4/PS5, pal_file_open(O_CREAT) on a PFS-encrypted partition
+ *   (/data/, /data/pkg/, etc.) takes 3–8 seconds per file because the
+ *   kernel serialises inode allocation through the PFS journal.  The
+ *   application-level mutex prevents two sessions from hitting the
+ *   kernel lock simultaneously (which would inflate each open to >20 s).
+ *
+ *   Non-PFS filesystems (exFAT USB drives at /mnt/usb0/, FAT32, etc.)
+ *   do NOT have this bottleneck: O_CREAT completes in microseconds.
+ *   Holding the global mutex for them would only add unnecessary latency
+ *   and block other sessions that DO target PFS.
+ *
+ *   This function statfs()'s the parent directory and checks the
+ *   filesystem type.  Returns 1 for PFS (slow, needs mutex), 0 for
+ *   fast filesystems (exFAT, msdosfs), and 1 on any error (safe fallback).
+ */
+static int pfs_needs_serialisation(const char *file_path) {
+  /* Extract parent directory */
+  char dir[FTP_PATH_MAX];
+  const char *slash = strrchr(file_path, '/');
+  if (slash != NULL) {
+    size_t dlen = (size_t)(slash - file_path);
+    if (dlen == 0U) {
+      /* path like "/file" — parent is "/" */
+      dir[0] = '/';
+      dir[1] = '\0';
+    } else if (dlen >= sizeof(dir)) {
+      return 1; /* path too long — safe fallback */
+    } else {
+      memcpy(dir, file_path, dlen);
+      dir[dlen] = '\0';
+    }
+  } else {
+    /* No slash — relative path, assume slow (safe fallback) */
+    return 1;
+  }
+
+  /* _fstatfs() is the OrbisOS fd-based statfs; more reliable than
+   * path-based statfs() on PS4/PS5 for certain mount types. */
+  int dfd = open(dir, O_RDONLY);
+  if (dfd < 0) {
+    return 1; /* cannot stat — safe fallback */
+  }
+
+  struct statfs sfs;
+  memset(&sfs, 0, sizeof(sfs));
+  int sfs_ok = (_fstatfs(dfd, &sfs) == 0);
+  close(dfd);
+
+  if (sfs_ok == 0) {
+    return 1; /* stat failed — safe fallback */
+  }
+
+  /* Known fast filesystems: O_CREAT is microseconds, not seconds.
+   * Skip the mutex — no PFS journal contention possible here. */
+  if (sfs.f_fstypename[0] != '\0') {
+    if (strcmp(sfs.f_fstypename, "exfat") == 0 ||
+        strcmp(sfs.f_fstypename, "msdosfs") == 0 ||
+        strcmp(sfs.f_fstypename, "ufs") == 0) {
+      return 0; /* fast — no serialisation needed */
+    }
+  }
+
+  return 1; /* PFS or unknown — serialise to be safe */
+}
 #endif
 
 /*===========================================================================*
@@ -1343,13 +1411,17 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
 #if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
   int held_pfs_mtx = 0;
   if ((open_flags & O_CREAT) != 0) {
-    if (pfs_mutex_lock_timeout(&g_pfs_create_mtx, 10) == 0) {
-      held_pfs_mtx = 1;
-    } else {
-      session->restart_offset = 0;
-      return ftp_session_send_reply(session, FTP_REPLY_451_LOCAL_ERROR,
-                                    "Server busy, please retry.");
+    if (pfs_needs_serialisation(write_path)) {
+      if (pfs_mutex_lock_timeout(&g_pfs_create_mtx, 10) == 0) {
+        held_pfs_mtx = 1;
+      } else {
+        session->restart_offset = 0;
+        return ftp_session_send_reply(session, FTP_REPLY_451_LOCAL_ERROR,
+                                      "Server busy, please retry.");
+      }
     }
+    /* else: fast filesystem (exFAT, msdosfs) — O_CREAT is fast,
+     *       no mutex needed; held_pfs_mtx stays 0 */
   }
 #endif
   int fd = pal_file_open(write_path, open_flags, FILE_PERM);
@@ -1772,13 +1844,16 @@ ftp_error_t cmd_APPE(ftp_session_t *session, const char *args) {
 #if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
   int held_pfs_mtx_appe = 0;
   if ((open_flags & O_CREAT) != 0) {
-    if (pfs_mutex_lock_timeout(&g_pfs_create_mtx, 10) == 0) {
-      held_pfs_mtx_appe = 1;
-    } else {
-      session->restart_offset = 0;
-      return ftp_session_send_reply(session, FTP_REPLY_451_LOCAL_ERROR,
-                                    "Server busy, please retry.");
+    if (pfs_needs_serialisation(resolved)) {
+      if (pfs_mutex_lock_timeout(&g_pfs_create_mtx, 10) == 0) {
+        held_pfs_mtx_appe = 1;
+      } else {
+        session->restart_offset = 0;
+        return ftp_session_send_reply(session, FTP_REPLY_451_LOCAL_ERROR,
+                                      "Server busy, please retry.");
+      }
     }
+    /* else: fast filesystem — no mutex needed */
   }
 #endif
   int fd = pal_file_open(resolved, open_flags, FILE_PERM);
