@@ -63,7 +63,7 @@ extern int _fstatfs(int, struct statfs *);
 #include <pthread.h>
 #include <time.h>
 #include <unistd.h>
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
 #include <fcntl.h> /* posix_fadvise(POSIX_FADV_DONTNEED) */
 #endif
 
@@ -1650,6 +1650,30 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
     (void)fsync(fd);
   }
 #endif
+
+  /*
+   * Evict written pages from the kernel page cache.
+   *
+   *   Without this hint, every small file (<2 MB) written via STOR
+   *   stays pinned in the page cache.  After thousands of files from
+   *   a game directory (AstroBot, etc.), the page cache fills all
+   *   available RAM; the kernel then spends increasing time on page
+   *   reclaim, causing the observed monotonic throughput drop from
+   *   80 MB/s towards KB/s and eventual console unresponsiveness.
+   *
+   *   POSIX_FADV_DONTNEED on the written fd tells the kernel it can
+   *   reclaim those pages immediately.  This is the same eviction
+   *   pattern already used in pal_fileio.c for copy operations
+   *   (both src and dst fds receive DONTNEED after copy).
+   *
+   *   Only the PS4 platform is excluded: its libc does not export
+   *   posix_fadvise(2).  PS5 (FreeBSD-based) and Linux both support it.
+   */
+#if defined(POSIX_FADV_DONTNEED) && !defined(PLATFORM_PS4) && !defined(PS4)
+  if (fd >= 0) {
+    (void)posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
+  }
+#endif
   pal_file_close(fd);
   ftp_session_close_data_connection(session);
   session->restart_offset = 0;
@@ -1840,6 +1864,22 @@ ftp_error_t cmd_APPE(ftp_session_t *session, const char *args) {
 #else
   if (ok != 0) {
     (void)fsync(fd);
+  }
+#endif
+
+  /*
+   * Evict written pages from the kernel page cache.
+   *
+   *   Same rationale as cmd_STOR: without this hint, each small file
+   *   appended via APPE accumulates in the page cache, contributing
+   *   to the same progressive RAM exhaustion and speed degradation.
+   *
+   *   POSIX_FADV_DONTNEED on the written fd tells the kernel it can
+   *   reclaim those pages immediately.
+   */
+#if defined(POSIX_FADV_DONTNEED) && !defined(PLATFORM_PS4) && !defined(PS4)
+  if (fd >= 0) {
+    (void)posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
   }
 #endif
   pal_file_close(fd);
