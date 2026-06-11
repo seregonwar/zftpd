@@ -926,10 +926,9 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
     if (_fstatfs(node.fd, &sfs) == 0) { fstype = sfs.f_fstypename; }
     snprintf(diag, sizeof(diag),
       "[RETR] file=%s size=%llu fs=%s sendfile=%d "
-      "chunk=%u cooldown=%u eagain_sleep=%u sndbuf=%u",
+      "chunk=%u eagain_sleep=%u sndbuf=%u",
       resolved, (unsigned long long)file_size, fstype, use_sendfile,
       (unsigned)FTP_RETR_SENDFILE_CHUNK,
-      (unsigned)(4U << 20),
       (unsigned)FTP_SENDFILE_EAGAIN_SLEEP_US,
       (unsigned)FTP_TCP_DATA_SNDBUF);
 #else
@@ -946,275 +945,116 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
   }
 #endif
 
+  if (use_sendfile == 0) {
+    vfs_close(&node);
+    ftp_session_close_data_connection(session);
+    session->restart_offset = 0;
+    return ftp_session_send_reply(session, FTP_REPLY_426_TRANSFER_ABORTED,
+                                  "sendfile unavailable (crypto/rate-limit active).");
+  }
+
   /*=========================================================================*
-   *  Transfer loop: sendfile with read() cooldown retry
+   *  Transfer loop: sendfile only — no read() fallback.
    *
-   *  PS4/PS5 exFAT driver stalls sendfile() after ~28 MB of continuous
-   *  kernel-to-kernel transfer (page cache pressure). Instead of falling
-   *  back to slow read() permanently, we alternate:
-   *
-   *     sendfile burst (kernel speed, ~28 MB)
-   *       -> stall detected
-   *       -> read() cooldown (1 MB, releases page pressure)
-   *       -> retry sendfile (if it works, another 28 MB burst)
-   *       -> repeat until file complete
-   *
-   *  If sendfile fails immediately on retry (0 bytes), the driver truly
-   *  cannot recover and we finish the rest via read().
-   *
-   *    ┌──────────┐    stall    ┌──────────────┐   1 MB done  ┌──────────┐
-   *    │ sendfile  │──────────►│ read cooldown │────────────►│ sendfile  │
-   *    │  burst    │           │   (1 MB)      │             │  retry    │
-   *    └─────┬────┘           └──────────────┘             └─────┬────┘
-   *     done │                                          0 bytes │ ok
-   *          ▼                                                  ▼
-   *        [226]                                    ┌───────────────┐
-   *                                                 │ read() finish │
-   *                                                 └───────┬──────┘
-   *                                                    done │
-   *                                                         ▼
-   *                                                       [226]
+   *  If sendfile(2) cannot complete the transfer, the connection is
+   *  aborted with 426.  There is no userspace read()+send() path:
+   *  zero-copy DMA or failure.
    *=========================================================================*/
 
-/* Cooldown: bytes of read() between sendfile retries */
-#define SENDFILE_COOLDOWN_BYTES (4U << 20) /* 4 MB — allineato a PAL_FILE_COPY_BUFFER_SIZE PS5; meno rientri nel path lento */
-
-  void *buf = NULL;
-  size_t buf_sz = 0U;
+  pal_socket_cork(session->data_fd);
 
   while (remaining > 0U) {
+    ssize_t sent =
+        pal_sendfile(session->data_fd, node.fd, &offset,
+                     (remaining > (size_t)FTP_RETR_SENDFILE_CHUNK)
+                         ? (size_t)FTP_RETR_SENDFILE_CHUNK
+                         : remaining);
 
-    /*-- sendfile burst --*/
-    if (use_sendfile != 0) {
-      pal_socket_cork(session->data_fd);
-      int sf_sent_any = 0;
-
-      while (remaining > 0U) {
-        ssize_t sent =
-            pal_sendfile(session->data_fd, node.fd, &offset,
-                         (remaining > (size_t)FTP_RETR_SENDFILE_CHUNK)
-                             ? (size_t)FTP_RETR_SENDFILE_CHUNK
-                             : remaining);
-
-        if (sent <= 0) {
-          if ((sent < 0) && (errno == EINTR)) {
-            continue;
-          }
-
-          /*
-           * Fatal storage error — EIO / ESTALE / EBADF / EFAULT.
-           *
-           * pal_sendfile() now always returns -1 for these (never a
-           * positive sbytes), so errno is still set from the underlying
-           * sendfile(2) syscall.
-           *
-           * Do NOT enter the EAGAIN retry loop: every retry would call
-           * sendfile() again on the same bad/unmounted vnode, which on
-           * PS5/PS4 (FreeBSD sendfile) can trigger an unrecoverable
-           * kernel panic.
-           *
-           * Instead, disable sendfile for this session and fall through
-           * to the read()-based cooldown path, which handles I/O errors
-           * gracefully by returning an FTP 426 reply.
-           */
-          if ((sent < 0) && ((errno == EIO) || (errno == ESTALE) ||
-                             (errno == EBADF) || (errno == EFAULT))) {
-            vfs_set_offset(&node, (uint64_t)offset);
-            use_sendfile = 0; /* switch to read() for remainder */
-            break;
-          }
-
-          /*
-           * sent == 0: two possible causes need different responses.
-           *
-           * (A) TCP back-pressure — send buffer momentarily full.
-           *     ACKs are in-flight; a short sleep lets them drain the
-           *     buffer so sendfile can continue.  This is identical to
-           *     what the HTTP server does on EAGAIN (usleep 1 ms + retry).
-           *
-           * (B) Platform driver stall (PS5 exFAT / sendfile internal
-           *     limit).  Retries do not recover; fall to read() cooldown.
-           *
-           * Disambiguation strategy: retry up to FTP_SENDFILE_EAGAIN_RETRIES
-           * times, each time sleeping FTP_SENDFILE_EAGAIN_SLEEP_US µs.  If
-           * any retry sends bytes → (A), continue burst.  If all retries
-           * return 0 → (B), fall to cooldown.
-           *
-           * With FTP_SENDFILE_EAGAIN_RETRIES = 256 and 1 ms sleep, we wait
-           * up to 256 ms before declaring a stall — enough to cover any
-           * realistic internet RTT and allow TCP ACKs to return.
-           */
-          int recovered = 0;
-          for (int r = 0; r < FTP_SENDFILE_EAGAIN_RETRIES; r++) {
-            usleep(FTP_SENDFILE_EAGAIN_SLEEP_US);
-            ssize_t r_sent =
-                pal_sendfile(session->data_fd, node.fd, &offset,
-                             (remaining > (size_t)FTP_RETR_SENDFILE_CHUNK)
-                                 ? (size_t)FTP_RETR_SENDFILE_CHUNK
-                                 : remaining);
-            if (r_sent > 0) {
-              /* TCP backpressure cleared — count as sent and continue */
-              sf_sent_any = 1;
-              remaining -= (size_t)r_sent;
-              bytes_sent += (uint64_t)r_sent;
-              session->last_activity = time(NULL);
-              atomic_fetch_add(&session->stats.bytes_sent, (uint64_t)r_sent);
-#if defined(POSIX_FADV_DONTNEED) && !defined(PLATFORM_PS4) && !defined(PS4)
-              if (node.fd >= 0) {
-                off_t evict_start = offset - (off_t)r_sent;
-                if (evict_start >= 0) {
-                  (void)posix_fadvise(node.fd, evict_start,
-                                      (off_t)r_sent, POSIX_FADV_DONTNEED);
-                }
-              }
-#endif
-              recovered = 1;
-              break;
-            }
-            if ((r_sent < 0) && (errno == EINTR)) {
-              r--; /* don't count EINTR as a retry */
-            }
-          }
-
-          if (recovered != 0) {
-            continue; /* back to sendfile burst */
-          }
-
-          /* True driver stall (all retries failed) */
-          vfs_set_offset(&node, (uint64_t)offset);
-          if (sf_sent_any == 0) {
-            use_sendfile = 0;
-          }
-          break;
-        }
-
-        sf_sent_any = 1;
-        remaining -= (size_t)sent;
-        bytes_sent += (uint64_t)sent;
-        session->last_activity = time(NULL);
-        atomic_fetch_add(&session->stats.bytes_sent, (uint64_t)sent);
-
-        /*
-         * Evict pages we have already sent from the kernel page cache.
-         *
-         *   Without this hint, the kernel caches every page of the source
-         *   file as it is DMA'd to the socket buffer.  For large transfers
-         *   (12–60 GB) the page cache fills all available RAM; the kernel
-         *   then spends increasing time on page reclaim, causing the
-         *   observed monotonic throughput drop from 260 Mbps toward 0.
-         *
-         *   POSIX_FADV_DONTNEED marks the just-sent pages as eligible for
-         *   immediate eviction (they remain accessible but are freed under
-         *   memory pressure before any other pages), keeping cache pressure
-         *   flat regardless of file size.
-         *
-         *   Safe on Linux AND FreeBSD/PS5: posix_fadvise(DONTNEED) on a
-         *   read-only fd simply marks pages as low-priority — it does not
-         *   write data or invalidate valid mappings.  The previous guard
-         *   "#if defined(__linux__)" was an oversight; PS5 also supports
-         *   posix_fadvise(2) and benefits from the same eviction hint.
-         *   (The sendfile-internal mapping concern in pal_fileio.c is about
-         *   F_NOCACHE on the same fd being passed to sendfile(), which is
-         *   a different code path — it does not apply here.)
-         */
-#if defined(POSIX_FADV_DONTNEED) && !defined(PLATFORM_PS4) && !defined(PS4)
-        if (node.fd >= 0) {
-          off_t evict_start = offset - (off_t)sent;
-          if (evict_start >= 0) {
-            (void)posix_fadvise(node.fd, evict_start,
-                                (off_t)sent, POSIX_FADV_DONTNEED);
-          }
-        }
-#endif
-      }
-      pal_socket_uncork(session->data_fd);
-
-      if (remaining == 0U) {
-        break; /* transfer complete */
-      }
-      /* use_sendfile == 0: permanent fallback, drop through */
-      /* use_sendfile != 0: stalled mid-transfer, fall through to read() cooldown */
-    }
-
-    /*-- read() path: cooldown (limited) or finish (unlimited) --*/
-    if (buf == NULL) {
-      buf = ftp_buffer_acquire();
-      buf_sz = ftp_buffer_size();
-    }
-    if (buf == NULL) {
-      remaining = 1U; /* can't allocate buffer, force 426 */
-      break;
-    }
-
-    /*
-     * If sendfile is still eligible, run cooldown for SENDFILE_COOLDOWN_BYTES
-     * then break back to the outer loop to retry sendfile.
-     * If sendfile is permanently disabled, run until transfer complete.
-     */
-    int can_retry_sf = ((vfs_get_caps(&node) & VFS_CAP_SENDFILE) != 0U) &&
-                       (use_sendfile != 0) &&
-                       (bytes_sent > 0U) &&
-                       (remaining > SENDFILE_COOLDOWN_BYTES);
-
-    size_t cooldown_left = can_retry_sf ? SENDFILE_COOLDOWN_BYTES : remaining;
-    int read_error = 0;
-
-    pal_socket_cork(session->data_fd);
-    while ((remaining > 0U) && (cooldown_left > 0U)) {
-      size_t want = (remaining < buf_sz) ? remaining : buf_sz;
-      if (want > cooldown_left) {
-        want = cooldown_left;
-      }
-      ssize_t n = vfs_read(&node, buf, want);
-      if (n <= 0) {
-        if ((n < 0) && (errno == EINTR)) {
-          continue;
-        }
-        read_error = 1;
-        break;
-      }
-
-      ssize_t sent = ftp_session_send_data(session, buf, (size_t)n);
-      if (sent != n) {
-        remaining = 1U;
-        read_error = 1;
-        break;
-      }
-
+    if (sent > 0) {
+      remaining -= (size_t)sent;
       bytes_sent += (uint64_t)sent;
-      remaining -= (size_t)n;
-      cooldown_left -= (size_t)n;
       session->last_activity = time(NULL);
+      atomic_fetch_add(&session->stats.bytes_sent, (uint64_t)sent);
 
-      /* Evict pages already sent; same rationale as the sendfile path. */
+      /* Evict pages already sent from the kernel page cache. */
 #if defined(POSIX_FADV_DONTNEED) && !defined(PLATFORM_PS4) && !defined(PS4)
       if (node.fd >= 0) {
-        off_t sent_end = (off_t)(file_size - (uint64_t)remaining);
-        off_t evict_start = sent_end - (off_t)sent;
+        off_t evict_start = offset - (off_t)sent;
         if (evict_start >= 0) {
           (void)posix_fadvise(node.fd, evict_start,
                               (off_t)sent, POSIX_FADV_DONTNEED);
         }
       }
 #endif
+      continue;
     }
-    pal_socket_uncork(session->data_fd);
 
-    if (read_error != 0) {
+    if ((sent < 0) && (errno == EINTR)) {
+      continue;
+    }
+
+    /*
+     * Fatal storage error — EIO / ESTALE / EBADF / EFAULT.
+     * Do NOT retry sendfile on a bad vnode — PS5/PS4 can KP.
+     */
+    if ((sent < 0) && ((errno == EIO) || (errno == ESTALE) ||
+                       (errno == EBADF) || (errno == EFAULT))) {
+      remaining = 1U;
       break;
     }
 
-    /* After cooldown, re-enable sendfile for retry */
-    if ((can_retry_sf != 0) && (remaining > 0U)) {
-      use_sendfile = 1;
-      /* Sync offset for sendfile: vfs_read already advanced the
-         internal file position, read it back for sendfile's &offset */
-      offset = (off_t)(file_size - (uint64_t)remaining);
+    /*
+     * sent == 0 or sent < 0 with EAGAIN:
+     * TCP back-pressure or platform driver stall.
+     * Retry up to FTP_SENDFILE_EAGAIN_RETRIES times.
+     */
+    {
+      int recovered = 0;
+      for (int r = 0; r < FTP_SENDFILE_EAGAIN_RETRIES; r++) {
+        usleep(FTP_SENDFILE_EAGAIN_SLEEP_US);
+        ssize_t r_sent =
+            pal_sendfile(session->data_fd, node.fd, &offset,
+                         (remaining > (size_t)FTP_RETR_SENDFILE_CHUNK)
+                             ? (size_t)FTP_RETR_SENDFILE_CHUNK
+                             : remaining);
+        if (r_sent > 0) {
+          remaining -= (size_t)r_sent;
+          bytes_sent += (uint64_t)r_sent;
+          session->last_activity = time(NULL);
+          atomic_fetch_add(&session->stats.bytes_sent, (uint64_t)r_sent);
+#if defined(POSIX_FADV_DONTNEED) && !defined(PLATFORM_PS4) && !defined(PS4)
+          if (node.fd >= 0) {
+            off_t evict_start = offset - (off_t)r_sent;
+            if (evict_start >= 0) {
+              (void)posix_fadvise(node.fd, evict_start,
+                                  (off_t)r_sent, POSIX_FADV_DONTNEED);
+            }
+          }
+#endif
+          recovered = 1;
+          break;
+        }
+        if ((r_sent < 0) && (errno == EINTR)) {
+          r--; /* don't count EINTR as a retry */
+        }
+        /* On fatal error (EIO etc.), stop retrying immediately */
+        if ((r_sent < 0) && ((errno == EIO) || (errno == ESTALE) ||
+                             (errno == EBADF) || (errno == EFAULT))) {
+          break;
+        }
+      }
+
+      if (recovered) {
+        continue; /* back to sendfile loop */
+      }
     }
+
+    /* Unrecoverable — abort transfer */
+    remaining = 1U;
+    break;
   }
 
-  ftp_buffer_release(buf);
-#undef SENDFILE_COOLDOWN_BYTES
+  pal_socket_uncork(session->data_fd);
 
   /* Cleanup */
   vfs_close(&node);
@@ -1724,28 +1564,21 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
 #endif
 
   /*
-   * Evict written pages from the kernel page cache.
+   * DELIBERATELY SKIP posix_fadvise(DONTNEED) on the uploaded file.
    *
-   *   Without this hint, every small file (<2 MB) written via STOR
-   *   stays pinned in the page cache.  After thousands of files from
-   *   a game directory (AstroBot, etc.), the page cache fills all
-   *   available RAM; the kernel then spends increasing time on page
-   *   reclaim, causing the observed monotonic throughput drop from
-   *   80 MB/s towards KB/s and eventual console unresponsiveness.
+   * On FreeBSD/PS5, POSIX_FADV_DONTNEED on a writable fd triggers a
+   * synchronous flush of all dirty pages through the filesystem's write
+   * path (PFS AES-XTS crypto on PS5) before evicting them from the page
+   * cache.  For a 12 GB upload this adds seconds of post-transfer latency
+   * with no benefit — the kernel already performs async writeback when
+   * memory pressure demands it.
    *
-   *   POSIX_FADV_DONTNEED on the written fd tells the kernel it can
-   *   reclaim those pages immediately.  This is the same eviction
-   *   pattern already used in pal_fileio.c for copy operations
-   *   (both src and dst fds receive DONTNEED after copy).
-   *
-   *   Only the PS4 platform is excluded: its libc does not export
-   *   posix_fadvise(2).  PS5 (FreeBSD-based) and Linux both support it.
+   * The page cache exhaustion concern (thousands of small files filling
+   * RAM) is real, but the synchronous flush penalty is worse.  The kernel
+   * reclaims clean pages under pressure automatically; if this becomes
+   * a problem, a future fix should use periodic asynchronous eviction
+   * (e.g. a background thread calling fadvise in idle time).
    */
-#if defined(POSIX_FADV_DONTNEED) && !defined(PLATFORM_PS4) && !defined(PS4)
-  if (fd >= 0) {
-    (void)posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
-  }
-#endif
   pal_file_close(fd);
   ftp_session_close_data_connection(session);
   session->restart_offset = 0;
@@ -1943,20 +1776,11 @@ ftp_error_t cmd_APPE(ftp_session_t *session, const char *args) {
 #endif
 
   /*
-   * Evict written pages from the kernel page cache.
-   *
-   *   Same rationale as cmd_STOR: without this hint, each small file
-   *   appended via APPE accumulates in the page cache, contributing
-   *   to the same progressive RAM exhaustion and speed degradation.
-   *
-   *   POSIX_FADV_DONTNEED on the written fd tells the kernel it can
-   *   reclaim those pages immediately.
+   * DELIBERATELY SKIP posix_fadvise(DONTNEED) — same rationale as cmd_STOR.
+   * Synchronous flush through PFS crypto on PS5 adds seconds of latency
+   * after every upload with no benefit.  The kernel handles page reclaim
+   * automatically under memory pressure.
    */
-#if defined(POSIX_FADV_DONTNEED) && !defined(PLATFORM_PS4) && !defined(PS4)
-  if (fd >= 0) {
-    (void)posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
-  }
-#endif
   pal_file_close(fd);
   ftp_buffer_release(buffer);
   ftp_session_close_data_connection(session);

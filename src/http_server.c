@@ -1156,83 +1156,57 @@ static int http_handle_request(http_connection_t *conn) {
    */
   if (response->sendfile_fd >= 0) {
     /*
-     * FILE DOWNLOAD — two paths based on filesystem safety
+     * FILE DOWNLOAD — zero-copy sendfile only.
      *
-     * PATH A: sendfile_safe == 1  (Linux, macOS, FreeBSD ufs/zfs)
-     *   pal_sendfile() → zero-copy DMA from page-cache to NIC.
+     * pal_sendfile() → DMA from page-cache to NIC.
+     * No fallback path: if the kernel cannot sendfile(2) this fd,
+     * the transfer fails and the connection is closed.
      *
-     * PATH B: sendfile_safe == 0  (PS5/PS4 exFAT, PFS, nullfs, msdosfs)
-     *   pread() + pal_send_all() — explicit userspace copy.
-     *
-     *   WHY: On PS5/PS4 (FreeBSD), calling sendfile(2) on exFAT, msdosfs,
-     *   nullfs, pfsmnt or pfs vnodes dereferences a null pager function
-     *   pointer inside the kernel and causes an IMMEDIATE KERNEL PANIC.
-     *   errno is never set — execution never returns to userspace.
-     *   The EINVAL fallback in pal_sendfile() therefore never executes.
-     *   The ONLY safe solution is to never call sendfile() on these FSes.
-     *
-     *   api_download() (http_api.c) sets sendfile_safe via fstatfs() on
-     *   the open fd before returning the http_response_t to us.
+     * PS5 EAGAIN QUIRK: chunks >= 1 MB can trigger mbuf starvation
+     * in PS5's FreeBSD kernel, returning EAGAIN with sbytes=0 even
+     * on blocking sockets.  We retry the same chunk after a 1 ms
+     * yield — same strategy as ftp_commands.c cmd_RETR.
      */
     off_t  sf_offset    = (off_t)response->sendfile_offset;
     size_t sf_remaining = response->sendfile_count;
 
-    if (response->sendfile_safe) {
-      /* PATH A: zero-copy sendfile */
-      while (sf_remaining > 0U) {
-        size_t chunk = sf_remaining;
-        if (chunk > (size_t)HTTP_SENDFILE_CHUNK_SIZE) {
-          chunk = (size_t)HTTP_SENDFILE_CHUNK_SIZE;
-        }
-        ssize_t sent = pal_sendfile(conn->fd, response->sendfile_fd,
-                                    &sf_offset, chunk);
-        if (sent < 0) { break; }
-        if (sent == 0) {
-          if (errno == EINTR) { continue; }
+    while (sf_remaining > 0U) {
+      size_t chunk = sf_remaining;
+      if (chunk > (size_t)HTTP_SENDFILE_CHUNK_SIZE) {
+        chunk = (size_t)HTTP_SENDFILE_CHUNK_SIZE;
+      }
+      ssize_t sent = pal_sendfile(conn->fd, response->sendfile_fd,
+                                  &sf_offset, chunk);
+      if (sent < 0) { break; }
+      if (sent == 0) {
+        if (errno == EINTR) { continue; }
+        if (errno == EAGAIN) {
+          /* PS5 mbuf starvation — bounded retry (max 16 attempts, 1 ms each).
+           * Same strategy as ftp_commands.c cmd_RETR but capped to prevent
+           * infinite blocking of the single-threaded event loop.
+           *
+           * Use for(;;) rather than do…while(): continue on EINTR must
+           * jump to the top of the loop body, not the condition check. */
+          int eagain_retries = 0;
+          for (;;) {
+            usleep(1000); /* 1 ms — let mbuf drain */
+            sent = pal_sendfile(conn->fd, response->sendfile_fd,
+                                &sf_offset, chunk);
+            if (sent > 0) { break; }           /* recovered */
+            if (sent < 0) { break; }           /* fatal — handled below */
+            if (errno == EINTR) { continue; }  /* restart, don't count */
+            if (errno != EAGAIN) { break; }    /* unexpected errno — bail */
+            if (++eagain_retries >= 16) { break; }
+          }
+          if (sent > 0) {
+            sf_remaining -= (size_t)sent;
+            continue;
+          }
           break;
         }
-        sf_remaining -= (size_t)sent;
+        break;
       }
-
-    } else {
-      /* PATH B: pread + send_all (PS5/PS4 safe) */
-      /*
-       * Heap-allocate the read buffer — HTTP_DOWNLOAD_PREAD_CHUNK (2 MB)
-       * on the stack would overflow the event-loop thread's stack on PS5.
-       * On malloc failure, fall back to a small on-stack buffer so the
-       * transfer degrades in speed rather than aborting.
-       */
-      uint8_t  dl_stack[4096];
-      uint8_t *dl_buf = (uint8_t *)malloc(HTTP_DOWNLOAD_PREAD_CHUNK);
-      size_t   dl_cap = (dl_buf != NULL)
-                            ? (size_t)HTTP_DOWNLOAD_PREAD_CHUNK
-                            : sizeof(dl_stack);
-      if (dl_buf == NULL) {
-        dl_buf = dl_stack;
-      }
-
-      int dl_err = 0;
-      while (sf_remaining > 0U) {
-        size_t  want = (sf_remaining < dl_cap) ? sf_remaining : dl_cap;
-        ssize_t nr   = pread(response->sendfile_fd, dl_buf, want,
-                             sf_offset);
-        if (nr <= 0) {
-          if ((nr < 0) && (errno == EINTR)) { continue; }
-          dl_err = 1;
-          break;
-        }
-        if (pal_send_all(conn->fd, dl_buf, (size_t)nr, 0) < 0) {
-          dl_err = 1;
-          break;
-        }
-        sf_offset    += (off_t)nr;
-        sf_remaining -= (size_t)nr;
-      }
-      (void)dl_err;
-
-      if (dl_buf != dl_stack) {
-        free(dl_buf);
-      }
+      sf_remaining -= (size_t)sent;
     }
 
     close(response->sendfile_fd);

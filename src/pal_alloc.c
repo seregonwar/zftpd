@@ -40,7 +40,13 @@ SOFTWARE.
 #include <stdlib.h>
 
 #ifndef PAL_ALLOC_DEFAULT_SIZE
-#define PAL_ALLOC_DEFAULT_SIZE (8U * 1024U * 1024U)
+/*
+ * 16 MB — must hold two page-aligned PAL_FILE_COPY_BUFFER_SIZE (4 MB)
+ * allocations plus buddy-allocator overhead (16-byte headers).
+ * The buddy allocator rounds up 4 MB+16 to 8 MB per allocation.
+ * 2 × 8 MB = 16 MB minimum for the double-buffer copy pipeline.
+ */
+#define PAL_ALLOC_DEFAULT_SIZE (16U * 1024U * 1024U)
 #endif
 
 #ifndef PAL_ALLOC_MIN_ORDER

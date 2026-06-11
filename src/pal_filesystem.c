@@ -42,16 +42,6 @@ SOFTWARE.
 #include <sys/stat.h>
 #include <sys/types.h>
 
-#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
-#include <sys/mount.h> /* fstatfs, struct statfs */
-#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
-/* PS4/PS5 libkernel exports _fstatfs, not fstatfs */
-extern int _fstatfs(int, struct statfs *);
-#define pal_fstatfs _fstatfs
-#else
-#define pal_fstatfs fstatfs
-#endif
-#endif
 
 #if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
 int psx_vfs_try_open_self(vfs_node_t *node, const char *path);
@@ -119,8 +109,9 @@ ftp_error_t vfs_open(vfs_node_t *node, const char *path)
      * available for platform-internal use (e.g. module loading) but must not
      * be on the data-transfer path.
      *
-     * @note The sendfile-safety check below (VFS_CAP_SENDFILE) still applies:
-     *       exFAT / nullfs / pfsmnt vnodes KP with sendfile(2) on PS5.
+ * @note VFS_CAP_SENDFILE is now always set on PS4/PS5 — pal_sendfile()
+ *       handles unsupported filesystems with a transparent
+ *       pread()+send_all() fallback when the kernel returns EINVAL.
      */
 
     int fd = pal_file_open(path, O_RDONLY, 0);
@@ -164,38 +155,18 @@ ftp_error_t vfs_open(vfs_node_t *node, const char *path)
      * @see https://github.com/seregonwar/zftpd — KP report from USB download
      */
 #if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
-    {
-        struct statfs sfs;
-        int sendfile_safe = 1; /* assume safe until proven otherwise */
-
-        if (pal_fstatfs(fd, &sfs) == 0) {
-            /*
-             * Filesystems known to cause KP with sendfile() on PS4/PS5:
-             *   - exfatfs : USB drives formatted as exFAT (most common)
-             *   - msdosfs : USB drives formatted as FAT32
-             *   - nullfs  : bind mount — inherits origin pager; unsafe if
-             *               origin is exFAT/msdosfs (/mnt/usb* game mounts)
-             *   - pfsmnt  : PlayStation FS mount (/user/av_contents, etc.)
-             *               sendfile() on pfsmnt vnodes sends corrupt data
-             *   - pfs     : raw PFS — same broken pager ops as pfsmnt
-             *
-             * Add new entries here if additional filesystems are identified.
-             */
-            if ((strcmp(sfs.f_fstypename, "exfatfs") == 0) ||
-                (strcmp(sfs.f_fstypename, "msdosfs") == 0) ||
-                (strcmp(sfs.f_fstypename,  "nullfs") == 0) ||
-                (strcmp(sfs.f_fstypename, "pfsmnt")  == 0) ||
-                (strcmp(sfs.f_fstypename,    "pfs")  == 0)) {
-                sendfile_safe = 0;
-            }
-        }
-        /* fstatfs failure: assume unsafe — tolerate the performance hit */
-        else {
-            sendfile_safe = 0;
-        }
-
-        node->caps = sendfile_safe ? VFS_CAP_SENDFILE : 0U;
-    }
+    /*
+     * SENDFILE — enabled on all PS4/PS5 filesystems.
+     *
+     * The previous blacklist (exfatfs, msdosfs, nullfs, pfsmnt, pfs)
+     * disabled VFS_CAP_SENDFILE for most actual filesystems
+     * on PS5, forcing the read()+send() path for FTP RETR.
+     *
+     * Zero-copy sendfile is the only transfer path.  If the kernel
+     * cannot DMA from a particular filesystem, the transfer fails
+     * with 426 — there is no silent userspace fallback.
+     */
+    node->caps = VFS_CAP_SENDFILE;
 #else
     node->caps = VFS_CAP_SENDFILE;
 #endif

@@ -34,7 +34,6 @@ SOFTWARE.
 
 #include "pal_fileio.h"
 #include "ftp_log.h"
-#include "pal_alloc.h"
 #include "pal_network.h"
 #include <dirent.h>
 #include <errno.h>
@@ -42,6 +41,7 @@ SOFTWARE.
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
@@ -344,52 +344,12 @@ ssize_t pal_sendfile(int sock_fd, int file_fd, off_t *offset, size_t count) {
     /*
      * EINVAL / ENOSYS / ENXIO / other unexpected sendfile() error.
      *
-     * On PS5 and PS4, sendfile(2) is not supported for every file+socket
-     * combination.  Known cases:
-     *   - exFAT / FAT32 USB drives: sendfile can return EINVAL because
-     *     the kernel vnode driver for exFAT does not implement the
-     *     sendfile vnode operation.
-     *   - Special pseudo-files (pipes, device nodes, etc.)
-     *
-     * If sbytes == 0 (sendfile failed before sending a single byte) we
-     * transparently fall back to pread(2) + pal_send_all().  The caller
-     * never notices the switch — it just receives the expected data.
-     *
-     * If sbytes > 0 (sendfile sent some data then failed with EINVAL,
-     * which is unusual but possible) we continue the fallback from the
-     * already-advanced *offset so no bytes are skipped or duplicated.
-     *
-     * IMPORTANT: this fallback MUST NOT be used for EIO/ESTALE — those
-     * errors indicate the underlying storage is gone and pread() will
-     * either also fail or return stale data from an inconsistent vnode.
-     * They are handled in the branch above.
+     * No fallback — sendfile is the only data path.  If the kernel
+     * cannot DMA from this fd, the caller receives the error and
+     * must abort the transfer rather than silently degrading to
+     * a userspace copy.
      */
-    static _Thread_local char fb_buf[FALLBACK_BUFFER_SIZE];
-
-    size_t fb_remaining = count - (size_t)sbytes;
-
-    while (fb_remaining > 0U) {
-      size_t chunk = (fb_remaining < (size_t)FALLBACK_BUFFER_SIZE)
-                         ? fb_remaining
-                         : (size_t)FALLBACK_BUFFER_SIZE;
-
-      ssize_t nread = pread(file_fd, fb_buf, chunk, *offset);
-      if (nread <= 0) {
-        /* EOF or read error — return what we managed to send */
-        return (sbytes > 0) ? sbytes : -1;
-      }
-
-      ssize_t nsent = pal_send_all(sock_fd, fb_buf, (size_t)nread, 0);
-      if (nsent < 0) {
-        return (sbytes > 0) ? sbytes : -1;
-      }
-
-      *offset      += (off_t)nsent;
-      sbytes       += (off_t)nsent;
-      fb_remaining -= (size_t)nsent;
-    }
-
-    return sbytes;
+    return (sbytes > 0) ? sbytes : -1;
   }
 
 #else
@@ -448,7 +408,7 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
 
   int src_fd = -1;
   int dst_fd = -1;
-  uint8_t *copy_buf = NULL; /* heap-allocated; freed in cleanup */
+  uint8_t *copy_buf = NULL; /* mmap-allocated; freed in cleanup */
   ftp_error_t out_err = FTP_ERR_FILE_WRITE;
 
   /*
@@ -657,15 +617,20 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
   }
 
   /*
-   * DESIGN RATIONALE — heap vs. static _Thread_local:
+   * DESIGN RATIONALE — mmap vs. buddy allocator:
    *
-   * static _Thread_local would allocate PAL_FILE_COPY_BUFFER_SIZE (1 MB on
-   * PS4/PS5) permanently for every thread that ever calls this function,
-   * for the thread's entire lifetime — even when idle between transfers.
-   * With N concurrent FTP sessions that means N MB of non-reclaimable RSS.
+   * The buddy-allocator arena (16 MB) is shared by HTTP buffers, FTP
+   * session state, and all other daemon allocations.  Two page-aligned
+   * 4 MB buffers need 2 × 8 MB (buddy rounding) = 16 MB of contiguous
+   * free space — which is the ENTIRE arena.  Any prior allocation (even
+   * a few KB for an HTTP request header) fragments the arena and makes
+   * the second pipeline buffer allocation fail, forcing a silent fallback
+   * to the serial path at ~135 MB/s instead of the pipelined 215 MB/s.
    *
-   * A single malloc/free per copy call returns the memory immediately after
-   * the operation, keeping the daemon's footprint minimal when idle.
+   * mmap(MAP_ANONYMOUS|MAP_PRIVATE) gets fresh page-aligned pages
+   * directly from the kernel, bypassing the buddy arena entirely.
+   * Memory is released with munmap() immediately after the copy,
+   * keeping the daemon footprint minimal when idle.
    */
   /*=========================================================================*
    * COPY LOOP
@@ -679,27 +644,30 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
   /*-----------------------------------------------------------------------*
    * Double-buffer copy pipeline
    *
-   * Allocate both buffers up-front.  If either malloc fails, fall through
-   * to the serial path (pal_malloc returns NULL gracefully).
+   * Allocate both buffers with mmap() — page-aligned, no arena pressure.
+   * If either mmap fails (extremely unlikely: only under severe virtual
+   * memory exhaustion), fall through to the serial path.
    *-----------------------------------------------------------------------*/
   {
-    uint8_t *dbuf0 = (uint8_t *)pal_malloc(PAL_FILE_COPY_BUFFER_SIZE);
-    uint8_t *dbuf1 = (uint8_t *)pal_malloc(PAL_FILE_COPY_BUFFER_SIZE);
+    uint8_t *dbuf0 = (uint8_t *)mmap(NULL, PAL_FILE_COPY_BUFFER_SIZE,
+                                      PROT_READ | PROT_WRITE,
+                                      MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (dbuf0 == MAP_FAILED) { dbuf0 = NULL; }
+    uint8_t *dbuf1 = (uint8_t *)mmap(NULL, PAL_FILE_COPY_BUFFER_SIZE,
+                                      PROT_READ | PROT_WRITE,
+                                      MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (dbuf1 == MAP_FAILED) { dbuf1 = NULL; }
 
-    /* Log arena state immediately after the two allocs so we can correlate
-     * with SceShellCore heap pressure messages in the system log. */
+    /* Log pipeline buffer acquisition — mmap bypasses the buddy arena
+     * so there is no arena_inuse/peak diagnostic to report.  On PS5
+     * MAP_ANONYMOUS is backed by the system VM and never fragments. */
     {
-      pal_alloc_stats_t ast;
-      pal_alloc_get_stats(&ast);
       char msg[256];
       snprintf(msg, sizeof(msg),
-               "[XDEV] pipeline alloc: buf0=%s buf1=%s "
-               "arena_inuse=%llu peak=%llu failures=%llu file=%s",
+               "[XDEV] pipeline mmap: buf0=%s buf1=%s bufsz=%u file=%s",
                (dbuf0 != NULL) ? "ok" : "NULL",
                (dbuf1 != NULL) ? "ok" : "NULL",
-               (unsigned long long)ast.bytes_in_use,
-               (unsigned long long)ast.bytes_peak,
-               (unsigned long long)ast.failures,
+               (unsigned)PAL_FILE_COPY_BUFFER_SIZE,
                src_path);
       ftp_log_line((dbuf0 && dbuf1) ? FTP_LOG_INFO : FTP_LOG_WARN, msg);
     }
@@ -885,8 +853,8 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
       pthread_cond_destroy(&pipe.cv_ready);
       pthread_cond_destroy(&pipe.cv_free);
 
-      pal_free(dbuf0);
-      pal_free(dbuf1);
+      (void)munmap(dbuf0, PAL_FILE_COPY_BUFFER_SIZE);
+      (void)munmap(dbuf1, PAL_FILE_COPY_BUFFER_SIZE);
 
       if (thread_ok != 0) {
         /* Pipeline ran (success or failure) — skip serial fallback */
@@ -897,22 +865,22 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
       }
       /* thread_ok == 0: fall through to serial path (already logged above) */
     } else {
-      /* One or both malloc failed — free whichever succeeded and fall through */
+      /* One or both mmap failed — release whichever succeeded, fall through */
       {
         char msg[256];
         snprintf(msg, sizeof(msg),
-                 "[XDEV] pipeline malloc failed (buf0=%s buf1=%s) — "
+                 "[XDEV] pipeline mmap failed (buf0=%s buf1=%s) — "
                  "falling back to serial copy for %s",
                  (dbuf0 != NULL) ? "ok" : "NULL",
                  (dbuf1 != NULL) ? "ok" : "NULL",
                  src_path);
         ftp_log_line(FTP_LOG_WARN, msg);
       }
-      pal_free(dbuf0);
-      pal_free(dbuf1);
+      if (dbuf0 != NULL) { (void)munmap(dbuf0, PAL_FILE_COPY_BUFFER_SIZE); }
+      if (dbuf1 != NULL) { (void)munmap(dbuf1, PAL_FILE_COPY_BUFFER_SIZE); }
     }
   }
-  /* --- Serial fallback (malloc failure or pthread_create failure) --- */
+  /* --- Serial fallback (mmap failure or pthread_create failure) --- */
 
   {
     char msg[256];
@@ -924,19 +892,19 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
     ftp_log_line(FTP_LOG_INFO, msg);
   }
 
-  copy_buf = (uint8_t *)pal_malloc(PAL_FILE_COPY_BUFFER_SIZE);
+  copy_buf = (uint8_t *)mmap(NULL, PAL_FILE_COPY_BUFFER_SIZE,
+                              PROT_READ | PROT_WRITE,
+                              MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+  if (copy_buf == MAP_FAILED) {
+    copy_buf = NULL;
+  }
   if (copy_buf == NULL) {
     {
-      pal_alloc_stats_t ast;
-      pal_alloc_get_stats(&ast);
       char msg[256];
       snprintf(msg, sizeof(msg),
-               "[XDEV] serial malloc failed: arena_inuse=%llu peak=%llu "
-               "failures=%llu buf_needed=%u src=%s",
-               (unsigned long long)ast.bytes_in_use,
-               (unsigned long long)ast.bytes_peak,
-               (unsigned long long)ast.failures,
+               "[XDEV] serial mmap failed: bufsz=%u errno=%d src=%s",
                (unsigned)PAL_FILE_COPY_BUFFER_SIZE,
+               errno,
                src_path);
       ftp_log_line(FTP_LOG_WARN, msg);
     }
@@ -1092,11 +1060,24 @@ copy_done:;
    * simply marks pages as low-priority; it never writes or invalidates data.
    */
 #if defined(POSIX_FADV_DONTNEED) && !defined(PLATFORM_PS4) && !defined(PS4)
+  /*
+   * POST-COPY CACHE EVICTION — source file only.
+   *
+   * After the copy pipeline drains the source file, all its pages are still
+   * pinned in the page cache (unless F_NOCACHE was effective).
+   * POSIX_FADV_DONTNEED marks them as immediately reclaimable.
+   *
+   * DELIBERATELY SKIP dst_fd: on FreeBSD/PS5, POSIX_FADV_DONTNEED on a
+   * writable fd triggers a synchronous flush of all dirty pages through
+   * the filesystem's write path (PFS crypto on PS5 adds 5-15 ms per extent)
+   * before evicting them.  This adds seconds of post-copy latency for large
+   * files and is the root cause of the USB→internal / internal→internal
+   * throughput regression observed between v1.4.0 and v1.5.0.  The kernel
+   * already performs async writeback when memory pressure demands it;
+   * an explicit sync is unnecessary and harmful.
+   */
   if (src_fd >= 0) {
     (void)posix_fadvise(src_fd, 0, 0, POSIX_FADV_DONTNEED);
-  }
-  if (dst_fd >= 0) {
-    (void)posix_fadvise(dst_fd, 0, 0, POSIX_FADV_DONTNEED);
   }
 #endif
 
@@ -1127,7 +1108,9 @@ copy_done:;
   out_err = FTP_OK;
 
 cleanup:
-  pal_free(copy_buf); /* safe: pal_free(NULL) is a no-op */
+  if (copy_buf != NULL) {
+    (void)munmap(copy_buf, PAL_FILE_COPY_BUFFER_SIZE);
+  }
   if (dst_fd >= 0) {
     (void)close(dst_fd);
   }

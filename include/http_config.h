@@ -70,19 +70,20 @@ SOFTWARE.
 /*
  * File transfer chunk size for sendfile() in /api/download.
  *
- * PS5 REGRESSION NOTE:
- *   PS5's modified FreeBSD kernel triggers an internal buffer limit with
- *   sendfile() chunks >= 1 MB, returning EAGAIN (sbytes = 0) even on
- *   nominally-blocking sockets.  Each EAGAIN costs a usleep(1 ms) yield
- *   (to avoid busy-spinning).  At 1 MB/chunk: 1.2 GB / 1 MB × 1 ms =
- *   ~1.2 s of extra sleep latency per download — the observed regression
- *   ("previously downloaded 1.2 GB immediately").
+ * 2 MB matches FTP_RETR_SENDFILE_CHUNK (ftp_config.h) and halves the
+ * sendfile() syscall count vs 1 MB (6 k vs 12 k per 12 GB file).
  *
- *   512 KB chunks stay well below the 1 MB trigger threshold, eliminating
- *   the EAGAIN storms while keeping syscall count reasonable (2× increase
- *   vs 1 MB, negligible vs I/O latency).
+ * PS5 EAGAIN QUIRK: chunks >= 1 MB can trigger mbuf starvation in
+ * PS5's FreeBSD kernel, returning EAGAIN with sbytes=0.  The HTTP
+ * sendfile loop in http_server.c now handles this with a 1 ms yield
+ * and retry, identical to the ftp_commands.c cmd_RETR strategy.
+ *
+ * Each EAGAIN costs ~1 ms.  At 2 MB/chunk on PS5: worst case ~6 k
+ * EAGAIN events × 1 ms = ~6 s per 12 GB file — negligible vs the
+ * total transfer time (12 GB / 1 Gbps ≈ 96 s).  On non-PS5 platforms
+ * EAGAIN never triggers, so the 2 MB chunk is pure throughput gain.
  */
-#define HTTP_SENDFILE_CHUNK_SIZE (512 * 1024)
+#define HTTP_SENDFILE_CHUNK_SIZE (2U * 1024U * 1024U)
 
 /* Thread stack size (bytes) */
 #ifndef HTTP_THREAD_STACK_SIZE
