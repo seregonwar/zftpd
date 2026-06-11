@@ -205,7 +205,7 @@ extern int _fstatfs(int, struct statfs *);
  * EMBEDDED RESOURCES (defined in http_resources.c)
  *===========================================================================*/
 
-extern const char *http_get_resource(const char *path, size_t *size);
+#include "http_resources.h"
 
 /*===========================================================================*
  * ROOT PATH CONFINEMENT
@@ -2604,22 +2604,18 @@ static http_response_t *api_copy(const http_request_t *request) {
 
   /*
    * Compute total size for progress UI.
-   * For a single file use stat(). For directories an exact total
-   * would require a full recursive scan — instead the browser
-   * passes an estimate via ?totalsize= from the original listing.
+   * For a single file use stat(). For directories compute the real
+   * recursive total so the progress bar is accurate.
    */
   {
     struct stat copy_st;
     uint64_t total_est = 0U;
     if (stat(safe_src, &copy_st) == 0) {
-      total_est = (uint64_t)copy_st.st_size;
-    }
-    /* Client may provide totalsize hint for dirs */
-    const char *ts_str = strstr(query, "totalsize=");
-    if (ts_str != NULL) {
-      uint64_t ts_val = (uint64_t)strtoull(ts_str + 10, NULL, 10);
-      if (ts_val > 0U) {
-        total_est = ts_val;
+      if (S_ISDIR(copy_st.st_mode)) {
+        int partial = 0;
+        total_est = http_dir_size_with_partial(safe_src, &partial);
+      } else {
+        total_est = (uint64_t)copy_st.st_size;
       }
     }
     atomic_store(&g_copy_progress.bytes_copied, 0U);
@@ -5642,39 +5638,11 @@ static http_response_t *api_dl_cancel(const http_request_t *request) {
  *===========================================================================*/
 
 /*---------------------------------------------------------------------------*
- * MIME type lookup — maps file extension to Content-Type.
- * Covers all file types used by the modular web UI.
- *---------------------------------------------------------------------------*/
-static const char *mime_for_ext(const char *path) {
-  const char *dot = strrchr(path, '.');
-  if (dot == NULL) return "application/octet-stream";
-  dot++; /* skip the '.' */
-  if (strcasecmp(dot, "html") == 0) return "text/html; charset=utf-8";
-  if (strcasecmp(dot, "css")  == 0) return "text/css; charset=utf-8";
-  if (strcasecmp(dot, "js")   == 0) return "application/javascript; charset=utf-8";
-  if (strcasecmp(dot, "json") == 0) return "application/json; charset=utf-8";
-  if (strcasecmp(dot, "png")  == 0) return "image/png";
-  if (strcasecmp(dot, "jpg")  == 0) return "image/jpeg";
-  if (strcasecmp(dot, "jpeg") == 0) return "image/jpeg";
-  if (strcasecmp(dot, "gif")  == 0) return "image/gif";
-  if (strcasecmp(dot, "svg")  == 0) return "image/svg+xml";
-  if (strcasecmp(dot, "ico")  == 0) return "image/x-icon";
-  if (strcasecmp(dot, "webp") == 0) return "image/webp";
-  if (strcasecmp(dot, "woff") == 0) return "font/woff";
-  if (strcasecmp(dot, "woff2")== 0) return "font/woff2";
-  if (strcasecmp(dot, "ttf")  == 0) return "font/ttf";
-  if (strcasecmp(dot, "map")  == 0) return "application/json";
-  return "application/octet-stream";
-}
-
-/*---------------------------------------------------------------------------*
- * serve_static — read files from HTTP_WEB_ROOT on the filesystem.
+ * serve_static — serve files from embedded http_resources.c (compiled-in).
  *
- * Replaces the previous embedded-resource approach (http_resources.c).
- * Files are read from disk at request time, which:
- *   1. Reduces payload binary size by ~10 MB
- *   2. Allows hot-reloading during development
- *   3. Supports the new modular CSS/JS file structure
+ * All web assets are embedded directly in the binary.  The frontend patch
+ * (disabling legacy Stream UI and blocking analytics) and the CSRF token
+ * are injected at request time for index.html.
  *
  * Path traversal is prevented by rejecting any URI containing "..".
  *---------------------------------------------------------------------------*/
@@ -5727,163 +5695,105 @@ static http_response_t *serve_static(const http_request_t *request) {
     return error_json(HTTP_STATUS_403_FORBIDDEN, "Path traversal blocked");
   }
 
-  /* Build full filesystem path: HTTP_WEB_ROOT + relative path */
-  char fspath[1024];
-  int n = snprintf(fspath, sizeof(fspath), "%s%s", HTTP_WEB_ROOT, path);
-  if (n < 0 || (size_t)n >= sizeof(fspath)) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Path too long");
-  }
-
-  /* Open and stat the file */
-  struct stat st;
-  if (stat(fspath, &st) != 0 || !S_ISREG(st.st_mode)) {
-    /* Fallback: try embedded resources (backward compat during transition) */
-    size_t esize = 0;
-    const char *econtent = http_get_resource(path, &esize);
-    if (econtent != NULL) {
-      http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
-      http_response_add_header(resp, "Content-Type", mime_for_ext(path));
-
-      /*
-       * Embedded index.html may come from older blobs.
-       * Force-disable legacy Stream UI and remove any stray text nodes that
-       * can appear above the topbar due malformed payload bytes.
-       */
-      if (strstr(path, "index.html") != NULL) {
-        char *src = (char *)malloc(esize + 1U);
-        if (src != NULL) {
-          memcpy(src, econtent, esize);
-          src[esize] = '\0';
-
-          const char *insert_at = strstr(src, "</head>");
-          size_t patch_len = strlen(k_frontend_patch);
-
-          if (insert_at != NULL) {
-            size_t prefix_len = (size_t)(insert_at - src);
-            size_t out_len = esize + patch_len;
-            char *out = (char *)malloc(out_len + 1U);
-            if (out != NULL) {
-              memcpy(out, src, prefix_len);
-              memcpy(out + prefix_len, k_frontend_patch, patch_len);
-              memcpy(out + prefix_len + patch_len, src + prefix_len,
-                     esize - prefix_len);
-              out[out_len] = '\0';
-              free(src);
-              if (http_response_set_body_owned(resp, out, out_len) == 0) {
-                return resp;
-              }
-              free(out);
-            }
-          }
-
-          free(src);
-        }
-      }
-
-      if (http_response_set_body(resp, econtent, esize) != 0) {
-        (void)http_response_set_body_ref(resp, econtent, esize);
-      }
-      return resp;
-    }
+  /* Look up embedded resource */
+  const http_resource_t *resource = NULL;
+  if (!http_resource_get(path, &resource) || resource == NULL) {
     http_response_t *resp = http_response_create(HTTP_STATUS_404_NOT_FOUND);
     const char *msg = "404 Not Found";
     http_response_set_body(resp, msg, strlen(msg));
     return resp;
   }
 
-  size_t size = (size_t)st.st_size;
-
-  /* Read file into memory */
-  FILE *fp = fopen(fspath, "rb");
-  if (fp == NULL) {
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Cannot open file");
-  }
-  char *content = (char *)malloc(size + 1);
-  if (content == NULL) {
-    fclose(fp);
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
-  }
-  size_t got = fread(content, 1, size, fp);
-  fclose(fp);
-  content[got] = '\0';
-
-  /* Apply runtime patch to disk-served index too (not only embedded). */
-  if (strstr(path, "index.html") != NULL) {
-    const char *insert_at = strstr(content, "</head>");
-    size_t patch_len = strlen(k_frontend_patch);
-    if (insert_at != NULL) {
-      size_t prefix_len = (size_t)(insert_at - content);
-      size_t out_len = got + patch_len;
-      char *out = (char *)malloc(out_len + 1U);
-      if (out != NULL) {
-        memcpy(out, content, prefix_len);
-        memcpy(out + prefix_len, k_frontend_patch, patch_len);
-        memcpy(out + prefix_len + patch_len, content + prefix_len,
-               got - prefix_len);
-        out[out_len] = '\0';
-        free(content);
-        content = out;
-        got = out_len;
-      }
-    }
-  }
+  const unsigned char *raw_data = resource->data;
+  size_t raw_size = resource->size;
+  int is_html = (strstr(path, "index.html") != NULL);
 
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
-  http_response_add_header(resp, "Content-Type", mime_for_ext(path));
-  http_response_add_header(resp, "Cache-Control", "no-cache");
+  http_response_add_header(resp, "Content-Type",
+                           is_html ? "text/html; charset=utf-8" : resource->content_type);
 
-#if ENABLE_WEB_UPLOAD
-  /* Inject CSRF token into HTML */
-  if (strstr(path, "index.html") != NULL) {
-    const char *token = http_csrf_get_token();
-    char meta_tag[128];
-    snprintf(meta_tag, sizeof(meta_tag),
-             "<meta name=\"csrf-token\" content=\"%s\">", token);
+  if (!is_html) {
+    if (http_response_set_body(resp, (const char *)raw_data, raw_size) != 0) {
+      (void)http_response_set_body_ref(resp, (const char *)raw_data, raw_size);
+    }
+    return resp;
+  }
 
-    const char *placeholder = "<!-- CSRF_TOKEN -->";
-    const char *found = strstr(content, placeholder);
+  /* ── index.html: inject frontend patch + optional CSRF token ── */
+  {
+    size_t patch_len = strlen(k_frontend_patch);
+    size_t buf_size = raw_size + patch_len + 256U;
+    char *buf = (char *)malloc(buf_size);
+    if (buf == NULL) {
+      http_response_destroy(resp);
+      return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+    }
 
-    if (found != NULL) {
-      size_t prefix_len = (size_t)(found - content);
-      size_t suffix_len = got - prefix_len - strlen(placeholder);
-      if (http_response_set_body_splice(
-              resp, content, prefix_len, meta_tag, strlen(meta_tag),
-              found + strlen(placeholder), suffix_len) == 0) {
-        free(content);
-        return resp;
+    memcpy(buf, (const char *)raw_data, raw_size);
+    size_t out_len = raw_size;
+
+    /* Inject frontend patch before </head> */
+    {
+      char *insert_at = strstr(buf, "</head>");
+      if (insert_at != NULL) {
+        size_t prefix_len = (size_t)(insert_at - buf);
+        size_t suffix_len = out_len - prefix_len;
+        memmove(insert_at + patch_len, insert_at, suffix_len);
+        memcpy(insert_at, k_frontend_patch, patch_len);
+        out_len += patch_len;
       }
     }
-  }
+
+#if ENABLE_WEB_UPLOAD
+    {
+      const char *token = http_csrf_get_token();
+      char meta_tag[128];
+      snprintf(meta_tag, sizeof(meta_tag),
+               "<meta name=\"csrf-token\" content=\"%s\">", token);
+
+      const char *placeholder = "<!-- CSRF_TOKEN -->";
+      char *found = strstr(buf, placeholder);
+      if (found != NULL) {
+        size_t prefix_len = (size_t)(found - buf);
+        size_t placelen = strlen(placeholder);
+        size_t taglen = strlen(meta_tag);
+        size_t suffix_len = out_len - prefix_len - placelen;
+
+        if (taglen <= placelen) {
+          memcpy(found, meta_tag, taglen);
+          if (taglen < placelen) {
+            memmove(found + taglen, found + placelen, suffix_len);
+          }
+          out_len = out_len - placelen + taglen;
+        } else {
+          size_t extra = taglen - placelen;
+          if (buf_size < out_len + extra + 1U) {
+            size_t new_size = out_len + extra + 256U;
+            char *tmp = (char *)realloc(buf, new_size);
+            if (tmp == NULL) {
+              free(buf);
+              http_response_destroy(resp);
+              return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+            }
+            buf = tmp;
+            buf_size = new_size;
+            found = buf + prefix_len;
+          }
+          memmove(found + taglen, found + placelen, suffix_len);
+          memcpy(found, meta_tag, taglen);
+          out_len = out_len - placelen + taglen;
+        }
+      }
+    }
 #endif
 
-  /*
-   * Two paths for sending file content:
-   *
-   *   SMALL FILE  (<= ~7 KB): set_body copies into resp->data inline
-   *   LARGE FILE  (> ~7 KB):  set_body_owned transfers ownership of the
-   *                            malloc'd buffer; http_handle_request()
-   *                            streams it via the mem_body path after
-   *                            sending headers.
-   *
-   *   ┌──────────────────────────────────────────────────┐
-   *   │  resp->data (8 KB)   │  mem_body (heap, any sz)  │
-   *   │  [headers + body]    │  [large body streamed]    │
-   *   └──────────────────────────────────────────────────┘
-   */
-  if (http_response_set_body(resp, content, got) == 0) {
-    /* Small file — fully contained in resp->data */
-    free(content);
-    return resp;
+    if (http_response_set_body_owned(resp, buf, out_len) == 0) {
+      return resp;
+    }
+    free(buf);
+    http_response_destroy(resp);
+    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Body allocation failed");
   }
-  /* Large file — transfer ownership of malloc'd content */
-  if (http_response_set_body_owned(resp, content, got) == 0) {
-    /* content ownership transferred, do NOT free */
-    return resp;
-  }
-  /* Both paths failed (should not happen) */
-  http_response_destroy(resp);
-  free(content);
-  return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Body allocation failed");
 }
 
 /*===========================================================================*

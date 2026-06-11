@@ -153,7 +153,7 @@ var ZFTPD = ZFTPD || {};
         r.ondblclick = function () {
           var isD = r.getAttribute('data-dir') === '1';
           if (isD) loadPanel(s, r.getAttribute('data-path'));
-          else window.location.href = Z.api.downloadUrl(r.getAttribute('data-path'));
+          else Z.download(Z.api.downloadUrl(r.getAttribute('data-path')));
         };
       })(row, i, side);
 
@@ -214,54 +214,105 @@ var ZFTPD = ZFTPD || {};
 
     var i = 0;
     var cancelled = false;
+    var progressTimer = null;
+    var totalItems = sel.length;
+    var doneItems = 0;
 
-    function next() {
-      if (cancelled || i >= sel.length) {
-        Z.hideTransferLock();
-        loadPanel(toSide, toPath);
-        if (!cancelled && i > 0) {
-          Z.notify('Copy complete', i + ' items copied to ' + toPath, 'ok');
-          /* Clear selection */
-          if (fromSide === 'left') _leftSelected = []; else _rightSelected = [];
-          loadPanel(fromSide, fromPath);
-        }
+    function stopPolling() {
+      if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
+    }
+
+    function finish(ok) {
+      stopPolling();
+      Z.hideTransferLock();
+      loadPanel(toSide, toPath);
+      if (!cancelled && ok && doneItems > 0) {
+        Z.notify('Copy complete', doneItems + ' of ' + totalItems + ' items copied to ' + toPath, 'ok');
+      }
+      if (fromSide === 'left') _leftSelected = []; else _rightSelected = [];
+      loadPanel(fromSide, fromPath);
+    }
+
+    function processNext() {
+      if (cancelled) {
+        finish(false);
         return;
       }
-      var entry = entries[sel[i++]];
-      if (!entry) { next(); return; }
+      if (i >= sel.length) {
+        finish(true);
+        return;
+      }
+      var entry = entries[sel[i]];
+      if (!entry) { i++; processNext(); return; }
 
       var srcPath = Z.join(fromPath, entry.name);
 
       Z.showTransferLock({
-        label: 'COPYING',
+        label: 'COPYING (' + (i + 1) + '/' + totalItems + ')',
         filename: entry.name,
         dest: toPath,
         onCancel: function () {
           cancelled = true;
-          Z.api.copyCancel().catch(function(){}); // Assuming there's a cancel endpoint
-          Z.hideTransferLock();
-          Z.notify('Copy cancelled', entry.name, 'wn');
+          Z.api.copyCancel().catch(function(){});
+          finish(false);
         }
       });
 
-      /* Fake progress based on time for now, or use an API polling if available */
-      var startTime = Date.now();
-      var fakeProgressInterval = setInterval(function() {
-         var elapsed = Math.floor((Date.now() - startTime) / 1000);
-         // Z.api.copyProgress() would go here in a real implementation
-         Z.updateTransferLock({ elapsed: elapsed + 's' });
-      }, 1000);
+      Z.api.copy(srcPath, toPath, entry.size || 0).then(function (resp) {
+        if (!resp || !resp.async) {
+          doneItems++;
+          i++;
+          processNext();
+          return;
+        }
 
-      Z.api.copy(srcPath, toPath, entry.size || 0).then(function () {
-        clearInterval(fakeProgressInterval);
-        next();
+        /* Poll /api/copy_progress until done */
+      var started = Date.now();
+      var prevBytes = 0;
+      var prevTime = Date.now();
+      progressTimer = setInterval(function () {
+          Z.api.copyProgress().then(function (p) {
+            if (cancelled) return;
+            var elapsed = Math.floor((Date.now() - started) / 1000);
+            if (p && p.active && !p.done) {
+              var pct = p.total_bytes > 0 ? Math.min(100, Math.round(p.bytes_copied * 100 / p.total_bytes)) : 0;
+              var now = Date.now();
+              var dt = (now - prevTime) / 1000;
+              var instantSpeed = dt > 0 ? (p.bytes_copied - prevBytes) / dt : 0;
+              prevBytes = p.bytes_copied;
+              prevTime = now;
+              Z.updateTransferLock({
+                pct: pct,
+                speed: instantSpeed > 0 ? Z.bps(instantSpeed) : (p.total_bytes > 0 && elapsed > 0 ? Z.bps(p.bytes_copied / elapsed) : ''),
+                elapsed: elapsed + 's'
+              });
+            } else if (p && p.done) {
+              stopPolling();
+              if (p.error) {
+                Z.notify('Copy failed', entry.name + ': ' + (p.error_msg || 'error'), 'er');
+              } else {
+                doneItems++;
+              }
+              i++;
+              processNext();
+            } else if (!p || !p.active) {
+              stopPolling();
+              if (!p || !p.error) doneItems++;
+              i++;
+              processNext();
+            }
+          }).catch(function () {
+            /* Poll failed, keep trying */
+          });
+        }, 500);
       }).catch(function (e) {
-        clearInterval(fakeProgressInterval);
-        Z.hideTransferLock();
-        Z.notify('Copy failed', entry.name + ': ' + e.message, 'er');
+        stopPolling();
+        Z.notify('Copy failed', entry.name + ': ' + (e.message || 'error'), 'er');
+        i++;
+        processNext();
       });
     }
-    next();
+    processNext();
   }
 
   /* ── Delete selected files in active panel ── */

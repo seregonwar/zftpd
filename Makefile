@@ -393,7 +393,7 @@ DEPENDS += $(patsubst $(OBJ_DIR)/mcp/%.o,$(DEP_DIR)/mcp/%.d,$(filter $(OBJ_DIR)/
 
 .PHONY: all clean distclean install test help bin deploy deploy-i deploy-nc doctor-ps4
 .PHONY: all-platforms release-all debug-all ffi ffi-java ffi-rust ffi-python resources
-.PHONY: ps5-hook-blob web-deploy
+.PHONY: ps5-hook-blob
 
 # ============================================================================
 # PS5 NET FILTER HOOK — Kernel-safe compilation pipeline
@@ -767,14 +767,14 @@ help:
 	@echo "  analyze     - Run static analysis (requires clang)"
 	@echo "  test        - Run test suite"
 	@echo "  help        - Display this help message"
-	@echo "  web-deploy  - Copy web UI to console filesystem"
+	@echo "  resources   - Generate embedded web resources (src/http_resources.c)"
 	@echo ""
 	@echo "Variables:"
 	@echo "  TARGET            - Target platform (linux, macos, ps3, ps4, ps5)"
 	@echo "  BUILD_TYPE        - Build configuration (debug, release)"
 	@echo "  ENABLE_LIBARCHIVE - Enable archive extraction (0/1, requires libarchive)"
 	@echo "  ENABLE_LIBCURL    - Enable URL downloads (0/1, requires libcurl)"
-	@echo "  WEB_DEPLOY_DIR    - Web UI deploy path (default: /data/zftpd/web)"
+	@echo "  WEB_DEPLOY_DIR    - Deprecated (web UI is now embedded in binary)"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make                          # Build for Linux (release)"
@@ -783,7 +783,7 @@ help:
 	@echo "  make BUILD_TYPE=debug         # Build debug version"
 	@echo "  make TARGET=ps4 BUILD_TYPE=debug  # PS4 debug build"
 	@echo "  make ENABLE_LIBARCHIVE=1 ENABLE_LIBCURL=1  # With extract + download"
-	@echo "  make web-deploy               # Deploy web UI to /data/zftpd/web/"
+	@echo "  make resources                  # Regenerate embedded web resources"
 	@echo ""
 	@echo "Current configuration:"
 	@echo "  Target:     $(TARGET)"
@@ -805,24 +805,15 @@ compile_commands.json:
 .PHONY: compile_commands.json
 
 #============================================================================
-# WEB DEPLOY — copy modular web UI to console filesystem
+#============================================================================
+# WEB DEPLOY — DEPRECATED
 #
-#   make web-deploy                    (uses default WEB_DEPLOY_DIR)
-#   make web-deploy WEB_DEPLOY_DIR=/mnt/usb/zftpd/web
-#
-# On PS5: files go to /data/zftpd/web/ (matching HTTP_WEB_ROOT)
+# All web assets are now embedded directly in the binary via
+# http_resources.c (run  make resources  to regenerate).
+# The web-deploy target is kept as a no-op for backward compatibility.
 #============================================================================
 
-WEB_DEPLOY_DIR ?= /data/zftpd/web
-
 web-deploy:
-	@echo "  [WEB]  Deploying web UI to $(WEB_DEPLOY_DIR)/"
-	@mkdir -p $(WEB_DEPLOY_DIR)/css
-	@mkdir -p $(WEB_DEPLOY_DIR)/js/views
-	@mkdir -p $(WEB_DEPLOY_DIR)/assets
-	@cp web/index.html           $(WEB_DEPLOY_DIR)/
-	@cp web/css/*.css            $(WEB_DEPLOY_DIR)/css/
-	@cp web/js/*.js              $(WEB_DEPLOY_DIR)/js/
-	@cp web/js/views/*.js        $(WEB_DEPLOY_DIR)/js/views/
-	@cp web/assets/*             $(WEB_DEPLOY_DIR)/assets/
+	@echo "  [WEB]  web-deploy is deprecated — web UI is now embedded in the binary"
+	@echo "  [WEB]  Run 'make resources' to regenerate src/http_resources.c"
 	@echo "  [WEB]  Done — $(shell find web/css web/js -name '*.css' -o -name '*.js' | wc -l | tr -d ' ') files deployed"

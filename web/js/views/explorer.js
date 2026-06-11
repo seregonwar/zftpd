@@ -123,7 +123,7 @@ var ZFTPD = ZFTPD || {};
     /* Click: navigate or download */
     card.onclick = function () {
       if (isDir) explorer.nav(path);
-      else window.location.href = Z.api.downloadUrl(path);
+      else Z.download(Z.api.downloadUrl(path));
     };
 
     /* Context menu */
@@ -179,16 +179,16 @@ var ZFTPD = ZFTPD || {};
       tr.innerHTML =
         '<td class="t-ic"><span class="fi-' + cat + '">' + (isDir ? ICO.folder : ICO.file) + '</span></td>' +
         '<td class="t-nm" title="' + e.name + '">' + e.name + '</td>' +
-        '<td class="t-ex">' + (ext ? '<span class="xb">' + ext + '</span>' : (isDir ? 'Folder' : '\u2014')) + '</td>' +
+        '<td class="t-ex">' + (isDir ? 'Folder' : (ext ? '<span class="xb">' + ext + '</span>' : '\u2014')) + '</td>' +
         '<td class="t-sz">' + (isDir ? '\u2014' : Z.bytes(e.size || 0)) + '</td>' +
         '<td class="t-dt">' + (e.mtime ? Z.relativeTime(e.mtime) : '\u2014') + '</td>';
+      tr.setAttribute('data-is-dir', isDir ? '1' : '0');
 
       tr.onclick = function () {
         var p = this.getAttribute('data-path');
-        var d = this.querySelector('.t-ex');
-        var isDirRow = d && d.textContent === 'Folder';
+        var isDirRow = this.getAttribute('data-is-dir') === '1';
         if (isDirRow) explorer.nav(p);
-        else window.location.href = Z.api.downloadUrl(p);
+        else Z.download(Z.api.downloadUrl(p));
       };
 
       tr.addEventListener('contextmenu', function (ev) {
@@ -196,8 +196,8 @@ var ZFTPD = ZFTPD || {};
         ev.stopPropagation();
         var p = this.getAttribute('data-path');
         var n = this.querySelector('.t-nm').textContent;
-        var d = this.querySelector('.t-ex').textContent === 'Folder';
-        showCtx(ev, { name: n, type: d ? 'directory' : 'file', size: 0 }, p, d);
+        var isDirRow = this.getAttribute('data-is-dir') === '1';
+        showCtx(ev, { name: n, type: isDirRow ? 'directory' : 'file', size: 0 }, p, isDirRow);
       });
 
       tbody.appendChild(tr);
@@ -302,7 +302,7 @@ var ZFTPD = ZFTPD || {};
 
     if (!isDir && path) {
       item(ICO.download, 'Download', false, function () {
-        window.location.href = Z.api.downloadUrl(path);
+        Z.download(Z.api.downloadUrl(path));
       });
     }
     if (path) {
@@ -383,11 +383,13 @@ var ZFTPD = ZFTPD || {};
 
   function doSendTo(entry, srcPath) {
     if (!Z.ensureTransferIdle()) return;
-    Z.modal.folderPicker('Send To…', Z.state.path).then(function (dst) {
+    Z.modal.folderPicker('Send To\u2026', Z.state.path).then(function (dst) {
       if (dst === null) return;
       if (!dst) dst = '/';
 
       var cancelled = false;
+      var progressTimer = null;
+
       Z.showTransferLock({
         label: 'COPYING',
         filename: entry ? entry.name : Z.basename(srcPath),
@@ -396,25 +398,57 @@ var ZFTPD = ZFTPD || {};
           cancelled = true;
           Z.api.copyCancel().catch(function(){});
           Z.hideTransferLock();
+          if (progressTimer) clearInterval(progressTimer);
           Z.notify('Copy cancelled', 'Copy to ' + dst + ' aborted.', 'wn');
         }
       });
 
-      var startTime = Date.now();
-      var progressInterval = setInterval(function() {
-         var elapsed = Math.floor((Date.now() - startTime) / 1000);
-         Z.updateTransferLock({ elapsed: elapsed + 's' });
-      }, 1000);
-
-      Z.api.copy(srcPath, dst, entry ? entry.size : 0).then(function () {
-        clearInterval(progressInterval);
-        if (!cancelled) {
+      var started = Date.now();
+      var prevBytes = 0;
+      var prevTime = Date.now();
+      Z.api.copy(srcPath, dst, entry ? entry.size : 0).then(function (resp) {
+        if (!resp || !resp.async) {
           Z.hideTransferLock();
           Z.notify('Copied', 'Successfully copied to ' + dst, 'ok');
           explorer.nav(Z.state.path);
+          return;
         }
+
+        progressTimer = setInterval(function () {
+          Z.api.copyProgress().then(function (p) {
+            if (cancelled) return;
+            var elapsed = Math.floor((Date.now() - started) / 1000);
+            if (p && p.active && !p.done) {
+              var pct = p.total_bytes > 0 ? Math.min(100, Math.round(p.bytes_copied * 100 / p.total_bytes)) : 0;
+              var now = Date.now();
+              var dt = (now - prevTime) / 1000;
+              var instantSpeed = dt > 0 ? (p.bytes_copied - prevBytes) / dt : 0;
+              prevBytes = p.bytes_copied;
+              prevTime = now;
+              Z.updateTransferLock({
+                pct: pct,
+                speed: instantSpeed > 0 ? Z.bps(instantSpeed) : (p.total_bytes > 0 && elapsed > 0 ? Z.bps(p.bytes_copied / elapsed) : ''),
+                elapsed: elapsed + 's'
+              });
+            } else if (p && p.done) {
+              clearInterval(progressTimer);
+              Z.hideTransferLock();
+              if (p.error) {
+                Z.notify('Copy failed', (p.error_msg || 'error'), 'er');
+              } else {
+                Z.notify('Copied', 'Successfully copied to ' + dst, 'ok');
+              }
+              explorer.nav(Z.state.path);
+            } else if (!p || !p.active) {
+              clearInterval(progressTimer);
+              Z.hideTransferLock();
+              if (!p || !p.error) Z.notify('Copied', 'Successfully copied to ' + dst, 'ok');
+              explorer.nav(Z.state.path);
+            }
+          }).catch(function(){});
+        }, 500);
       }).catch(function (e) {
-        clearInterval(progressInterval);
+        if (progressTimer) clearInterval(progressTimer);
         Z.hideTransferLock();
         Z.notify('Copy failed', e.message, 'er');
       });
@@ -423,11 +457,13 @@ var ZFTPD = ZFTPD || {};
 
   function doExtract(archivePath, dstDir) {
     if (!Z.ensureTransferIdle()) return;
-    Z.modal.folderPicker('Extract to…', dstDir).then(function (dst) {
+    Z.modal.folderPicker('Extract to\u2026', dstDir).then(function (dst) {
       if (dst === null) return;
       if (!dst) dst = dstDir;
 
       var cancelled = false;
+      var progressTimer = null;
+
       Z.showTransferLock({
         label: 'EXTRACTING',
         filename: Z.basename(archivePath),
@@ -436,31 +472,44 @@ var ZFTPD = ZFTPD || {};
           cancelled = true;
           Z.api.extractCancel().catch(function(){});
           Z.hideTransferLock();
+          if (progressTimer) clearInterval(progressTimer);
           Z.notify('Extraction cancelled', 'Extract to ' + dst + ' aborted.', 'wn');
         }
       });
 
-      var startTime = Date.now();
-      var progressInterval = setInterval(function() {
-         var elapsed = Math.floor((Date.now() - startTime) / 1000);
-         Z.updateTransferLock({ elapsed: elapsed + 's' });
-         /* If your API supports extract progress, poll it here */
-         Z.api.extractProgress().then(function(d) {
-           if (d && typeof d.progress === 'number') {
-             Z.updateTransferLock({ pct: d.progress });
-           }
-         }).catch(function(){});
-      }, 1000);
-
-      Z.api.extract(archivePath, dst).then(function () {
-        clearInterval(progressInterval);
-        if (!cancelled) {
+      var started = Date.now();
+      Z.api.extract(archivePath, dst).then(function (resp) {
+        if (!resp || !resp.async) {
           Z.hideTransferLock();
           Z.notify('Extracted', 'Successfully extracted to ' + dst, 'ok');
           explorer.nav(Z.state.path);
+          return;
         }
+
+        progressTimer = setInterval(function() {
+          Z.api.extractProgress().then(function(d) {
+            if (cancelled) return;
+            var elapsed = Math.floor((Date.now() - started) / 1000);
+            if (d && d.active && !d.done) {
+              var pct = typeof d.progress === 'number' ? d.progress : 0;
+              Z.updateTransferLock({
+                pct: pct,
+                elapsed: elapsed + 's'
+              });
+            } else if (d && d.done) {
+              clearInterval(progressTimer);
+              Z.hideTransferLock();
+              if (d.error) {
+                Z.notify('Extract failed', (d.error_msg || 'error'), 'er');
+              } else {
+                Z.notify('Extracted', 'Successfully extracted to ' + dst, 'ok');
+              }
+              explorer.nav(Z.state.path);
+            }
+          }).catch(function(){});
+        }, 1000);
       }).catch(function (e) {
-        clearInterval(progressInterval);
+        if (progressTimer) clearInterval(progressTimer);
         Z.hideTransferLock();
         Z.notify('Extract failed', e.message, 'er');
       });

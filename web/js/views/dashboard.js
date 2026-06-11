@@ -311,7 +311,7 @@ var ZFTPD = ZFTPD || {};
 
       (function (p) {
         item.onclick = function () {
-          window.location.href = Z.api.downloadUrl(p);
+          Z.download(Z.api.downloadUrl(p));
         };
       })(path);
 

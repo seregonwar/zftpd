@@ -50,6 +50,16 @@ var ZFTPD = ZFTPD || {};
     return i > 0 ? name.slice(i + 1).toLowerCase() : '';
   };
 
+  /* ── Download helper (avoids full-page navigation) ── */
+  Z.download = function (url) {
+    var a = document.createElement('a');
+    a.href = url;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
   /* ── Byte formatting ── */
   Z.bytes = function (b) {
     if (typeof b !== 'number' || b < 0) return '\u2014';
