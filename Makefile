@@ -173,6 +173,13 @@ ifneq ($(filter $(TARGET),ps4 ps5),)
     CFLAGS += -fvisibility=hidden
 endif
 
+# PS5: disable aggressive function inlining.  Without this flag the compiler
+# inlines every static api_* handler into http_api_handle, creating a massive
+# stack frame (~60-80 KB) that overflows the PS5 thread stack (SIGSEGV).
+ifeq ($(TARGET),ps5)
+    CFLAGS += -fno-inline-functions
+endif
+
 # Include directories
 CFLAGS += -I./include
 
@@ -261,6 +268,7 @@ ifeq ($(ENABLE_ZHTTPD),1)
     SOURCES += src/http_resources.c
     SOURCES += src/exfat_unpacker.c
     SOURCES += src/pkg_unpacker.c
+    SOURCES += src/builtin_unzip.c
 endif
 
 #============================================================================
@@ -306,53 +314,76 @@ endif
 # so we fall back to a simple file-existence check on bundled headers.
 #============================================================================
 
-override ENABLE_LIBARCHIVE ?= 0
+# ── libarchive: auto-detect on desktop, opt-in on consoles ───────────────
 override ENABLE_LIBCURL ?= 0
-
-# ── libarchive detection ──────────────────────────────────────────────────
-ifeq ($(ENABLE_LIBARCHIVE),1)
-  _BUNDLED_ARCHIVE_H := $(wildcard external/libarchive-3.8.6/libarchive/archive.h)
-  ifneq ($(filter $(TARGET),ps4 ps5),)
-    # Cross-compilation: NO prebuilt libarchive static lib for PS4/PS5!
-    # Even if headers are found, we must gracefully disable it.
-    $(info [INFO] libarchive not supported on cross-compile targets — disabling ENABLE_LIBARCHIVE)
+ifneq ($(filter $(TARGET),ps4 ps5),)
+  # PS4/PS5: no prebuilt static lib — explicit opt-in only (override ENABLE_LIBARCHIVE=1)
+  override ENABLE_LIBARCHIVE ?= 0
+  ifeq ($(ENABLE_LIBARCHIVE),1)
+    $(info [INFO] libarchive not supported on cross-compile targets — disabling)
     override ENABLE_LIBARCHIVE := 0
-  else
-    # Desktop: try system headers first, then bundled
-    _HAS_ARCHIVE := $(shell echo '\#include <archive.h>' | $(CC) -xc -fsyntax-only - 2>/dev/null && echo 1 || echo 0)
-    ifeq ($(_HAS_ARCHIVE),1)
-      $(info [INFO] Using system libarchive)
-    else ifneq ($(_BUNDLED_ARCHIVE_H),)
-      $(info [INFO] Using bundled libarchive headers)
-      CFLAGS += -I./external/libarchive-3.8.6/libarchive
-      ifeq ($(wildcard external/libarchive-3.8.6-compiled/.libs/libarchive.a),)
-        LIBS += -larchive
-      else
-        LIBS += external/libarchive-3.8.6-compiled/.libs/libarchive.a
+  endif
+else
+  # Desktop (macOS/Linux): auto-detect unless user explicitly set it to 0
+  ifneq ($(ENABLE_LIBARCHIVE),0)
+    _HAS_ARCHIVE := 0
+    # 1) System headers
+    _SYS_ARCHIVE := $(shell echo '\#include <archive.h>' | $(CC) -xc -fsyntax-only - 2>/dev/null && echo 1 || echo 0)
+    ifeq ($(_SYS_ARCHIVE),1)
+      _HAS_ARCHIVE := 1
+      $(info [INFO] libarchive: using system headers)
+    endif
+    # 2) macOS Homebrew (Apple Silicon, then Intel)
+    ifeq ($(_HAS_ARCHIVE),0)
+      ifeq ($(HOST_OS),Darwin)
+        _HB_ARCHIVE := $(shell echo '\#include <archive.h>' | $(CC) -xc -fsyntax-only -I/opt/homebrew/include - 2>/dev/null && echo 1 || echo 0)
+        ifeq ($(_HB_ARCHIVE),1)
+          _HAS_ARCHIVE := 1
+          CFLAGS += -I/opt/homebrew/include
+          LDFLAGS += -L/opt/homebrew/lib
+          $(info [INFO] libarchive: using Homebrew (Apple Silicon) — /opt/homebrew)
+        else
+          _HB_ARCHIVE := $(shell echo '\#include <archive.h>' | $(CC) -xc -fsyntax-only -I/usr/local/include - 2>/dev/null && echo 1 || echo 0)
+          ifeq ($(_HB_ARCHIVE),1)
+            _HAS_ARCHIVE := 1
+            CFLAGS += -I/usr/local/include
+            LDFLAGS += -L/usr/local/lib
+            $(info [INFO] libarchive: using Homebrew (Intel) — /usr/local)
+          endif
+        endif
       endif
-    else
-      $(info [INFO] libarchive headers not found — disabling ENABLE_LIBARCHIVE)
+    endif
+    # 3) Bundled headers fallback (external/libarchive-3.8.6)
+    ifeq ($(_HAS_ARCHIVE),0)
+      _BUNDLED_ARCHIVE_H := $(wildcard external/libarchive-3.8.6/libarchive/archive.h)
+      ifneq ($(_BUNDLED_ARCHIVE_H),)
+        _HAS_ARCHIVE := 1
+        CFLAGS += -I./external/libarchive-3.8.6/libarchive
+        ifeq ($(wildcard external/libarchive-3.8.6-compiled/.libs/libarchive.a),)
+          LIBS += -larchive
+        else
+          LIBS += external/libarchive-3.8.6-compiled/.libs/libarchive.a
+        endif
+        $(info [INFO] libarchive: using bundled headers (external/libarchive-3.8.6))
+      endif
+    endif
+    # 4) Not found — disable
+    ifeq ($(_HAS_ARCHIVE),0)
+      $(info [INFO] libarchive not found — extraction disabled (install: brew install libarchive))
       override ENABLE_LIBARCHIVE := 0
+    else
+      override ENABLE_LIBARCHIVE := 1
+      CFLAGS += -DENABLE_LIBARCHIVE=1
     endif
   endif
-endif
-
-ifeq ($(ENABLE_LIBARCHIVE),1)
-    CFLAGS += -DENABLE_LIBARCHIVE=1
 endif
 
 # ── libcurl detection ─────────────────────────────────────────────────────
 ifeq ($(ENABLE_LIBCURL),1)
   _BUNDLED_CURL_H := $(wildcard external/curl/include/curl/curl.h)
   ifneq ($(filter $(TARGET),ps4 ps5),)
-    # Cross-compilation: check for bundled curl headers
-    ifneq ($(_BUNDLED_CURL_H),)
-      $(info [INFO] Using bundled libcurl headers (cross-compile))
-      CFLAGS += -I./external/curl/include
-    else
-      $(info [INFO] libcurl headers not found — disabling ENABLE_LIBCURL)
-      override ENABLE_LIBCURL := 0
-    endif
+    # Cross-compilation uses the local pal_curl shim, not external curl headers.
+    $(info [INFO] URL downloads: using pal_curl/SceHttp console backends)
   else
     # Desktop: compiler probe
     _HAS_CURL := $(shell echo '\#include <curl/curl.h>' | $(CC) -xc -fsyntax-only - 2>/dev/null && echo 1 || echo 0)

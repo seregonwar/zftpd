@@ -345,13 +345,16 @@ var ZFTPD = ZFTPD || {};
       for (var j = 0; j < items.length; j++) {
         var d = items[j];
         var nKey = 'dl_notified_' + (d.id || j);
-        if (d.done && !d.error && !Z.state[nKey]) {
+        var isDone = (d.done === true || d.done === 'true');
+        var hasErr = (!!d.error);
+        var dName = d.name || d.url || '';
+        if (isDone && !hasErr && !Z.state[nKey]) {
           Z.state[nKey] = true;
-          Z.notify('Download complete', d.filename || d.url, 'ok');
+          Z.notify('Download complete', dName, 'ok');
         }
-        if (d.error && !Z.state[nKey]) {
+        if (hasErr && !Z.state[nKey]) {
           Z.state[nKey] = true;
-          Z.notify('Download failed', (d.filename || d.url) + ': ' + d.error_msg, 'er');
+          Z.notify('Download failed', dName + ': ' + d.error, 'er');
         }
       }
     }).catch(function () { });
@@ -399,6 +402,8 @@ var ZFTPD = ZFTPD || {};
     try {
       var sv = localStorage.getItem('zftpd_view');
       if (sv) Z.state.view = sv;
+      var sp = localStorage.getItem('zftpd_path');
+      if (sp) Z.state.path = sp;
       var st = localStorage.getItem('zftpd_theme');
       if (st) Z.setTheme(st);
     } catch (e) { }

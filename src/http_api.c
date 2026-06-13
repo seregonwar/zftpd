@@ -43,6 +43,7 @@ SOFTWARE.
 #include "pal_notification.h" /* pal_notification_send() — fallback notify */
 #include "exfat_unpacker.h"  /* exFAT image parsing for game metadata */
 #include "pkg_unpacker.h"    /* PKG archive parsing for game metadata */
+#include "builtin_unzip.h"   /* built-in ZIP extractor (PS5 fallback) */
 #include <dirent.h>
 #include <errno.h>
 #include <ctype.h>
@@ -50,6 +51,7 @@ SOFTWARE.
 #include <inttypes.h>
 #include <limits.h>
 #include <stdatomic.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -92,8 +94,11 @@ typedef struct _LncAppParam {
 } LncAppParam;
 
 #define SCE_SYSMODULE_INTERNAL_SYS_CORE 0x80000004
+#define SCE_SYSMODULE_INTERNAL_HTTP 0x8000000A
+#define SCE_SYSMODULE_INTERNAL_SSL 0x8000000B
 #define SCE_SYSMODULE_INTERNAL_SYSTEM_SERVICE 0x80000010
 #define SCE_SYSMODULE_INTERNAL_USER_SERVICE 0x80000011
+#define SCE_SYSMODULE_INTERNAL_NET 0x8000001C
 
 static int psx_sysmodule_load_internal(unsigned int module_id, int *out_rc) {
   void *sysmodule =
@@ -4960,10 +4965,42 @@ static struct {
   char error_msg[256];
 } g_extract = {0};
 
+/* builtin_unzip extraction thread — works without libarchive (PS5 safe) */
+#ifndef ENABLE_LIBARCHIVE
+static void *extract_thread_builtin(void *arg) {
+  (void)arg;
+  int rc = builtin_unzip(g_extract.archive_path, g_extract.dest_path,
+                         &g_extract.cancelled,
+                         g_extract.error_msg, sizeof(g_extract.error_msg));
+  if (rc != 0) {
+    if (g_extract.error_msg[0] == '\0') {
+      snprintf(g_extract.error_msg, sizeof(g_extract.error_msg),
+               "Extraction failed");
+    }
+    g_extract.error = 1;
+  }
+  g_extract.done = 1;
+  g_extract.active = 0;
+  return NULL;
+}
+#endif
+
+#if !defined(ENABLE_LIBARCHIVE) || !ENABLE_LIBARCHIVE
+static int path_has_extension(const char *path, const char *ext) {
+  if (path == NULL || ext == NULL) {
+    return 0;
+  }
+  const char *dot = strrchr(path, '.');
+  if (dot == NULL) {
+    return 0;
+  }
+  return strcasecmp(dot, ext) == 0;
+}
+#endif
+
 #if defined(ENABLE_LIBARCHIVE) && ENABLE_LIBARCHIVE
 #include <archive.h>
 #include <archive_entry.h>
-#include <pthread.h>
 
 static void *extract_thread(void *arg) {
   (void)arg;
@@ -5097,7 +5134,13 @@ static http_response_t *api_extract(const http_request_t *request) {
     return error_json(HTTP_STATUS_403_FORBIDDEN, "Path traversal blocked");
   }
 
-#if defined(ENABLE_LIBARCHIVE) && ENABLE_LIBARCHIVE
+#if !defined(ENABLE_LIBARCHIVE) || !ENABLE_LIBARCHIVE
+  if (!path_has_extension(safe_path, ".zip")) {
+    return error_json(HTTP_STATUS_415_UNSUPPORTED_MEDIA_TYPE,
+                      "This build can extract .zip files only; enable libarchive for .7z/.rar/.tar/.gz");
+  }
+#endif
+
   /* Set up extraction state */
   memset(&g_extract, 0, sizeof(g_extract));
   strncpy(g_extract.archive_path, safe_path, sizeof(g_extract.archive_path) - 1);
@@ -5110,10 +5153,12 @@ static http_response_t *api_extract(const http_request_t *request) {
     g_extract.total_bytes = (uint64_t)st.st_size;
   }
 
+#if defined(ENABLE_LIBARCHIVE) && ENABLE_LIBARCHIVE
   /* Start extraction thread */
   pthread_t tid;
   pthread_attr_t attr;
   pthread_attr_init(&attr);
+  (void)pthread_attr_setstacksize(&attr, (size_t)HTTP_THREAD_STACK_SIZE);
   pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
   if (pthread_create(&tid, &attr, extract_thread, NULL) != 0) {
     g_extract.active = 0;
@@ -5128,8 +5173,26 @@ static http_response_t *api_extract(const http_request_t *request) {
   http_response_set_body(resp, body, strlen(body));
   return resp;
 #else
-  return error_json(HTTP_STATUS_500_INTERNAL_ERROR,
-                    "libarchive not available — compile with ENABLE_LIBARCHIVE=1");
+  /* builtin_unzip fallback - no libarchive dependency (works on PS5) */
+  {
+    pthread_t tid;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    (void)pthread_attr_setstacksize(&attr, (size_t)HTTP_THREAD_STACK_SIZE);
+    if (pthread_create(&tid, &attr, extract_thread_builtin, NULL) != 0) {
+      g_extract.active = 0;
+      pthread_attr_destroy(&attr);
+      return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Failed to start extraction thread");
+    }
+    pthread_attr_destroy(&attr);
+  }
+
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  http_response_add_header(resp, "Content-Type", "application/json");
+  const char *body = "{\"ok\":true,\"message\":\"Extraction started (built-in unzip)\"}";
+  http_response_set_body(resp, body, strlen(body));
+  return resp;
 #endif
 }
 
@@ -5208,6 +5271,13 @@ typedef struct {
 static dl_entry_t g_downloads[DL_MAX_ACTIVE];
 static int g_dl_next_id = 1;
 
+#if (defined(ENABLE_LIBCURL) && ENABLE_LIBCURL) || \
+    defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+#define DL_HAS_BACKEND 1
+#else
+#define DL_HAS_BACKEND 0
+#endif
+
 static dl_entry_t *dl_find_slot(void) {
   for (int i = 0; i < DL_MAX_ACTIVE; i++) {
     if (!g_downloads[i].active && g_downloads[i].done == 0) return &g_downloads[i];
@@ -5248,27 +5318,19 @@ static int dl_url_is_supported(const char *url, char *reason,
   if (dl_has_scheme(url, "magnet:")) {
     if (reason && reason_size > 0U) {
       snprintf(reason, reason_size,
-               "Magnet links need a BitTorrent/DHT engine; this build supports direct HTTP URLs only");
+               "Magnet links need a BitTorrent/DHT engine; this build supports direct HTTP/HTTPS URLs only");
     }
     return 0;
   }
   if (dl_has_scheme(url, "https://")) {
-#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
-    if (reason && reason_size > 0U) {
-      snprintf(reason, reason_size,
-               "HTTPS URL downloads need TLS support; the PS4/PS5 downloader currently supports HTTP URLs only");
-    }
-    return 0;
-#else
     return 1;
-#endif
   }
   if (dl_has_scheme(url, "http://")) {
     return 1;
   }
   if (reason && reason_size > 0U) {
     snprintf(reason, reason_size,
-             "Unsupported URL scheme; use a direct http:// URL");
+             "Unsupported URL scheme; use a direct http:// or https:// URL");
   }
   return 0;
 }
@@ -5308,43 +5370,602 @@ static void dl_extract_filename(const char *url, char *out, size_t out_size) {
   dl_sanitize_filename(out);
 }
 
-#if defined(ENABLE_LIBCURL) && ENABLE_LIBCURL
+static int dl_is_directory_path(const char *path) {
+  struct stat st;
+  return path != NULL && stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static int dl_try_destination(const char *candidate, char *safe,
+                              size_t safe_size) {
+  if (candidate == NULL || candidate[0] == '\0') {
+    return 0;
+  }
+  if (!validate_path(candidate, safe, safe_size)) {
+    return 0;
+  }
+  return dl_is_directory_path(safe);
+}
+
+static int dl_normalize_destination(const char *requested, char *safe,
+                                    size_t safe_size) {
 #if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
-#include "pal_curl.h"
-#else
-#include <curl/curl.h>
+  int wants_ps_default = (requested == NULL || requested[0] == '\0' ||
+                          strcmp(requested, "/") == 0);
+  if (wants_ps_default) {
+    static const char *const ps_defaults[] = {
+        "/data",
+        "/mnt/usb0",
+        "/mnt/usb1",
+        NULL
+    };
+    for (size_t i = 0U; ps_defaults[i] != NULL; i++) {
+      if (dl_try_destination(ps_defaults[i], safe, safe_size)) {
+        return 1;
+      }
+    }
+  }
 #endif
-#include <pthread.h>
+
+  if (dl_try_destination(requested, safe, safe_size)) {
+    return 1;
+  }
+
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+  if (requested != NULL && strcmp(requested, "/data") == 0) {
+    static const char *const ps_defaults[] = {
+        "/mnt/usb0",
+        "/mnt/usb1",
+        NULL
+    };
+    for (size_t i = 0U; ps_defaults[i] != NULL; i++) {
+      if (dl_try_destination(ps_defaults[i], safe, safe_size)) {
+        return 1;
+      }
+    }
+  }
+#endif
+
+  if (g_http_root[0] != '\0' && strcmp(g_http_root, "/") != 0 &&
+      dl_try_destination(g_http_root, safe, safe_size)) {
+    return 1;
+  }
+
+  return 0;
+}
+
+#if DL_HAS_BACKEND
+
+#if !defined(PLATFORM_PS4) && !defined(PLATFORM_PS5)
+#include <curl/curl.h>
+#elif defined(ENABLE_LIBCURL) && ENABLE_LIBCURL
+#include "pal_curl.h"
+#endif
 
 struct dl_write_ctx {
   dl_entry_t *dl;
   int fd;
 };
 
+static int dl_write_all(int fd, const void *data, size_t len) {
+  const uint8_t *p = (const uint8_t *)data;
+  while (len > 0U) {
+    ssize_t n = write(fd, p, len);
+    if (n < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return -1;
+    }
+    if (n == 0) {
+      return -1;
+    }
+    p += (size_t)n;
+    len -= (size_t)n;
+  }
+  return 0;
+}
+
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+
+typedef int (*psx_sceNetInit_fn)(void);
+typedef int (*psx_sceNetPoolCreate_fn)(const char *name, int size, int flags);
+typedef int (*psx_sceSslInit_fn)(size_t pool_size);
+typedef int (*psx_sceHttpInit_fn)(int libnet_mem_id, int libssl_ctx_id,
+                                  size_t pool_size);
+typedef int (*psx_sceHttpCreateTemplate_fn)(int libhttp_ctx_id,
+                                            const char *user_agent,
+                                            int http_ver,
+                                            int is_auto_proxy_conf);
+typedef int (*psx_sceHttpDeleteTemplate_fn)(int tmpl_id);
+typedef int (*psx_sceHttpCreateConnectionWithURL_fn)(int tmpl_id,
+                                                     const char *url,
+                                                     int keepalive);
+typedef int (*psx_sceHttpDeleteConnection_fn)(int conn_id);
+typedef int (*psx_sceHttpCreateRequestWithURL2_fn)(int conn_id,
+                                                   const char *method,
+                                                   const char *url,
+                                                   uint64_t content_length);
+typedef int (*psx_sceHttpDeleteRequest_fn)(int req_id);
+typedef int (*psx_sceHttpSetAutoRedirect_fn)(int id, int enable);
+typedef int (*psx_sceHttpSetConnectTimeOut_fn)(int id, uint32_t usec);
+typedef int (*psx_sceHttpSetRecvTimeOut_fn)(int id, uint32_t usec);
+typedef int (*psx_sceHttpSetSendTimeOut_fn)(int id, uint32_t usec);
+typedef int (*psx_sceHttpSetResolveTimeOut_fn)(int id, uint32_t usec);
+typedef int (*psx_sceHttpSetResolveRetry_fn)(int id, int retry);
+typedef int (*psx_sceHttpSetResponseHeaderMaxSize_fn)(int id, size_t size);
+typedef int (*psx_sceHttpSetInflateGZIPEnabled_fn)(int id, int enable);
+typedef int (*psx_sceHttpAddRequestHeader_fn)(int id, const char *name,
+                                              const char *value,
+                                              uint32_t mode);
+typedef int (*psx_sceHttpSendRequest_fn)(int req_id, const void *post_data,
+                                         size_t size);
+typedef int (*psx_sceHttpReadData_fn)(int req_id, void *data, size_t size);
+typedef int (*psx_sceHttpGetStatusCode_fn)(int req_id, int *status_code);
+typedef int (*psx_sceHttpGetResponseContentLength_fn)(int req_id, int *result,
+                                                      uint64_t *content_len);
+typedef int (*psx_sceHttpGetLastErrno_fn)(int req_id, int *err_num);
+typedef int (*psx_https_callback_t)(int libssl_ctx_id, unsigned int verify_err,
+                                    void *const ssl_cert[], int cert_num,
+                                    void *user_arg);
+typedef int (*psx_sceHttpsSetSslCallback_fn)(int id,
+                                             psx_https_callback_t cb,
+                                             void *user_arg);
+
+typedef struct {
+  int loaded;
+  void *net_mod;
+  void *ssl_mod;
+  void *http_mod;
+  psx_sceNetInit_fn sceNetInit;
+  psx_sceNetPoolCreate_fn sceNetPoolCreate;
+  psx_sceSslInit_fn sceSslInit;
+  psx_sceHttpInit_fn sceHttpInit;
+  psx_sceHttpCreateTemplate_fn sceHttpCreateTemplate;
+  psx_sceHttpDeleteTemplate_fn sceHttpDeleteTemplate;
+  psx_sceHttpCreateConnectionWithURL_fn sceHttpCreateConnectionWithURL;
+  psx_sceHttpDeleteConnection_fn sceHttpDeleteConnection;
+  psx_sceHttpCreateRequestWithURL2_fn sceHttpCreateRequestWithURL2;
+  psx_sceHttpDeleteRequest_fn sceHttpDeleteRequest;
+  psx_sceHttpSetAutoRedirect_fn sceHttpSetAutoRedirect;
+  psx_sceHttpSetConnectTimeOut_fn sceHttpSetConnectTimeOut;
+  psx_sceHttpSetRecvTimeOut_fn sceHttpSetRecvTimeOut;
+  psx_sceHttpSetSendTimeOut_fn sceHttpSetSendTimeOut;
+  psx_sceHttpSetResolveTimeOut_fn sceHttpSetResolveTimeOut;
+  psx_sceHttpSetResolveRetry_fn sceHttpSetResolveRetry;
+  psx_sceHttpSetResponseHeaderMaxSize_fn sceHttpSetResponseHeaderMaxSize;
+  psx_sceHttpSetInflateGZIPEnabled_fn sceHttpSetInflateGZIPEnabled;
+  psx_sceHttpAddRequestHeader_fn sceHttpAddRequestHeader;
+  psx_sceHttpSendRequest_fn sceHttpSendRequest;
+  psx_sceHttpReadData_fn sceHttpReadData;
+  psx_sceHttpGetStatusCode_fn sceHttpGetStatusCode;
+  psx_sceHttpGetResponseContentLength_fn sceHttpGetResponseContentLength;
+  psx_sceHttpGetLastErrno_fn sceHttpGetLastErrno;
+  psx_sceHttpsSetSslCallback_fn sceHttpsSetSslCallback;
+} psx_http_symbols_t;
+
+static psx_http_symbols_t g_psx_http;
+static pthread_mutex_t g_psx_http_lock = PTHREAD_MUTEX_INITIALIZER;
+static int g_psx_net_pool = -1;
+static int g_psx_ssl_ctx = -1;
+static int g_psx_http_ctx = -1;
+
+static void *psx_open_sce_module(const char *name) {
+  char path[128];
+  int n = snprintf(path, sizeof(path), "/system/common/lib/%s.sprx", name);
+  if (n <= 0 || (size_t)n >= sizeof(path)) {
+    return NULL;
+  }
+  return dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+}
+
+static int psx_http_load_symbols(char *err, size_t err_size) {
+  if (g_psx_http.loaded) {
+    return 0;
+  }
+
+  int module_rc = 0;
+  (void)psx_sysmodule_load_internal(SCE_SYSMODULE_INTERNAL_NET, &module_rc);
+  (void)psx_sysmodule_load_internal(SCE_SYSMODULE_INTERNAL_SSL, &module_rc);
+  (void)psx_sysmodule_load_internal(SCE_SYSMODULE_INTERNAL_HTTP, &module_rc);
+
+  g_psx_http.net_mod = psx_open_sce_module("libSceNet");
+  g_psx_http.ssl_mod = psx_open_sce_module("libSceSsl");
+  g_psx_http.http_mod = psx_open_sce_module("libSceHttp");
+
+  if (g_psx_http.net_mod == NULL || g_psx_http.ssl_mod == NULL ||
+      g_psx_http.http_mod == NULL) {
+    if (err && err_size > 0U) {
+      snprintf(err, err_size, "Failed to load SceNet/SceSsl/SceHttp modules");
+    }
+    return -1;
+  }
+
+  g_psx_http.sceNetInit =
+      (psx_sceNetInit_fn)dlsym(g_psx_http.net_mod, "sceNetInit");
+  g_psx_http.sceNetPoolCreate =
+      (psx_sceNetPoolCreate_fn)dlsym(g_psx_http.net_mod, "sceNetPoolCreate");
+  g_psx_http.sceSslInit =
+      (psx_sceSslInit_fn)dlsym(g_psx_http.ssl_mod, "sceSslInit");
+  g_psx_http.sceHttpInit =
+      (psx_sceHttpInit_fn)dlsym(g_psx_http.http_mod, "sceHttpInit");
+  g_psx_http.sceHttpCreateTemplate =
+      (psx_sceHttpCreateTemplate_fn)dlsym(g_psx_http.http_mod,
+                                          "sceHttpCreateTemplate");
+  g_psx_http.sceHttpDeleteTemplate =
+      (psx_sceHttpDeleteTemplate_fn)dlsym(g_psx_http.http_mod,
+                                          "sceHttpDeleteTemplate");
+  g_psx_http.sceHttpCreateConnectionWithURL =
+      (psx_sceHttpCreateConnectionWithURL_fn)dlsym(
+          g_psx_http.http_mod, "sceHttpCreateConnectionWithURL");
+  g_psx_http.sceHttpDeleteConnection =
+      (psx_sceHttpDeleteConnection_fn)dlsym(g_psx_http.http_mod,
+                                            "sceHttpDeleteConnection");
+  g_psx_http.sceHttpCreateRequestWithURL2 =
+      (psx_sceHttpCreateRequestWithURL2_fn)dlsym(
+          g_psx_http.http_mod, "sceHttpCreateRequestWithURL2");
+  g_psx_http.sceHttpDeleteRequest =
+      (psx_sceHttpDeleteRequest_fn)dlsym(g_psx_http.http_mod,
+                                         "sceHttpDeleteRequest");
+  g_psx_http.sceHttpSetAutoRedirect =
+      (psx_sceHttpSetAutoRedirect_fn)dlsym(g_psx_http.http_mod,
+                                           "sceHttpSetAutoRedirect");
+  g_psx_http.sceHttpSetConnectTimeOut =
+      (psx_sceHttpSetConnectTimeOut_fn)dlsym(g_psx_http.http_mod,
+                                             "sceHttpSetConnectTimeOut");
+  g_psx_http.sceHttpSetRecvTimeOut =
+      (psx_sceHttpSetRecvTimeOut_fn)dlsym(g_psx_http.http_mod,
+                                          "sceHttpSetRecvTimeOut");
+  g_psx_http.sceHttpSetSendTimeOut =
+      (psx_sceHttpSetSendTimeOut_fn)dlsym(g_psx_http.http_mod,
+                                          "sceHttpSetSendTimeOut");
+  g_psx_http.sceHttpSetResolveTimeOut =
+      (psx_sceHttpSetResolveTimeOut_fn)dlsym(g_psx_http.http_mod,
+                                             "sceHttpSetResolveTimeOut");
+  g_psx_http.sceHttpSetResolveRetry =
+      (psx_sceHttpSetResolveRetry_fn)dlsym(g_psx_http.http_mod,
+                                           "sceHttpSetResolveRetry");
+  g_psx_http.sceHttpSetResponseHeaderMaxSize =
+      (psx_sceHttpSetResponseHeaderMaxSize_fn)dlsym(
+          g_psx_http.http_mod, "sceHttpSetResponseHeaderMaxSize");
+  g_psx_http.sceHttpSetInflateGZIPEnabled =
+      (psx_sceHttpSetInflateGZIPEnabled_fn)dlsym(
+          g_psx_http.http_mod, "sceHttpSetInflateGZIPEnabled");
+  g_psx_http.sceHttpAddRequestHeader =
+      (psx_sceHttpAddRequestHeader_fn)dlsym(g_psx_http.http_mod,
+                                            "sceHttpAddRequestHeader");
+  g_psx_http.sceHttpSendRequest =
+      (psx_sceHttpSendRequest_fn)dlsym(g_psx_http.http_mod,
+                                       "sceHttpSendRequest");
+  g_psx_http.sceHttpReadData =
+      (psx_sceHttpReadData_fn)dlsym(g_psx_http.http_mod, "sceHttpReadData");
+  g_psx_http.sceHttpGetStatusCode =
+      (psx_sceHttpGetStatusCode_fn)dlsym(g_psx_http.http_mod,
+                                         "sceHttpGetStatusCode");
+  g_psx_http.sceHttpGetResponseContentLength =
+      (psx_sceHttpGetResponseContentLength_fn)dlsym(
+          g_psx_http.http_mod, "sceHttpGetResponseContentLength");
+  g_psx_http.sceHttpGetLastErrno =
+      (psx_sceHttpGetLastErrno_fn)dlsym(g_psx_http.http_mod,
+                                        "sceHttpGetLastErrno");
+  g_psx_http.sceHttpsSetSslCallback =
+      (psx_sceHttpsSetSslCallback_fn)dlsym(g_psx_http.http_mod,
+                                           "sceHttpsSetSslCallback");
+
+  if (g_psx_http.sceNetInit == NULL ||
+      g_psx_http.sceNetPoolCreate == NULL ||
+      g_psx_http.sceSslInit == NULL ||
+      g_psx_http.sceHttpInit == NULL ||
+      g_psx_http.sceHttpCreateTemplate == NULL ||
+      g_psx_http.sceHttpDeleteTemplate == NULL ||
+      g_psx_http.sceHttpCreateConnectionWithURL == NULL ||
+      g_psx_http.sceHttpDeleteConnection == NULL ||
+      g_psx_http.sceHttpCreateRequestWithURL2 == NULL ||
+      g_psx_http.sceHttpDeleteRequest == NULL ||
+      g_psx_http.sceHttpSendRequest == NULL ||
+      g_psx_http.sceHttpReadData == NULL ||
+      g_psx_http.sceHttpGetStatusCode == NULL) {
+    if (err && err_size > 0U) {
+      snprintf(err, err_size, "SceHttp symbol resolution failed");
+    }
+    return -1;
+  }
+
+  g_psx_http.loaded = 1;
+  return 0;
+}
+
+static int psx_https_accept_any(int libssl_ctx_id, unsigned int verify_err,
+                                void *const ssl_cert[], int cert_num,
+                                void *user_arg) {
+  (void)libssl_ctx_id;
+  (void)verify_err;
+  (void)ssl_cert;
+  (void)cert_num;
+  (void)user_arg;
+  return 0;
+}
+
+static int psx_http_global_init(char *err, size_t err_size) {
+  int result = 0;
+  pthread_mutex_lock(&g_psx_http_lock);
+
+  if (g_psx_http_ctx >= 0) {
+    pthread_mutex_unlock(&g_psx_http_lock);
+    return 0;
+  }
+
+  if (psx_http_load_symbols(err, err_size) != 0) {
+    pthread_mutex_unlock(&g_psx_http_lock);
+    return -1;
+  }
+
+  (void)g_psx_http.sceNetInit();
+
+  g_psx_net_pool = g_psx_http.sceNetPoolCreate("zftpd_http", 262144, 0);
+  if (g_psx_net_pool < 0) {
+    if (err && err_size > 0U) {
+      snprintf(err, err_size, "sceNetPoolCreate failed: 0x%08x",
+               (unsigned)g_psx_net_pool);
+    }
+    result = -1;
+  }
+
+  if (result == 0) {
+    g_psx_ssl_ctx = g_psx_http.sceSslInit(524288U);
+    if (g_psx_ssl_ctx < 0) {
+      if (err && err_size > 0U) {
+        snprintf(err, err_size, "sceSslInit failed: 0x%08x",
+                 (unsigned)g_psx_ssl_ctx);
+      }
+      result = -1;
+    }
+  }
+
+  if (result == 0) {
+    g_psx_http_ctx = g_psx_http.sceHttpInit(g_psx_net_pool, g_psx_ssl_ctx,
+                                            524288U);
+    if (g_psx_http_ctx < 0) {
+      if (err && err_size > 0U) {
+        snprintf(err, err_size, "sceHttpInit failed: 0x%08x",
+                 (unsigned)g_psx_http_ctx);
+      }
+      result = -1;
+    }
+  }
+
+  pthread_mutex_unlock(&g_psx_http_lock);
+  return result;
+}
+
+static int dl_psx_http_download_to_fd(dl_entry_t *dl, int fd) {
+  char init_err[128];
+  if (psx_http_global_init(init_err, sizeof(init_err)) != 0) {
+    snprintf(dl->error_msg, sizeof(dl->error_msg), "%s", init_err);
+    return -1;
+  }
+
+  int tmpl = -1;
+  int conn = -1;
+  int req = -1;
+  int rc = -1;
+  uint8_t *buf = (uint8_t *)malloc(DL_READ_BUF);
+  if (buf == NULL) {
+    snprintf(dl->error_msg, sizeof(dl->error_msg), "Out of memory");
+    return -1;
+  }
+
+  tmpl = g_psx_http.sceHttpCreateTemplate(g_psx_http_ctx, "zftpd-ps/2.0",
+                                          2, 1);
+  if (tmpl < 0) {
+    snprintf(dl->error_msg, sizeof(dl->error_msg),
+             "sceHttpCreateTemplate failed: 0x%08x", (unsigned)tmpl);
+    goto done;
+  }
+
+  if (g_psx_http.sceHttpSetAutoRedirect != NULL) {
+    (void)g_psx_http.sceHttpSetAutoRedirect(tmpl, 1);
+  }
+  if (g_psx_http.sceHttpSetConnectTimeOut != NULL) {
+    (void)g_psx_http.sceHttpSetConnectTimeOut(tmpl, 30000000U);
+  }
+  if (g_psx_http.sceHttpSetRecvTimeOut != NULL) {
+    (void)g_psx_http.sceHttpSetRecvTimeOut(tmpl, 60000000U);
+  }
+  if (g_psx_http.sceHttpSetSendTimeOut != NULL) {
+    (void)g_psx_http.sceHttpSetSendTimeOut(tmpl, 30000000U);
+  }
+  if (g_psx_http.sceHttpSetResolveTimeOut != NULL) {
+    (void)g_psx_http.sceHttpSetResolveTimeOut(tmpl, 30000000U);
+  }
+  if (g_psx_http.sceHttpSetResolveRetry != NULL) {
+    (void)g_psx_http.sceHttpSetResolveRetry(tmpl, 2);
+  }
+  if (g_psx_http.sceHttpSetResponseHeaderMaxSize != NULL) {
+    (void)g_psx_http.sceHttpSetResponseHeaderMaxSize(tmpl, 65536U);
+  }
+  if (g_psx_http.sceHttpsSetSslCallback != NULL &&
+      dl_has_scheme(dl->url, "https://")) {
+    (void)g_psx_http.sceHttpsSetSslCallback(tmpl, psx_https_accept_any, NULL);
+  }
+
+  conn = g_psx_http.sceHttpCreateConnectionWithURL(tmpl, dl->url, 0);
+  if (conn < 0) {
+    snprintf(dl->error_msg, sizeof(dl->error_msg),
+             "sceHttpCreateConnectionWithURL failed: 0x%08x", (unsigned)conn);
+    goto done;
+  }
+  if (g_psx_http.sceHttpsSetSslCallback != NULL &&
+      dl_has_scheme(dl->url, "https://")) {
+    (void)g_psx_http.sceHttpsSetSslCallback(conn, psx_https_accept_any, NULL);
+  }
+
+  req = g_psx_http.sceHttpCreateRequestWithURL2(conn, "GET", dl->url, 0U);
+  if (req < 0) {
+    snprintf(dl->error_msg, sizeof(dl->error_msg),
+             "sceHttpCreateRequestWithURL2 failed: 0x%08x", (unsigned)req);
+    goto done;
+  }
+
+  if (g_psx_http.sceHttpSetAutoRedirect != NULL) {
+    (void)g_psx_http.sceHttpSetAutoRedirect(req, 1);
+  }
+  if (g_psx_http.sceHttpSetInflateGZIPEnabled != NULL) {
+    (void)g_psx_http.sceHttpSetInflateGZIPEnabled(req, 0);
+  }
+  if (g_psx_http.sceHttpSetResponseHeaderMaxSize != NULL) {
+    (void)g_psx_http.sceHttpSetResponseHeaderMaxSize(req, 65536U);
+  }
+  if (g_psx_http.sceHttpsSetSslCallback != NULL &&
+      dl_has_scheme(dl->url, "https://")) {
+    (void)g_psx_http.sceHttpsSetSslCallback(req, psx_https_accept_any, NULL);
+  }
+  if (g_psx_http.sceHttpAddRequestHeader != NULL) {
+    (void)g_psx_http.sceHttpAddRequestHeader(req, "Accept", "*/*", 0U);
+    (void)g_psx_http.sceHttpAddRequestHeader(req, "Connection", "close", 0U);
+  }
+
+  rc = g_psx_http.sceHttpSendRequest(req, NULL, 0U);
+  if (rc < 0) {
+    int last_errno = 0;
+    if (g_psx_http.sceHttpGetLastErrno != NULL &&
+        g_psx_http.sceHttpGetLastErrno(req, &last_errno) == 0 &&
+        last_errno != 0) {
+      snprintf(dl->error_msg, sizeof(dl->error_msg),
+               "sceHttpSendRequest failed: 0x%08x (last errno: 0x%08x)",
+               (unsigned)rc, (unsigned)last_errno);
+    } else {
+      snprintf(dl->error_msg, sizeof(dl->error_msg),
+               "sceHttpSendRequest failed: 0x%08x", (unsigned)rc);
+    }
+    goto done;
+  }
+
+  int status_code = 0;
+  rc = g_psx_http.sceHttpGetStatusCode(req, &status_code);
+  if (rc < 0) {
+    snprintf(dl->error_msg, sizeof(dl->error_msg),
+             "sceHttpGetStatusCode failed: 0x%08x", (unsigned)rc);
+    goto done;
+  }
+  if (status_code >= 400) {
+    snprintf(dl->error_msg, sizeof(dl->error_msg),
+             "HTTP error status: %d", status_code);
+    rc = -1;
+    goto done;
+  }
+
+  if (g_psx_http.sceHttpGetResponseContentLength != NULL) {
+    int length_type = 0;
+    uint64_t content_len = 0U;
+    if (g_psx_http.sceHttpGetResponseContentLength(req, &length_type,
+                                                   &content_len) == 0 &&
+        content_len > 0U) {
+      dl->total_size = content_len;
+    }
+  }
+
+  for (;;) {
+    while (dl->paused && dl->active && !dl->done) {
+      usleep(100000U);
+    }
+    if (!dl->active || (dl->done && dl->error)) {
+      snprintf(dl->error_msg, sizeof(dl->error_msg), "Cancelled by user");
+      rc = -1;
+      goto done;
+    }
+
+    int got = g_psx_http.sceHttpReadData(req, buf, (size_t)DL_READ_BUF);
+    if (got < 0) {
+      snprintf(dl->error_msg, sizeof(dl->error_msg),
+               "sceHttpReadData failed: 0x%08x", (unsigned)got);
+      rc = -1;
+      goto done;
+    }
+    if (got == 0) {
+      break;
+    }
+    if (dl_write_all(fd, buf, (size_t)got) != 0) {
+      snprintf(dl->error_msg, sizeof(dl->error_msg),
+               "Write error: %s", strerror(errno));
+      rc = -1;
+      goto done;
+    }
+    dl->downloaded += (uint64_t)got;
+  }
+
+  rc = 0;
+
+done:
+  if (req >= 0) {
+    (void)g_psx_http.sceHttpDeleteRequest(req);
+  }
+  if (conn >= 0) {
+    (void)g_psx_http.sceHttpDeleteConnection(conn);
+  }
+  if (tmpl >= 0) {
+    (void)g_psx_http.sceHttpDeleteTemplate(tmpl);
+  }
+  free(buf);
+  return rc;
+}
+
+#endif /* PLATFORM_PS4 || PLATFORM_PS5 */
+
+#if !defined(PLATFORM_PS4) && !defined(PLATFORM_PS5)
 static size_t dl_curl_write(void *ptr, size_t size, size_t nmemb, void *userdata) {
   struct dl_write_ctx *ctx = (struct dl_write_ctx *)userdata;
   size_t total = size * nmemb;
-  if (ctx->dl->paused) return CURL_WRITEFUNC_PAUSE;
-  ssize_t w = write(ctx->fd, ptr, total);
-  if (w <= 0) return 0;
-  ctx->dl->downloaded += (uint64_t)w;
-  return (size_t)w;
+  while (ctx->dl->paused && ctx->dl->active && !ctx->dl->done) {
+    usleep(100000U);
+  }
+  if (!ctx->dl->active || (ctx->dl->done && ctx->dl->error)) {
+    return 0;
+  }
+  if (dl_write_all(ctx->fd, ptr, total) != 0) {
+    return 0;
+  }
+  ctx->dl->downloaded += (uint64_t)total;
+  return total;
 }
+#endif
 
 static void *dl_thread(void *arg) {
   dl_entry_t *dl = (dl_entry_t *)arg;
   char filepath[2048];
-  snprintf(filepath, sizeof(filepath), "%s/%s", dl->dst_path, dl->filename);
+  if (strcmp(dl->dst_path, "/") == 0) {
+    snprintf(filepath, sizeof(filepath), "/%s", dl->filename);
+  } else {
+    snprintf(filepath, sizeof(filepath), "%s/%s", dl->dst_path, dl->filename);
+  }
 
   int fd = open(filepath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
   if (fd < 0) {
-    snprintf(dl->error_msg, sizeof(dl->error_msg), "Cannot create file: %s", strerror(errno));
+    snprintf(dl->error_msg, sizeof(dl->error_msg), "Cannot create %s: %s",
+             filepath, strerror(errno));
     dl->error = 1;
     dl->done = 1;
     dl->active = 0;
     return NULL;
   }
 
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+  if (dl_psx_http_download_to_fd(dl, fd) != 0) {
+    dl->error = 1;
+  }
+  {
+    double elapsed = difftime(time(NULL), dl->start_time);
+    if (elapsed > 0.0) {
+      dl->speed = (double)dl->downloaded / elapsed;
+    }
+  }
+  close(fd);
+  if (dl->error) {
+    (void)unlink(filepath);
+  }
+  dl->done = 1;
+  dl->active = 0;
+  return NULL;
+#else
   CURL *curl = curl_easy_init();
   if (!curl) {
     close(fd);
@@ -5382,11 +6003,15 @@ static void *dl_thread(void *arg) {
 
   curl_easy_cleanup(curl);
   close(fd);
+  if (dl->error) {
+    (void)unlink(filepath);
+  }
   dl->done = 1;
   dl->active = 0;
   return NULL;
+#endif
 }
-#endif /* ENABLE_LIBCURL */
+#endif /* DL_HAS_BACKEND */
 
 static http_response_t *api_dl_start(const http_request_t *request) {
   if (request->method != HTTP_METHOD_POST) {
@@ -5397,7 +6022,7 @@ static http_response_t *api_dl_start(const http_request_t *request) {
   const char *body_data = request->body;
   size_t body_len = request->body_length;
   char url[DL_URL_MAX] = "";
-  char dst[1024] = "/";
+  char dst[1024] = "";
 
   if (body_data && body_len > 0) {
     /* Simple JSON extraction for "url" and "dst" */
@@ -5439,8 +6064,9 @@ static http_response_t *api_dl_start(const http_request_t *request) {
   }
 
   char safe_dst[FTP_PATH_MAX];
-  if (!validate_path(dst, safe_dst, sizeof(safe_dst))) {
-    return error_json(HTTP_STATUS_403_FORBIDDEN, "Invalid destination path");
+  if (!dl_normalize_destination(dst, safe_dst, sizeof(safe_dst))) {
+    return error_json(HTTP_STATUS_403_FORBIDDEN,
+                      "Invalid or read-only destination path");
   }
 
   dl_entry_t *dl = dl_find_slot();
@@ -5456,7 +6082,7 @@ static http_response_t *api_dl_start(const http_request_t *request) {
   dl->start_time = time(NULL);
   dl->active = 1;
 
-#if defined(ENABLE_LIBCURL) && ENABLE_LIBCURL
+#if DL_HAS_BACKEND
   pthread_t tid;
   pthread_attr_t attr;
   pthread_attr_init(&attr);
@@ -5468,9 +6094,9 @@ static http_response_t *api_dl_start(const http_request_t *request) {
   }
   pthread_attr_destroy(&attr);
 #else
-  /* Without libcurl, mark as error immediately */
+  /* Without a download backend, mark as error immediately */
   snprintf(dl->error_msg, sizeof(dl->error_msg),
-           "Download not available — compile with ENABLE_LIBCURL=1");
+           "Download not available in this build");
   dl->error = 1;
   dl->done = 1;
   dl->active = 0;

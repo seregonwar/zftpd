@@ -272,12 +272,20 @@
     <div class="content">
       <div class="dl-container">
 
-        <!-- URL Input -->
+        <!-- URL Input Bar -->
         <div class="dl-input-bar">
-          <input id="dl-url" class="dl-url-input" type="text" placeholder="Paste URL, magnet link, Google Drive link&hellip;">
-          <button class="dl-dest-select" onclick="ZFTPD.downloadMgr.selectDest()">
+          <div class="dl-url-wrap">
+            <button class="dl-input-btn dl-paste-btn" onclick="ZFTPD.downloadMgr.paste()" title="Paste from clipboard">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            </button>
+            <input id="dl-url" class="dl-url-input" type="text" placeholder="Paste URL, magnet link, Google Drive link&hellip;">
+            <button id="dl-clear-btn" class="dl-input-btn dl-clear-btn" onclick="var i=document.getElementById('dl-url');if(i){i.value='';i.focus();document.getElementById('dl-clear-btn').classList.remove('visible');document.getElementById('dl-validation').style.display='none';}" title="Clear">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </div>
+          <button class="dl-dest-btn" onclick="ZFTPD.downloadMgr.selectDest()">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-            <span id="dl-dest-path">/</span>
+            <span id="dl-dest-path">/data</span>
           </button>
           <button class="dl-start-btn" onclick="ZFTPD.downloadMgr.start()">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -285,13 +293,36 @@
           </button>
         </div>
 
+        <!-- URL validation hint -->
+        <div id="dl-validation" class="dl-validation"></div>
+
         <!-- Active Downloads -->
-        <div class="dl-section-header">Active <span id="dl-active-count" class="dl-count">0</span></div>
-        <div id="dl-active"></div>
+        <div class="dl-section">
+          <div class="dl-section-hd">
+            <span class="dl-section-label">Active</span>
+            <span id="dl-active-count" class="dl-count">0</span>
+          </div>
+          <div id="dl-active"></div>
+        </div>
 
         <!-- History -->
-        <div class="dl-section-header" style="margin-top:20px;">History</div>
-        <div id="dl-history" class="dl-history"></div>
+        <div class="dl-section">
+          <div class="dl-section-hd">
+            <span class="dl-section-label">History</span>
+            <div class="dl-section-actions">
+              <button class="btn btn-sm" onclick="ZFTPD.downloadMgr.clearHistory()" title="Clear all history">Clear All</button>
+            </div>
+          </div>
+          <div class="dl-history-wrap">
+            <div class="dl-history-search-wrap">
+              <span class="dl-history-search-icon">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+              </span>
+              <input id="dl-history-search" class="dl-history-search" type="text" placeholder="Search history&hellip;">
+            </div>
+            <div id="dl-history"></div>
+          </div>
+        </div>
 
       </div>
     </div>

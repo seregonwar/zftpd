@@ -28,7 +28,7 @@ SOFTWARE.
  * STATUS CODES:
  *   2xx  Success       (200, 201, 204)
  *   3xx  Redirection   (301, 304)
- *   4xx  Client error  (400, 403, 404, 405)
+ *   4xx  Client error  (400, 403, 404, 405, 409, 415)
  *   5xx  Server error  (500)
  */
 
@@ -59,6 +59,7 @@ typedef enum {
   HTTP_STATUS_404_NOT_FOUND = 404,
   HTTP_STATUS_405_METHOD_NOT_ALLOWED = 405,
   HTTP_STATUS_409_CONFLICT = 409,
+  HTTP_STATUS_415_UNSUPPORTED_MEDIA_TYPE = 415,
 
   /*  5xx ── Server Error  */
   HTTP_STATUS_500_INTERNAL_ERROR = 500,

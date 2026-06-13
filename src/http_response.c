@@ -66,6 +66,8 @@ static const char *status_text(http_status_t status) {
     return "Method Not Allowed";
   case HTTP_STATUS_409_CONFLICT:
     return "Conflict";
+  case HTTP_STATUS_415_UNSUPPORTED_MEDIA_TYPE:
+    return "Unsupported Media Type";
   /* 5xx */
   case HTTP_STATUS_500_INTERNAL_ERROR:
     return "Internal Server Error";

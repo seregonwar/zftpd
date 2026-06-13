@@ -23,8 +23,7 @@ var ZFTPD = ZFTPD || {};
   var _viewInitialized = false;
   explorer.nav = function (path) {
     if (!_viewInitialized) {
-      /* Apply the defaultView user setting initially */
-      _view = (Z.settings && Z.settings.defaultView) ? Z.settings.defaultView : 'grid';
+      /* init() already restored the view preference; nothing to override */
       _viewInitialized = true;
     }
     if (Z.state.transferActive) {
@@ -32,6 +31,8 @@ var ZFTPD = ZFTPD || {};
       return;
     }
     Z.state.path = Z.norm(path);
+    /* Persist path so browser refresh stays in the same directory */
+    try { localStorage.setItem('zftpd_path', Z.state.path); } catch (e) { }
     updatePath();
     renderBreadcrumb();
 
@@ -383,7 +384,7 @@ var ZFTPD = ZFTPD || {};
 
   function doSendTo(entry, srcPath) {
     if (!Z.ensureTransferIdle()) return;
-    Z.modal.folderPicker('Send To\u2026', Z.state.path).then(function (dst) {
+    Z.modal.folderPicker('Send To\u2026', '/').then(function (dst) {
       if (dst === null) return;
       if (!dst) dst = '/';
 
@@ -609,7 +610,9 @@ var ZFTPD = ZFTPD || {};
     try {
       var sv = localStorage.getItem('zftpd_explorer_view');
       if (sv) _view = sv;
+      else if (Z.settings && Z.settings.defaultView) _view = Z.settings.defaultView;
     } catch (e) { }
+    _viewInitialized = true;
 
     /* Wire toolbar buttons */
     var bu = $('btn-up');
