@@ -930,25 +930,32 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
   /* DIAGNOSTIC: log transfer configuration so bottlenecks are visible in klog */
   {
     char diag[320];
-    /* Truncate resolved path to fit the fixed-size log buffer.
-     * The full path is already visible in the command handler args. */
+    /* Limit filename length to fit the fixed-size log buffer.
+     * FTP_PATH_MAX (4096) exceeds sizeof(diag) so GCC warns about
+     * potential truncation; use %.*s to bound the output explicitly. */
     const char *short_name = strrchr(resolved, '/');
     if (short_name != NULL) { short_name++; } else { short_name = resolved; }
 #if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
     struct statfs sfs;
     const char *fstype = "unknown";
     if (_fstatfs(node.fd, &sfs) == 0) { fstype = sfs.f_fstypename; }
+    /* 140 = fixed text + numeric fields + fstype + NUL */
+    int max_fn = (int)(sizeof(diag) - 140);
+    if (max_fn < 0) { max_fn = 0; }
     snprintf(diag, sizeof(diag),
-      "[RETR] file=%s size=%llu fs=%s sendfile=%d "
+      "[RETR] file=%.*s size=%llu fs=%s sendfile=%d "
       "chunk=%u eagain_sleep=%u sndbuf=%u",
-      short_name, (unsigned long long)file_size, fstype, use_sendfile,
+      max_fn, short_name, (unsigned long long)file_size, fstype, use_sendfile,
       (unsigned)FTP_RETR_SENDFILE_CHUNK,
       (unsigned)FTP_SENDFILE_EAGAIN_SLEEP_US,
       (unsigned)FTP_TCP_DATA_SNDBUF);
 #else
+    /* 80 = "[RETR] file=" + " size=%llu sendfile=%d chunk=%u" + NUL */
+    int max_fn = (int)(sizeof(diag) - 80);
+    if (max_fn < 0) { max_fn = 0; }
     snprintf(diag, sizeof(diag),
-      "[RETR] file=%s size=%llu sendfile=%d chunk=%u",
-      short_name, (unsigned long long)file_size, use_sendfile,
+      "[RETR] file=%.*s size=%llu sendfile=%d chunk=%u",
+      max_fn, short_name, (unsigned long long)file_size, use_sendfile,
       (unsigned)FTP_RETR_SENDFILE_CHUNK);
 #endif
     ftp_log_line(FTP_LOG_INFO, diag);
