@@ -433,7 +433,7 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
   char tmp_path[FTP_PATH_MAX];
   const char *last_slash = strrchr(dst_path, '/');
   if (last_slash != NULL) {
-    size_t dir_len = (size_t)(last_slash - dst_path);    int n = snprintf(tmp_path, sizeof(tmp_path), "%.*s/.zftpd.%lu.%lu.tmp",
+    int n = snprintf(tmp_path, sizeof(tmp_path), "%.*s/.zftpd.%lu.%lu.tmp",
                      (int)(sizeof(tmp_path) - 20 - 24), dst_path,
                      (unsigned long)getpid(),
                      (unsigned long)counter);
