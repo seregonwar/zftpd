@@ -338,7 +338,7 @@ static void* server_accept_thread(void *arg)
         
         /* Initialize session */
         static atomic_uint_fast32_t session_counter = ATOMIC_VAR_INIT(0);
-        uint32_t session_id = atomic_fetch_add(&session_counter, 1U);
+        uint32_t session_id = (uint32_t)atomic_fetch_add(&session_counter, 1U);
         
         ftp_error_t err = ftp_session_init(session, client_fd, &client_addr,
                                             session_id, ctx->root_path);

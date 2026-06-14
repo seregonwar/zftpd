@@ -416,14 +416,9 @@ ftp_error_t pal_make_sockaddr_ex(const char *addr_str,
                                   struct sockaddr_storage *out_addr,
                                   socklen_t *out_len);
 
-#endif /* PAL_NETWORK_H */
-
 /*===========================================================================*
  * NETWORK STACK RESET (Issues #3, #4, #7)
  *===========================================================================*/
-
-#include "ftp_types.h"
-#include <stddef.h>
 
 /**
  * @brief Reset TCP buffer accounting for idle FTP sessions.
@@ -442,3 +437,5 @@ ftp_error_t pal_make_sockaddr_ex(const char *addr_str,
  * @note Does NOT interrupt active (TRANSFERRING) sessions.
  */
 int pal_network_reset_ftp_stack(ftp_session_t *sessions, size_t count);
+
+#endif /* PAL_NETWORK_H */
