@@ -849,7 +849,8 @@ static int http_client_callback(int fd, uint32_t events, void *data) {
             const char *body = "{\"error\":\"Invalid or missing CSRF token\"}";
             http_response_set_body(resp, body, strlen(body));
             if (resp->used > 0) {
-              (void)write(conn->fd, resp->data, resp->used);
+              ssize_t wr = write(conn->fd, resp->data, resp->used);
+              (void)wr;
             }
             http_response_destroy(resp);
           }
@@ -864,7 +865,8 @@ static int http_client_callback(int fd, uint32_t events, void *data) {
             const char *msg = "Missing Content-Length";
             http_response_set_body(resp, msg, strlen(msg));
             if (resp->used > 0) {
-              (void)write(conn->fd, resp->data, resp->used);
+              ssize_t wr = write(conn->fd, resp->data, resp->used);
+              (void)wr;
             }
             http_response_destroy(resp);
           }
@@ -938,7 +940,8 @@ static int http_client_callback(int fd, uint32_t events, void *data) {
                 const char *body = "{\"error\":\"Failed to create directory\"}";
                 http_response_set_body(resp, body, strlen(body));
                 if (resp->used > 0) {
-                  (void)write(conn->fd, resp->data, resp->used);
+                  ssize_t wr = write(conn->fd, resp->data, resp->used);
+                  (void)wr;
                 }
                 http_response_destroy(resp);
               }
@@ -957,7 +960,8 @@ static int http_client_callback(int fd, uint32_t events, void *data) {
             const char *body = "{\"error\":\"Failed to open file for writing\"}";
             http_response_set_body(resp, body, strlen(body));
             if (resp->used > 0) {
-              (void)write(conn->fd, resp->data, resp->used);
+              ssize_t wr = write(conn->fd, resp->data, resp->used);
+              (void)wr;
             }
             http_response_destroy(resp);
           }
@@ -1011,7 +1015,8 @@ static int http_client_callback(int fd, uint32_t events, void *data) {
             const char *body = "{\"ok\":true}";
             http_response_set_body(resp, body, strlen(body));
             if (resp->used > 0) {
-              (void)write(conn->fd, resp->data, resp->used);
+              ssize_t wr = write(conn->fd, resp->data, resp->used);
+              (void)wr;
             }
             http_response_destroy(resp);
           }
@@ -1053,7 +1058,8 @@ static int http_client_callback(int fd, uint32_t events, void *data) {
             const char *msg = "Request too large";
             http_response_set_body(resp, msg, strlen(msg));
             if (resp->used > 0) {
-              (void)write(conn->fd, resp->data, resp->used);
+              ssize_t wr = write(conn->fd, resp->data, resp->used);
+              (void)wr;
             }
             http_response_destroy(resp);
           }
