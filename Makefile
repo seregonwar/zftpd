@@ -111,6 +111,13 @@ endif
 CC ?= gcc
 PLATFORM_LIBS ?= -lpthread
 
+# Event loop implementation — kqueue for BSD/macOS/PS4/PS5, epoll for Linux
+ifeq ($(TARGET),linux)
+    EVENT_LOOP_SRC := src/event_loop_epoll.c
+else
+    EVENT_LOOP_SRC := src/event_loop_kqueue.c
+endif
+
 #============================================================================
 # COMPILER FLAGS (SAFETY-CRITICAL STANDARDS)
 #============================================================================
@@ -261,7 +268,7 @@ ifeq ($(ENABLE_ZHTTPD),1)
     ENABLE_PKG_INSTALL ?= 0
     CFLAGS += -DENABLE_PKG_INSTALL=$(ENABLE_PKG_INSTALL)
     ENABLE_LIBCURL ?= 1
-    SOURCES += src/event_loop_kqueue.c
+    SOURCES += $(EVENT_LOOP_SRC)
     SOURCES += src/http_server.c
     SOURCES += src/http_parser.c
     SOURCES += src/http_response.c
@@ -293,7 +300,7 @@ ifeq ($(ENABLE_MCP),1)
     SOURCES += mcp/src/mcp_server.c
     SOURCES += mcp/src/mcp_handlers.c
     SOURCES += external/sJson-main/src/sJson.c
-    SOURCES += src/event_loop_kqueue.c
+    SOURCES += $(EVENT_LOOP_SRC)
     # Execution modules
     SOURCES += mcp/src/mcp_execution/payload.c
     SOURCES += mcp/src/mcp_execution/syscall_race.c
