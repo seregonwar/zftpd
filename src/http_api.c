@@ -964,6 +964,8 @@ static int get_boot_epoch_seconds(uint64_t *out_epoch) {
 #endif
 }
 
+#if defined(PLATFORM_MACOS) || defined(PLATFORM_PS4) ||                        \
+    defined(PLATFORM_PS5) || defined(PS4) || defined(PS5)
 static int normalize_temp_c_from_raw(int64_t raw, int32_t *out_c) {
   if (out_c == NULL) {
     return -1;
@@ -994,6 +996,7 @@ static int normalize_temp_c_from_raw(int64_t raw, int32_t *out_c) {
 
   return -1;
 }
+#endif
 
 static int get_cpu_temp_c(int32_t *out_c) {
   if (out_c == NULL) {

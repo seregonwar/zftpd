@@ -24,6 +24,7 @@
 #include <unistd.h>
 
 #define MINIZ_NO_ARCHIVE_WRITING_APIS
+#define MINIZ_NO_DEFLATE_APIS
 #define MINIZ_NO_STDIO
 #define MINIZ_NO_TIME
 #define MINIZ_NO_ZLIB_APIS
@@ -55,7 +56,10 @@
 #pragma GCC diagnostic ignored "-Wunused-function"
 #pragma GCC diagnostic ignored "-Wwrite-strings"
 #endif
-#include "../external/Itemzflow-main/itemzflow/include/zip/miniz.h"
+#include "../external/miniz/miniz.h"
+#include "../external/miniz/miniz.c"
+#include "../external/miniz/miniz_tinfl.c"
+#include "../external/miniz/miniz_zip.c"
 #if defined(__clang__)
 #pragma clang diagnostic pop
 #elif defined(__GNUC__)

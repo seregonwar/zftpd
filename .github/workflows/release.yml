@@ -138,21 +138,33 @@ jobs:
           set -euo pipefail
           make resources
 
-          sdk_args=()
           if [ "${{ matrix.platform }}" = "ps4" ]; then
-            sdk_args+=(PS4_PAYLOAD_SDK="${PS4_PAYLOAD_SDK}")
+            make \
+              PS4_PAYLOAD_SDK="${PS4_PAYLOAD_SDK}" \
+              TARGET="${{ matrix.platform }}" \
+              BUILD_TYPE=release \
+              ENABLE_ZHTTPD="${{ matrix.zhttpd }}" \
+              ENABLE_MCP=0 \
+              ENABLE_PKG_INSTALL=0 \
+              clean all
           elif [ "${{ matrix.platform }}" = "ps5" ]; then
-            sdk_args+=(PS5_PAYLOAD_SDK="${PS5_PAYLOAD_SDK}")
+            make \
+              PS5_PAYLOAD_SDK="${PS5_PAYLOAD_SDK}" \
+              TARGET="${{ matrix.platform }}" \
+              BUILD_TYPE=release \
+              ENABLE_ZHTTPD="${{ matrix.zhttpd }}" \
+              ENABLE_MCP=0 \
+              ENABLE_PKG_INSTALL=0 \
+              clean all
+          else
+            make \
+              TARGET="${{ matrix.platform }}" \
+              BUILD_TYPE=release \
+              ENABLE_ZHTTPD="${{ matrix.zhttpd }}" \
+              ENABLE_MCP=0 \
+              ENABLE_PKG_INSTALL=0 \
+              clean all
           fi
-
-          make \
-            "${sdk_args[@]}" \
-            TARGET="${{ matrix.platform }}" \
-            BUILD_TYPE=release \
-            ENABLE_ZHTTPD="${{ matrix.zhttpd }}" \
-            ENABLE_MCP=0 \
-            ENABLE_PKG_INSTALL=0 \
-            clean all
 
       - name: Package artifact
         run: |
