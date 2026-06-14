@@ -734,8 +734,6 @@ int pal_network_reset_ftp_stack(ftp_session_t *sessions, size_t count)
         return -1;
     }
 
-    int resets = 0;
-
     for (size_t i = 0U; i < count; i++) {
         ftp_session_t *s = &sessions[i];
         int state = atomic_load(&s->state);
@@ -771,8 +769,6 @@ int pal_network_reset_ftp_stack(ftp_session_t *sessions, size_t count)
              */
             (void)PAL_SETSOCKOPT(cfd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
             (void)PAL_SETSOCKOPT(cfd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
-
-            resets++;
         }
 
         /*
@@ -794,5 +790,5 @@ int pal_network_reset_ftp_stack(ftp_session_t *sessions, size_t count)
         }
     }
 
-    return (resets >= 0) ? 0 : -1;
+    return 0;
 }
