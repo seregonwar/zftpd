@@ -170,10 +170,61 @@ jobs:
             variant_dir="${variant_dir}-zhttp"
           fi
 
-          mkdir -p "dist/${{ matrix.platform }}-${{ matrix.variant }}"
-          find "$variant_dir" -maxdepth 1 -type f -print -exec cp {} "dist/${{ matrix.platform }}-${{ matrix.variant }}/" \;
+          mkdir -p dist
 
-          cat > "dist/${{ matrix.platform }}-${{ matrix.variant }}/BUILD_INFO.txt" <<EOF
+          if [ "${{ matrix.platform }}" = "ps4" ] || [ "${{ matrix.platform }}" = "ps5" ]; then
+            # PS4/PS5: upload .elf and .bin directly (ready for payload injection)
+            find "$variant_dir" -maxdepth 1 \( -name '*.elf' -o -name '*.bin' \) -print -exec cp {} dist/ \;
+            ls -la dist/
+
+          elif [ "${{ matrix.platform }}" = "macos" ]; then
+            # macOS: bundle into .app
+            elf=$(find "$variant_dir" -maxdepth 1 -name 'zftpd-*' ! -name '*.bin' ! -name '*.tar.gz' -type f | head -1)
+            if [ -z "$elf" ]; then
+              echo "ERROR: no ELF binary found in $variant_dir"
+              ls -la "$variant_dir"
+              exit 1
+            fi
+            # Extract version from ftp_config.h (same method as Makefile)
+            VERSION=$(grep -E 'define[[:space:]]+RELEASE_VERSION' include/ftp_config.h | head -1 | cut -d'"' -f2)
+            app_dir="dist/${elf##*/}.app"
+            mkdir -p "${app_dir}/Contents/MacOS"
+            cp "$elf" "${app_dir}/Contents/MacOS/zftpd"
+            chmod +x "${app_dir}/Contents/MacOS/zftpd"
+            cat > "${app_dir}/Contents/Info.plist" << PLISTEOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>zftpd</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.zftpd.server</string>
+              <key>CFBundleName</key>
+              <string>zftpd</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>${VERSION:-0.0.0}</string>
+              <key>CFBundleVersion</key>
+              <string>${VERSION:-0.0.0}</string>
+              <key>LSMinimumSystemVersion</key>
+              <string>10.15</string>
+              <key>NSHighResolutionCapable</key>
+              <true/>
+          </dict>
+          </plist>
+          PLISTEOF
+            tar -C dist -czf "dist/${elf##*/}.app.tar.gz" "${elf##*/}.app"
+            rm -rf "${app_dir}"
+            ls -la dist/
+
+          else
+            # Linux: standard tar.gz with BUILD_INFO
+            pkg_dir="dist/${{ matrix.platform }}-${{ matrix.variant }}"
+            mkdir -p "$pkg_dir"
+            find "$variant_dir" -maxdepth 1 -type f -print -exec cp {} "$pkg_dir/" \;
+            cat > "$pkg_dir/BUILD_INFO.txt" <<EOF
           project=zftpd
           platform=${{ matrix.platform }}
           zhttpd=${{ matrix.zhttpd }}
@@ -183,14 +234,16 @@ jobs:
           ref=${{ github.ref_name }}
           sha=${{ github.sha }}
           EOF
-
-          tar -C dist -czf "zftpd-${{ matrix.platform }}-${{ matrix.variant }}.tar.gz" "${{ matrix.platform }}-${{ matrix.variant }}"
+            tar -C dist -czf "dist/zftpd-${{ matrix.platform }}-${{ matrix.variant }}.tar.gz" "${{ matrix.platform }}-${{ matrix.variant }}"
+            rm -rf "$pkg_dir"
+            ls -la dist/
+          fi
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: zftpd-${{ matrix.platform }}-${{ matrix.variant }}
-          path: zftpd-${{ matrix.platform }}-${{ matrix.variant }}.tar.gz
+          path: dist/*
           if-no-files-found: error
           retention-days: 14
 
@@ -213,9 +266,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-assets
-          find release-artifacts -type f -name '*.tar.gz' -exec cp {} release-assets/ \;
+          find release-artifacts -type f \( -name '*.tar.gz' -o -name '*.elf' -o -name '*.bin' \) -exec cp {} release-assets/ \;
           cd release-assets
-          sha256sum *.tar.gz > SHA256SUMS.txt
+          if ls *.tar.gz *.elf *.bin >/dev/null 2>&1; then
+            sha256sum *.tar.gz *.elf *.bin > SHA256SUMS.txt 2>/dev/null
+          fi
           ls -lh
 
       - name: Create or update release
