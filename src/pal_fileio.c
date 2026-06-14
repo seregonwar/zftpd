@@ -84,6 +84,10 @@ SOFTWARE.
 /* Max recursion depth for cross-device directory move */
 #define PAL_MOVE_MAX_DEPTH 64U
 
+/* Keep diagnostic log lines within their fixed 256-byte buffers on GCC/fortify. */
+#define PAL_LOG_PATH_CHARS 120
+#define PAL_LOG_PATH_PAIR_CHARS 72
+
 /*
  * PAL_FILE_COPY_BUFFER_SIZE — per-buffer size for the copy pipeline.
  *
@@ -510,8 +514,9 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
     int e = errno;
     {
       char msg[256];
-      snprintf(msg, sizeof(msg), "[XDEV] open(src) failed: errno=%d path=%s", e,
-               src_path);
+      snprintf(msg, sizeof(msg),
+               "[XDEV] open(src) failed: errno=%d path=%.*s", e,
+               PAL_LOG_PATH_CHARS, src_path);
       ftp_log_line(FTP_LOG_WARN, msg);
     }
     if (out_errno != NULL) {
@@ -575,9 +580,10 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
         if (need_bytes > free_bytes) {
           char msg[256];
           snprintf(msg, sizeof(msg),
-                   "[XDEV] pre-flight ENOSPC: need=%llu free=%llu dst=%s",
+                   "[XDEV] pre-flight ENOSPC: need=%llu free=%llu dst=%.*s",
                    (unsigned long long)need_bytes,
-                   (unsigned long long)free_bytes, dst_path);
+                   (unsigned long long)free_bytes, PAL_LOG_PATH_CHARS,
+                   dst_path);
           ftp_log_line(FTP_LOG_WARN, msg);
           if (out_errno != NULL) {
             *out_errno = ENOSPC;
@@ -597,8 +603,9 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
     int e = errno;
     {
       char msg[256];
-      snprintf(msg, sizeof(msg), "[XDEV] open(tmp) failed: errno=%d path=%s", e,
-               tmp_path);
+      snprintf(msg, sizeof(msg),
+               "[XDEV] open(tmp) failed: errno=%d path=%.*s", e,
+               PAL_LOG_PATH_CHARS, tmp_path);
       ftp_log_line(FTP_LOG_WARN, msg);
     }
     if (out_errno != NULL) {
@@ -664,11 +671,11 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
     {
       char msg[256];
       snprintf(msg, sizeof(msg),
-               "[XDEV] pipeline mmap: buf0=%s buf1=%s bufsz=%u file=%s",
+               "[XDEV] pipeline mmap: buf0=%s buf1=%s bufsz=%u file=%.*s",
                (dbuf0 != NULL) ? "ok" : "NULL",
                (dbuf1 != NULL) ? "ok" : "NULL",
                (unsigned)PAL_FILE_COPY_BUFFER_SIZE,
-               src_path);
+               PAL_LOG_PATH_CHARS, src_path);
       ftp_log_line((dbuf0 && dbuf1) ? FTP_LOG_INFO : FTP_LOG_WARN, msg);
     }
 
@@ -698,8 +705,8 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
         char msg[256];
         snprintf(msg, sizeof(msg),
                  "[XDEV] pthread_create failed: errno=%d — "
-                 "falling back to serial copy for %s",
-                 pt_ret, src_path);
+                 "falling back to serial copy for %.*s",
+                 pt_ret, PAL_LOG_PATH_CHARS, src_path);
         ftp_log_line(FTP_LOG_WARN, msg);
       }
 
@@ -822,8 +829,8 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
         if (written < 0) {
           /* write() failed — write_errno was captured before mutex lock */
           char msg[256];
-          snprintf(msg, sizeof(msg), "[COPY] write failed: errno=%d dst=%s",
-                   write_errno, dst_path);
+          snprintf(msg, sizeof(msg), "[COPY] write failed: errno=%d dst=%.*s",
+                   write_errno, PAL_LOG_PATH_CHARS, dst_path);
           ftp_log_line(FTP_LOG_WARN, msg);
           if (out_errno != NULL) {
             *out_errno = write_errno;
@@ -831,8 +838,8 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
           out_err = FTP_ERR_FILE_WRITE;
         } else if (pipe.reader_err != 0) {
           char msg[256];
-          snprintf(msg, sizeof(msg), "[COPY] read failed: errno=%d src=%s",
-                   pipe.reader_err, src_path);
+          snprintf(msg, sizeof(msg), "[COPY] read failed: errno=%d src=%.*s",
+                   pipe.reader_err, PAL_LOG_PATH_CHARS, src_path);
           ftp_log_line(FTP_LOG_WARN, msg);
           if (out_errno != NULL) {
             *out_errno = pipe.reader_err;
@@ -870,10 +877,10 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
         char msg[256];
         snprintf(msg, sizeof(msg),
                  "[XDEV] pipeline mmap failed (buf0=%s buf1=%s) — "
-                 "falling back to serial copy for %s",
+                 "falling back to serial copy for %.*s",
                  (dbuf0 != NULL) ? "ok" : "NULL",
                  (dbuf1 != NULL) ? "ok" : "NULL",
-                 src_path);
+                 PAL_LOG_PATH_CHARS, src_path);
         ftp_log_line(FTP_LOG_WARN, msg);
       }
       if (dbuf0 != NULL) { (void)munmap(dbuf0, PAL_FILE_COPY_BUFFER_SIZE); }
@@ -885,10 +892,10 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
   {
     char msg[256];
     snprintf(msg, sizeof(msg),
-             "[XDEV] serial copy starting: file_size=%llu buf=%u src=%s",
+             "[XDEV] serial copy starting: file_size=%llu buf=%u src=%.*s",
              (unsigned long long)st.st_size,
              (unsigned)PAL_FILE_COPY_BUFFER_SIZE,
-             src_path);
+             PAL_LOG_PATH_CHARS, src_path);
     ftp_log_line(FTP_LOG_INFO, msg);
   }
 
@@ -902,10 +909,10 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
     {
       char msg[256];
       snprintf(msg, sizeof(msg),
-               "[XDEV] serial mmap failed: bufsz=%u errno=%d src=%s",
+               "[XDEV] serial mmap failed: bufsz=%u errno=%d src=%.*s",
                (unsigned)PAL_FILE_COPY_BUFFER_SIZE,
                errno,
-               src_path);
+               PAL_LOG_PATH_CHARS, src_path);
       ftp_log_line(FTP_LOG_WARN, msg);
     }
     out_err = FTP_ERR_OUT_OF_MEMORY;
@@ -972,11 +979,11 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
               char msg[256];
               snprintf(msg, sizeof(msg),
                        "[XDEV] write failed: errno=%d written_so_far=%llu "
-                       "file_size=%llu dst=%s",
+                       "file_size=%llu dst=%.*s",
                        write_errno,
                        (unsigned long long)serial_written,
                        (unsigned long long)st.st_size,
-                       dst_path);
+                       PAL_LOG_PATH_CHARS, dst_path);
               ftp_log_line(FTP_LOG_WARN, msg);
               if (out_errno != NULL) {
                 *out_errno = write_errno;
@@ -993,13 +1000,13 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
           serial_last_log = serial_written;
           char msg[256];
           snprintf(msg, sizeof(msg),
-                   "[XDEV] serial progress: %llu / %llu bytes (%.1f%%) dst=%s",
+                   "[XDEV] serial progress: %llu / %llu bytes (%.1f%%) dst=%.*s",
                    (unsigned long long)serial_written,
                    (unsigned long long)st.st_size,
                    (st.st_size > 0)
                        ? (100.0 * (double)serial_written / (double)st.st_size)
                        : 0.0,
-                   dst_path);
+                   PAL_LOG_PATH_CHARS, dst_path);
           ftp_log_line(FTP_LOG_INFO, msg);
         }
 
@@ -1023,8 +1030,9 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
         int e = errno;
         char msg[256];
         snprintf(msg, sizeof(msg),
-                 "[XDEV] read failed: errno=%d written_so_far=%llu src=%s",
-                 e, (unsigned long long)serial_written, src_path);
+                 "[XDEV] read failed: errno=%d written_so_far=%llu src=%.*s",
+                 e, (unsigned long long)serial_written, PAL_LOG_PATH_CHARS,
+                 src_path);
         ftp_log_line(FTP_LOG_WARN, msg);
         if (out_errno != NULL) {
           *out_errno = e;
@@ -1085,7 +1093,8 @@ copy_done:;
   {
     char msg[256];
     snprintf(msg, sizeof(msg),
-             "[XDEV] copy complete, renaming tmp -> dst: %s", dst_path);
+             "[XDEV] copy complete, renaming tmp -> dst: %.*s",
+             PAL_LOG_PATH_CHARS, dst_path);
     ftp_log_line(FTP_LOG_INFO, msg);
   }
 
@@ -1094,8 +1103,9 @@ copy_done:;
       int e = errno;
       char msg[256];
       snprintf(msg, sizeof(msg),
-               "[XDEV] rename(tmp->dst) failed: errno=%d tmp=%s dst=%s", e,
-               tmp_path, dst_path);
+               "[XDEV] rename(tmp->dst) failed: errno=%d tmp=%.*s dst=%.*s",
+               e, PAL_LOG_PATH_PAIR_CHARS, tmp_path, PAL_LOG_PATH_PAIR_CHARS,
+               dst_path);
       ftp_log_line(FTP_LOG_WARN, msg);
       if (out_errno != NULL) {
         *out_errno = e;
@@ -1459,7 +1469,8 @@ static ftp_error_t pal_dir_remove_recursive(const char *path, unsigned depth) {
     {
       char msg[256];
       snprintf(msg, sizeof(msg),
-               "[XDEV] opendir(cleanup) failed: errno=%d path=%s", errno, path);
+               "[XDEV] opendir(cleanup) failed: errno=%d path=%.*s", errno,
+               PAL_LOG_PATH_CHARS, path);
       ftp_log_line(FTP_LOG_WARN, msg);
     }
     return FTP_ERR_DIR_OPEN;
@@ -1496,8 +1507,8 @@ static ftp_error_t pal_dir_remove_recursive(const char *path, unsigned depth) {
         {
           char msg[256];
           snprintf(msg, sizeof(msg),
-                   "[XDEV] unlink(cleanup) failed: errno=%d path=%s", errno,
-                   child);
+                   "[XDEV] unlink(cleanup) failed: errno=%d path=%.*s", errno,
+                   PAL_LOG_PATH_CHARS, child);
           ftp_log_line(FTP_LOG_WARN, msg);
         }
         err = FTP_ERR_FILE_WRITE;
@@ -1516,7 +1527,8 @@ static ftp_error_t pal_dir_remove_recursive(const char *path, unsigned depth) {
       {
         char msg[256];
         snprintf(msg, sizeof(msg),
-                 "[XDEV] rmdir(cleanup) failed: errno=%d path=%s", errno, path);
+                 "[XDEV] rmdir(cleanup) failed: errno=%d path=%.*s", errno,
+                 PAL_LOG_PATH_CHARS, path);
         ftp_log_line(FTP_LOG_WARN, msg);
       }
       err = FTP_ERR_FILE_WRITE;
@@ -1548,8 +1560,8 @@ static ftp_error_t pal_copy_cross_device_r_ex(const char *src, const char *dst,
   if (depth > PAL_MOVE_MAX_DEPTH) {
     {
       char msg[256];
-      snprintf(msg, sizeof(msg), "[XDEV] max depth %u exceeded: %s",
-               (unsigned)PAL_MOVE_MAX_DEPTH, src);
+      snprintf(msg, sizeof(msg), "[XDEV] max depth %u exceeded: %.*s",
+               (unsigned)PAL_MOVE_MAX_DEPTH, PAL_LOG_PATH_CHARS, src);
       ftp_log_line(FTP_LOG_WARN, msg);
     }
     return FTP_ERR_PATH_TOO_LONG;
@@ -1557,7 +1569,8 @@ static ftp_error_t pal_copy_cross_device_r_ex(const char *src, const char *dst,
 
   if (depth == 0U) {
     char msg[256];
-    snprintf(msg, sizeof(msg), "[XDEV] cross-device move: %s -> %s", src, dst);
+    snprintf(msg, sizeof(msg), "[XDEV] cross-device move: %.*s -> %.*s",
+             PAL_LOG_PATH_PAIR_CHARS, src, PAL_LOG_PATH_PAIR_CHARS, dst);
     ftp_log_line(FTP_LOG_INFO, msg);
   }
 
@@ -1567,8 +1580,9 @@ static ftp_error_t pal_copy_cross_device_r_ex(const char *src, const char *dst,
     int e = errno;
     {
       char msg[256];
-      snprintf(msg, sizeof(msg), "[XDEV] stat(src) failed: errno=%d path=%s", e,
-               src);
+      snprintf(msg, sizeof(msg),
+               "[XDEV] stat(src) failed: errno=%d path=%.*s", e,
+               PAL_LOG_PATH_CHARS, src);
       ftp_log_line(FTP_LOG_WARN, msg);
     }
     return (e == ENOENT) ? FTP_ERR_NOT_FOUND : FTP_ERR_FILE_STAT;
@@ -1590,8 +1604,9 @@ static ftp_error_t pal_copy_cross_device_r_ex(const char *src, const char *dst,
         int os_err = *errno_ptr; /* always valid: either *out_errno or local_errno */
         char msg[256];
         snprintf(msg, sizeof(msg),
-                 "[XDEV] file copy failed (err=%d, errno=%d): %s -> %s",
-                 (int)err, os_err, src, dst);
+                 "[XDEV] file copy failed (err=%d, errno=%d): %.*s -> %.*s",
+                 (int)err, os_err, PAL_LOG_PATH_PAIR_CHARS, src,
+                 PAL_LOG_PATH_PAIR_CHARS, dst);
         ftp_log_line(FTP_LOG_WARN, msg);
       }
       return err;
@@ -1601,7 +1616,8 @@ static ftp_error_t pal_copy_cross_device_r_ex(const char *src, const char *dst,
         {
           char msg[256];
           snprintf(msg, sizeof(msg),
-                   "[XDEV] unlink(src) failed: errno=%d path=%s", errno, src);
+                   "[XDEV] unlink(src) failed: errno=%d path=%.*s", errno,
+                   PAL_LOG_PATH_CHARS, src);
           ftp_log_line(FTP_LOG_WARN, msg);
         }
         /* Copy succeeded but source delete failed — not fatal,
@@ -1638,8 +1654,9 @@ static ftp_error_t pal_copy_cross_device_r_ex(const char *src, const char *dst,
       int e = errno;
       {
         char msg[256];
-        snprintf(msg, sizeof(msg), "[XDEV] mkdir(dst) failed: errno=%d path=%s",
-                 e, dst);
+        snprintf(msg, sizeof(msg),
+                 "[XDEV] mkdir(dst) failed: errno=%d path=%.*s", e,
+                 PAL_LOG_PATH_CHARS, dst);
         ftp_log_line(FTP_LOG_WARN, msg);
       }
       return FTP_ERR_FILE_WRITE;
@@ -1653,8 +1670,9 @@ static ftp_error_t pal_copy_cross_device_r_ex(const char *src, const char *dst,
   if (dir == NULL) {
     {
       char msg[256];
-      snprintf(msg, sizeof(msg), "[XDEV] opendir(src) failed: errno=%d path=%s",
-               errno, src);
+      snprintf(msg, sizeof(msg),
+               "[XDEV] opendir(src) failed: errno=%d path=%.*s", errno,
+               PAL_LOG_PATH_CHARS, src);
       ftp_log_line(FTP_LOG_WARN, msg);
     }
     if (dst_created_by_us != 0) {
@@ -1712,8 +1730,9 @@ static ftp_error_t pal_copy_cross_device_r_ex(const char *src, const char *dst,
     if (rmdir(src) < 0) {
       {
         char msg[256];
-        snprintf(msg, sizeof(msg), "[XDEV] rmdir(src) failed: errno=%d path=%s",
-                 errno, src);
+        snprintf(msg, sizeof(msg),
+                 "[XDEV] rmdir(src) failed: errno=%d path=%.*s", errno,
+                 PAL_LOG_PATH_CHARS, src);
         ftp_log_line(FTP_LOG_WARN, msg);
       }
       return FTP_ERR_FILE_WRITE;
