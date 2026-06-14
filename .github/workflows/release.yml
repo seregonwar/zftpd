@@ -83,6 +83,7 @@ jobs:
             build-essential \
             binutils \
             clang \
+            cmake \
             curl \
             gcc \
             libarchive-dev \
@@ -90,6 +91,7 @@ jobs:
             lld \
             llvm \
             make \
+            pkg-config \
             python3 \
             xxd
 
@@ -105,24 +107,46 @@ jobs:
             echo "/usr/local/opt/llvm/bin" >> "$GITHUB_PATH"
           fi
 
-      - name: Validate console SDK
-        if: matrix.platform == 'ps4' || matrix.platform == 'ps5'
+      - name: Clone and build PS4 Payload SDK
+        if: matrix.platform == 'ps4'
         run: |
           set -euo pipefail
-          if [ "${{ matrix.platform }}" = "ps4" ]; then
-            test -x external/ps4-payload-sdk/bin/orbis-clang
-            test -x external/ps4-payload-sdk/bin/orbis-strip
-          fi
-          if [ "${{ matrix.platform }}" = "ps5" ]; then
-            test -x external/ps5-payload-sdk/bin/prospero-clang
-            test -x external/ps5-payload-sdk/bin/prospero-strip
-          fi
+          sdk_src="$RUNNER_TEMP/ps4-payload-sdk"
+          sdk_dst="$GITHUB_WORKSPACE/ps4-payload-sdk-install"
+          git clone --recursive https://github.com/ps4-payload-dev/sdk.git "$sdk_src"
+          make -C "$sdk_src" -j"$(nproc)"
+          make -C "$sdk_src" DESTDIR="$sdk_dst" install
+          test -f "$sdk_dst/toolchain/orbis.mk"
+          test -x "$sdk_dst/bin/orbis-clang"
+          echo "PS4_PAYLOAD_SDK=$sdk_dst" >> "$GITHUB_ENV"
+
+      - name: Clone and build PS5 Payload SDK
+        if: matrix.platform == 'ps5'
+        run: |
+          set -euo pipefail
+          sdk_src="$RUNNER_TEMP/ps5-payload-sdk"
+          sdk_dst="$GITHUB_WORKSPACE/ps5-payload-sdk-install"
+          git clone --recursive https://github.com/ps5-payload-dev/sdk.git "$sdk_src"
+          make -C "$sdk_src" -j"$(nproc)"
+          make -C "$sdk_src" DESTDIR="$sdk_dst" install
+          test -f "$sdk_dst/toolchain/prospero.mk"
+          test -x "$sdk_dst/bin/prospero-clang"
+          echo "PS5_PAYLOAD_SDK=$sdk_dst" >> "$GITHUB_ENV"
 
       - name: Build release variant
         run: |
           set -euo pipefail
           make resources
+
+          sdk_args=()
+          if [ "${{ matrix.platform }}" = "ps4" ]; then
+            sdk_args+=(PS4_PAYLOAD_SDK="${PS4_PAYLOAD_SDK}")
+          elif [ "${{ matrix.platform }}" = "ps5" ]; then
+            sdk_args+=(PS5_PAYLOAD_SDK="${PS5_PAYLOAD_SDK}")
+          fi
+
           make \
+            "${sdk_args[@]}" \
             TARGET="${{ matrix.platform }}" \
             BUILD_TYPE=release \
             ENABLE_ZHTTPD="${{ matrix.zhttpd }}" \
