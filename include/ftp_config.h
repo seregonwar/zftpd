@@ -54,7 +54,7 @@ SOFTWARE.
  * Default FTP server port
  * @note Well-known FTP port is 21, but requires root on POSIX systems
  * @note Using 2121 as default for unprivileged operation on POSIX systems
- * @note Using 2122 as default on PS4/PS5 because 2121 may be occupied
+ * @note Using 2120 as default on PS4/PS5 because 2121 may be occupied
  */
 #ifndef FTP_DEFAULT_PORT
 #if defined(PS4) || defined(PS5) || defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
