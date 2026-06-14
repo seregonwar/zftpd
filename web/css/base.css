@@ -23,6 +23,19 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    linear-gradient(180deg, rgba(var(--acR), .06), transparent 220px),
+    linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px),
+    linear-gradient(180deg, rgba(255,255,255,.02) 1px, transparent 1px);
+  background-size: auto, 44px 44px, 44px 44px;
+}
+
 ::-webkit-scrollbar {
   width: 5px;
   height: 5px;
@@ -67,7 +80,8 @@ button, input, select, textarea {
 
 /* ══ UTILITY CLASSES ═════════════════════════════════════════════════════ */
 
-.hidden { display: none !important; }
+.hidden,
+[hidden] { display: none !important; }
 .sr-only {
   position: absolute;
   width: 1px;

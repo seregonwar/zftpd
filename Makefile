@@ -258,6 +258,8 @@ STRIP ?= strip
 ifeq ($(ENABLE_ZHTTPD),1)
     CFLAGS += -DENABLE_ZHTTPD=1
     CFLAGS += -DENABLE_WEB_UPLOAD=1
+    ENABLE_PKG_INSTALL ?= 0
+    CFLAGS += -DENABLE_PKG_INSTALL=$(ENABLE_PKG_INSTALL)
     ENABLE_LIBCURL ?= 1
     SOURCES += src/event_loop_kqueue.c
     SOURCES += src/http_server.c

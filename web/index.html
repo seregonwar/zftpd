@@ -8,20 +8,20 @@
   <!-- CSRF_TOKEN -->
 
   <!-- ══ Modular CSS ══ -->
-  <link rel="stylesheet" href="css/variables.css?v=3">
-  <link rel="stylesheet" href="css/base.css?v=3">
-  <link rel="stylesheet" href="css/layout.css?v=3">
-  <link rel="stylesheet" href="css/components.css?v=3">
-  <link rel="stylesheet" href="css/file-explorer.css?v=3">
-  <link rel="stylesheet" href="css/file-manager.css?v=3">
-  <link rel="stylesheet" href="css/download-manager.css?v=3">
-  <link rel="stylesheet" href="css/dashboard.css?v=3">
-  <link rel="stylesheet" href="css/games.css?v=3">
-  <link rel="stylesheet" href="css/settings.css?v=3">
-  <link rel="stylesheet" href="css/context-menu.css?v=3">
-  <link rel="stylesheet" href="css/transfer-tray.css?v=3">
-  <link rel="stylesheet" href="css/stats-monitor.css?v=3">
-  <link rel="stylesheet" href="css/responsive.css?v=3">
+  <link rel="stylesheet" href="css/variables.css?v=13">
+  <link rel="stylesheet" href="css/base.css?v=13">
+  <link rel="stylesheet" href="css/layout.css?v=13">
+  <link rel="stylesheet" href="css/components.css?v=13">
+  <link rel="stylesheet" href="css/file-explorer.css?v=13">
+  <link rel="stylesheet" href="css/file-manager.css?v=13">
+  <link rel="stylesheet" href="css/download-manager.css?v=13">
+  <link rel="stylesheet" href="css/dashboard.css?v=13">
+  <link rel="stylesheet" href="css/games.css?v=13">
+  <link rel="stylesheet" href="css/settings.css?v=13">
+  <link rel="stylesheet" href="css/context-menu.css?v=13">
+  <link rel="stylesheet" href="css/transfer-tray.css?v=13">
+  <link rel="stylesheet" href="css/stats-monitor.css?v=13">
+  <link rel="stylesheet" href="css/responsive.css?v=13">
 
   <!-- Theme dropdown inline styles (small, keep in HTML) -->
   <style>
@@ -59,7 +59,38 @@
         </div>
       </div>
     </div>
+    <div class="topbar-center">
+      <button id="cmd-btn" class="cmd-trigger" title="Command Center">
+        <span class="cmd-trigger-ico"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg></span>
+        <span class="cmd-trigger-text">
+          <span id="tb-view-label" class="cmd-view">Dashboard</span>
+          <span id="tb-context-label" class="cmd-context">/</span>
+        </span>
+      </button>
+      <div class="topbar-tools" aria-label="Quick tools">
+        <button id="tb-tool-upload" class="tb-tool" title="Upload files">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        </button>
+        <button id="tb-tool-folder" class="tb-tool" title="New folder">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 10v6m-3-3h6"/><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+        </button>
+        <button id="tb-tool-refresh" class="tb-tool" title="Refresh current view">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        </button>
+      </div>
+    </div>
     <div class="topbar-right">
+      <div class="tb-health">
+        <div id="tb-storage" class="tb-health-card" title="Storage usage">
+          <span>Storage</span>
+          <b>&mdash;</b>
+          <i><em></em></i>
+        </div>
+        <div id="tb-temp" class="tb-health-card compact" title="APU temperature">
+          <span>APU</span>
+          <b>&mdash;</b>
+        </div>
+      </div>
       <div id="status" class="status-pill status-ok">
         <span class="sdot"></span>
         <span class="stxt">Connected</span>
@@ -98,27 +129,27 @@
 
   <!-- ══ NAV TABS ═════════════════════════════════════════════════════════ -->
   <nav class="nav-tabs">
-    <button class="nav-tab active" data-view="dashboard">
+    <button class="nav-tab active" data-view="dashboard" data-label="Home">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
       Dashboard
     </button>
-    <button class="nav-tab" data-view="explorer">
+    <button class="nav-tab" data-view="explorer" data-label="Explorer">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
       Explorer
     </button>
-    <button class="nav-tab" data-view="filemanager">
+    <button class="nav-tab" data-view="filemanager" data-label="Files">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><line x1="12" y1="3" x2="12" y2="21"/></svg>
       File Manager
     </button>
-    <button class="nav-tab" data-view="downloads">
+    <button class="nav-tab" data-view="downloads" data-label="Queue">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
       Downloads
     </button>
-    <button class="nav-tab" data-view="games">
+    <button class="nav-tab" data-view="games" data-label="Games">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21a9 9 0 0 0 9-9c0-3.3-1-5.3-2.5-6.6-1.5-1.3-4-2.4-6.5-2.4S7.5 4.1 6 5.4C4.5 6.7 3.5 8.7 3.5 12a9 9 0 0 0 9 9z"/><path d="M12 12h.01M8 12h.01M16 12h.01M12 8h.01M12 16h.01"/></svg>
       Games
     </button>
-    <button class="nav-tab" data-view="settings">
+    <button class="nav-tab" data-view="settings" data-label="Settings">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
       Settings
     </button>
@@ -215,53 +246,170 @@
       <button id="btn-up" class="btn" title="Up"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m18 15-6-6-6 6"/></svg></button>
       <button id="btn-ref" class="btn" title="Refresh"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
       <div class="tb-sep"></div>
-      <button class="btn" onclick="document.getElementById('file-input').click()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg> Upload</button>
-      <button class="btn" onclick="ZFTPD.explorer && ZFTPD.modal && ZFTPD.modal.prompt('New Folder','').then(function(n){if(n)ZFTPD.api.mkdir(ZFTPD.state.path,n).then(function(){ZFTPD.explorer.nav(ZFTPD.state.path)})})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 10v6m-3-3h6"/><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg> New Folder</button>
+      <button id="btn-upload-trigger" class="btn" onclick="document.getElementById('file-input').click()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg> Upload</button>
+      <button id="btn-new-folder-trigger" class="btn" onclick="ZFTPD.explorer && ZFTPD.modal && ZFTPD.modal.prompt('New Folder','').then(function(n){if(n)ZFTPD.api.mkdir(ZFTPD.state.path,n).then(function(){ZFTPD.explorer.nav(ZFTPD.state.path)})})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 10v6m-3-3h6"/><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg> New Folder</button>
+      <div class="tb-sep"></div>
+      <button id="btn-open-selected" class="btn icon-only" title="Open selected" disabled><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg></button>
+      <button id="btn-download-selected" class="btn icon-only" title="Download selected files" disabled><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button>
+      <button id="btn-send-selected" class="btn icon-only" title="Send selected to folder" disabled><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg></button>
+      <button id="btn-delete-selected" class="btn icon-only danger" title="Delete selected" disabled><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
       <div class="tb-sep"></div>
       <div class="vg">
         <button id="vb-grid" class="vb active" title="Grid"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/></svg></button>
         <button id="vb-list" class="vb" title="List"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg></button>
         <button id="vb-details" class="vb" title="Details"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3h18v18H3z"/><path d="M3 9h18"/><path d="M3 15h18"/><path d="M9 3v18"/></svg></button>
       </div>
+      <select id="sort-select" class="sort-select" title="Sort files">
+        <option value="name">Name</option>
+        <option value="size">Size</option>
+        <option value="ext">Type</option>
+        <option value="mtime">Modified</option>
+      </select>
+      <button id="sort-dir" class="btn icon-only" title="Toggle sort direction"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m7 15 5 5 5-5"/><path d="M12 20V4"/></svg></button>
       <div class="spacer"></div>
       <div class="search-wrap">
         <span class="search-ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg></span>
         <input id="search" class="search" type="text" placeholder="Search files&hellip;">
       </div>
+      <button id="btn-inspector" class="btn icon-only active" title="Toggle inspector"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M15 3v18"/></svg></button>
       <input id="file-input" type="file" multiple style="display:none">
     </div>
     <div id="breadcrumb" class="breadcrumb"></div>
-    <div class="content">
-      <div class="fl-header"><span id="fl-count" class="fl-count"></span></div>
-      <div id="file-list" class="fl vg-grid"></div>
+    <div class="content explorer-content">
+      <div class="explorer-shell">
+        <main class="explorer-main">
+          <div class="fl-header">
+            <div class="fl-titlebar">
+              <span id="fl-count" class="fl-count"></span>
+              <span id="fl-selection" class="fl-selection"></span>
+            </div>
+            <div id="fl-filters" class="fl-filters">
+              <button class="filter-chip active" data-filter="all">All</button>
+              <button class="filter-chip" data-filter="media">Media</button>
+              <button class="filter-chip" data-filter="docs">Docs</button>
+              <button class="filter-chip" data-filter="archives">Archives</button>
+              <button class="filter-chip" data-filter="games">Games</button>
+            </div>
+          </div>
+          <div id="explorer-metrics" class="explorer-metrics">
+            <div class="explorer-metric">
+              <span>Folders</span>
+              <b id="mx-folders">&mdash;</b>
+            </div>
+            <div class="explorer-metric">
+              <span>Files</span>
+              <b id="mx-files">&mdash;</b>
+            </div>
+            <div class="explorer-metric">
+              <span>Media</span>
+              <b id="mx-media">&mdash;</b>
+            </div>
+            <div class="explorer-metric">
+              <span>Packages</span>
+              <b id="mx-archives">&mdash;</b>
+            </div>
+            <div class="explorer-metric">
+              <span>Size</span>
+              <b id="mx-size">&mdash;</b>
+            </div>
+          </div>
+          <div id="file-list" class="fl vg-grid"></div>
+        </main>
+        <aside id="preview-pane" class="preview-pane"></aside>
+      </div>
     </div>
   </div>
 
   <!-- ══ VIEW: FILE MANAGER ═══════════════════════════════════════════════ -->
   <div id="view-filemanager" class="view">
-    <div class="content" style="padding-top:8px;">
-      <div class="fm-container">
-        <!-- Left Panel -->
-        <div class="fm-panel">
-          <div class="fm-panel-header"><span class="fm-label">Source</span><button id="fm-refresh-left" class="btn" style="margin-left:auto;padding:3px 8px;font-size:10px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button></div>
-          <div id="fm-left-path" class="fm-panel-path"></div>
-          <div id="fm-left-body" class="fm-panel-body"></div>
-          <div id="fm-left-footer" class="fm-panel-footer"></div>
+    <div class="content fm-content">
+      <div class="fm-shell">
+        <header class="fm-topline">
+          <div class="fm-title-block">
+            <div class="fm-eyebrow">Dual Pane Transfer Client</div>
+            <h1>File Manager</h1>
+            <p>Copy, compare, rename, and organize files between two live locations.</p>
+          </div>
+          <div class="fm-top-actions">
+            <button id="fm-layout-toggle" class="btn" type="button">Classic</button>
+            <button id="fm-refresh-all" class="btn" type="button">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+              Refresh
+            </button>
+          </div>
+        </header>
+
+        <div class="fm-location-strip">
+          <div class="fm-preset-block">
+            <span>Source</span>
+            <button class="fm-preset" data-fm-side="left" data-fm-path="/" type="button">Root</button>
+            <button class="fm-preset" data-fm-side="left" data-fm-path="/data" type="button">Data</button>
+            <button class="fm-preset" data-fm-side="left" data-fm-path="/user" type="button">User</button>
+            <button class="fm-preset" data-fm-side="left" data-fm-path="/mnt/usb0" type="button">USB0</button>
+          </div>
+          <div class="fm-preset-block">
+            <span>Destination</span>
+            <button class="fm-preset" data-fm-side="right" data-fm-path="/" type="button">Root</button>
+            <button class="fm-preset" data-fm-side="right" data-fm-path="/data" type="button">Data</button>
+            <button class="fm-preset" data-fm-side="right" data-fm-path="/user" type="button">User</button>
+            <button class="fm-preset" data-fm-side="right" data-fm-path="/mnt/usb0" type="button">USB0</button>
+          </div>
         </div>
 
-        <!-- Center Actions -->
-        <div class="fm-center">
-          <button id="fm-copy-right" class="fm-action-btn" title="Copy to right"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg></button>
-          <button id="fm-copy-left" class="fm-action-btn" title="Copy to left"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m15 18-6-6 6-6"/></svg></button>
-          <button id="fm-delete" class="fm-action-btn" title="Delete selected" style="color:var(--er);"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
-        </div>
+        <div class="fm-container">
+          <!-- Left Panel -->
+          <div id="fm-panel-left" class="fm-panel active" data-side="left">
+            <div class="fm-panel-header">
+              <div class="fm-panel-title">
+                <span class="fm-label">Source</span>
+                <b id="fm-left-current">/</b>
+              </div>
+              <div class="fm-panel-tools">
+                <button id="fm-left-up" class="btn btn-icon" type="button" title="Parent folder"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m18 15-6-6-6 6"/></svg></button>
+                <button id="fm-refresh-left" class="btn btn-icon" type="button" title="Refresh source"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
+              </div>
+            </div>
+            <div class="fm-panel-actions">
+              <button id="fm-left-mkdir" class="btn" type="button">New Folder</button>
+              <button id="fm-left-rename" class="btn" type="button">Rename</button>
+              <button id="fm-left-download" class="btn" type="button">Download</button>
+            </div>
+            <div id="fm-left-path" class="fm-panel-path"></div>
+            <div class="fm-table-head"><span>Name</span><span>Size</span><span>Modified</span></div>
+            <div id="fm-left-body" class="fm-panel-body"></div>
+            <div id="fm-left-footer" class="fm-panel-footer"></div>
+          </div>
 
-        <!-- Right Panel -->
-        <div class="fm-panel">
-          <div class="fm-panel-header"><span class="fm-label">Destination</span><button id="fm-refresh-right" class="btn" style="margin-left:auto;padding:3px 8px;font-size:10px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button></div>
-          <div id="fm-right-path" class="fm-panel-path"></div>
-          <div id="fm-right-body" class="fm-panel-body"></div>
-          <div id="fm-right-footer" class="fm-panel-footer"></div>
+          <!-- Center Actions -->
+          <div class="fm-center">
+            <button id="fm-copy-right" class="fm-action-btn primary" type="button" title="Copy selected to destination"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg><span>Copy</span></button>
+            <button id="fm-copy-left" class="fm-action-btn" type="button" title="Copy selected to source"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m15 18-6-6 6-6"/></svg><span>Copy</span></button>
+            <button id="fm-swap" class="fm-action-btn" type="button" title="Swap panels"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg><span>Swap</span></button>
+            <button id="fm-delete" class="fm-action-btn danger" type="button" title="Delete selected"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg><span>Delete</span></button>
+          </div>
+
+          <!-- Right Panel -->
+          <div id="fm-panel-right" class="fm-panel" data-side="right">
+            <div class="fm-panel-header">
+              <div class="fm-panel-title">
+                <span class="fm-label">Destination</span>
+                <b id="fm-right-current">/</b>
+              </div>
+              <div class="fm-panel-tools">
+                <button id="fm-right-up" class="btn btn-icon" type="button" title="Parent folder"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m18 15-6-6-6 6"/></svg></button>
+                <button id="fm-refresh-right" class="btn btn-icon" type="button" title="Refresh destination"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
+              </div>
+            </div>
+            <div class="fm-panel-actions">
+              <button id="fm-right-mkdir" class="btn" type="button">New Folder</button>
+              <button id="fm-right-rename" class="btn" type="button">Rename</button>
+              <button id="fm-right-download" class="btn" type="button">Download</button>
+            </div>
+            <div id="fm-right-path" class="fm-panel-path"></div>
+            <div class="fm-table-head"><span>Name</span><span>Size</span><span>Modified</span></div>
+            <div id="fm-right-body" class="fm-panel-body"></div>
+            <div id="fm-right-footer" class="fm-panel-footer"></div>
+          </div>
         </div>
       </div>
     </div>
@@ -331,37 +479,90 @@
   <!-- ══ VIEW: GAMES ══════════════════════════════════════════════════════ -->
   <div id="view-games" class="view">
     <div class="content">
-      <div class="games-xmb">
-        <div class="games-xmb-header">
-          <div>
-            <div class="games-xmb-title">Games</div>
-            <div class="games-xmb-sub">PS4-style XMB library with install and launch controls</div>
+      <div class="games-console">
+        <header class="games-command-panel">
+          <div class="games-title-block">
+            <div class="games-title-row">
+              <div class="games-title-icon" aria-hidden="true">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="6" y1="12" x2="10" y2="12"/><line x1="8" y1="10" x2="8" y2="14"/><line x1="15" y1="13" x2="15.01" y2="13"/><line x1="18" y1="11" x2="18.01" y2="11"/><path d="M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1.102 0 2.117-.476 2.755-1.242l1.287-1.543a2 2 0 0 1 1.537-.715h2.842a2 2 0 0 1 1.537.715l1.287 1.543c.638.766 1.653 1.242 2.755 1.242a3 3 0 0 0 3-3c0-1.544-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z"/></svg>
+              </div>
+              <div>
+                <div class="games-eyebrow">Game Operations</div>
+                <h1>Games</h1>
+                <p>Installed apps with remote launch and visibility repair controls.</p>
+              </div>
+            </div>
           </div>
-          <div class="games-xmb-tools">
+          <div class="games-summary">
+            <div class="games-summary-card">
+              <span>Installed</span>
+              <b id="games-installed-count">&mdash;</b>
+            </div>
+            <div class="games-summary-card">
+              <span>Launch</span>
+              <b>Remote</b>
+            </div>
+            <div class="games-summary-card wide">
+              <span>Visibility</span>
+              <b>Repair</b>
+            </div>
+          </div>
+          <div class="games-command-tools">
             <button id="games-repair-btn" class="btn">Repair Visibility</button>
             <button id="games-refresh-btn" class="btn">Refresh</button>
           </div>
+        </header>
+
+        <div class="games-ops-grid pkg-install-feature" hidden aria-hidden="true">
+          <section class="games-install-panel">
+            <div class="games-install-copy">
+              <div class="games-panel-title">Package Installer</div>
+              <div class="games-panel-sub">Choose a local PKG/fPKG from the File Explorer picker, then queue it for install.</div>
+            </div>
+            <div class="games-actions-row games-pkg-picker-row">
+              <button id="games-pkg-browse-btn" class="btn" type="button">Browse PKG</button>
+              <div id="games-selected-pkg" class="games-selected-pkg empty">No package selected</div>
+              <input id="games-install-path" type="hidden" value="">
+              <button id="games-install-btn" class="btn primary">Install</button>
+              <button id="games-reinstall-btn" class="btn">Reinstall</button>
+            </div>
+            <div id="games-install-status" class="games-install-status">
+              <span>No active install task</span>
+              <i><em></em></i>
+            </div>
+          </section>
+
+          <section class="games-install-panel games-upload-panel">
+            <div class="games-install-copy">
+              <div class="games-panel-title">PC PKG Stream Installer</div>
+              <div class="games-panel-sub">Choose a PKG/fPKG on this computer, stream it to console storage, then install it automatically.</div>
+            </div>
+            <div class="games-actions-row games-upload-row">
+              <button id="games-upload-pick-btn" class="btn" type="button">Choose PKG</button>
+              <div id="games-upload-file-label" class="games-selected-pkg empty">No PC package selected</div>
+              <input id="games-upload-file" type="file" accept=".pkg,.fpkg,.ffpkg" style="display:none">
+              <input id="games-upload-dst" class="games-input" type="text" value="/data/Packages" placeholder="/data/Packages">
+              <button id="games-upload-dst-pick" class="btn" type="button">Folder</button>
+              <button id="games-upload-install-btn" class="btn primary" type="button">Upload &amp; Install</button>
+            </div>
+            <div id="games-upload-status" class="games-install-status">
+              <span>No active PC package upload</span>
+              <i><em></em></i>
+            </div>
+          </section>
         </div>
 
-        <div class="games-actions">
-          <div class="games-actions-row">
-            <input id="games-install-path" class="games-input" type="text" placeholder="/mnt/usb0/MyGame.pkg">
-            <button id="games-install-btn" class="btn">Install</button>
-            <button id="games-reinstall-btn" class="btn">Reinstall</button>
-            <button id="games-scan-btn" class="btn">Scan PKG/exFAT</button>
-          </div>
-          <div id="games-install-status" class="games-install-status">No active install task</div>
+        <div class="games-workspace">
+          <section class="games-shelf games-installed">
+            <div class="games-shelf-head">
+              <div>
+                <div class="games-shelf-title">Installed Apps</div>
+                <div class="games-shelf-sub">Launch, repair visibility, or uninstall registered titles.</div>
+              </div>
+            </div>
+            <div id="games-installed-list" class="games-grid"></div>
+          </section>
         </div>
-
-        <section class="games-shelf">
-          <div class="games-shelf-title">Installed Apps</div>
-          <div id="games-installed-list" class="games-xmb-row"></div>
-        </section>
-
-        <section class="games-shelf">
-          <div class="games-shelf-title">Detected Game Images</div>
-          <div id="games-images-list" class="games-xmb-row"></div>
-        </section>
       </div>
     </div>
   </div>
@@ -395,17 +596,29 @@
   <!-- Toast Notifications -->
   <div id="toast-wrap" class="toast-wrap"></div>
 
+  <!-- Command Center -->
+  <div id="cmd-palette" class="cmd-palette">
+    <div class="cmd-card">
+      <div class="cmd-input-row">
+        <span class="cmd-input-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg></span>
+        <input id="cmd-input" class="cmd-input" type="text" placeholder="Search commands">
+        <button id="cmd-close" class="cmd-close" title="Close"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
+      </div>
+      <div id="cmd-list" class="cmd-list"></div>
+    </div>
+  </div>
+
   <!-- ══ MODULAR JS ═══════════════════════════════════════════════════════ -->
-  <script src="js/utils.js?v=3"></script>
-  <script src="js/icons.js?v=3"></script>
-  <script src="js/api.js?v=3"></script>
-  <script src="js/views/dashboard.js?v=3"></script>
-  <script src="js/views/explorer.js?v=3"></script>
-  <script src="js/views/file-manager.js?v=3"></script>
-  <script src="js/views/download-mgr.js?v=3"></script>
-  <script src="js/views/games.js?v=3"></script>
-  <script src="js/views/settings.js?v=3"></script>
-  <script src="js/app.js?v=3"></script>
+  <script src="js/utils.js?v=13"></script>
+  <script src="js/icons.js?v=13"></script>
+  <script src="js/api.js?v=13"></script>
+  <script src="js/views/dashboard.js?v=13"></script>
+  <script src="js/views/explorer.js?v=13"></script>
+  <script src="js/views/file-manager.js?v=13"></script>
+  <script src="js/views/download-mgr.js?v=13"></script>
+  <script src="js/views/games.js?v=13"></script>
+  <script src="js/views/settings.js?v=13"></script>
+  <script src="js/app.js?v=13"></script>
 
 </body>
 </html>

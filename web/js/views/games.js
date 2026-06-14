@@ -14,20 +14,45 @@ var ZFTPD = ZFTPD || {};
 
   var _bound = false;
   var _statusTimer = null;
+  var _uploadXhr = null;
+  var _uploadFile = null;
+  var _uploadCancelled = false;
   var _lastTaskId = -1;
   var _lastMilestone = -1;
   var _lastErrorCode = 0;
   var _installed = [];
-  var _images = [];
-  var _scanRoots = ['/mnt/usb0', '/mnt/usb1', '/data', '/user', '/'];
-  var _gameExts = { pkg: 1, fpkg: 1, ffpkg: 1, exfat: 1 };
+  var _selectedPackagePath = '';
+  var DEFAULT_UPLOAD_DIR = '/data/Packages';
 
   games.refresh = function () {
     bindUI();
+    syncPkgInstallFeature();
+    if (pkgInstallEnabled()) {
+      syncPackageSelection();
+      syncUploadSelection();
+      startStatusPolling();
+      pollInstallStatus();
+    }
     loadInstalled();
-    startStatusPolling();
-    pollInstallStatus();
   };
+
+  games.refreshStatus = function () {
+    if (pkgInstallEnabled()) pollInstallStatus();
+    loadInstalled();
+  };
+
+  function pkgInstallEnabled() {
+    return !!(Z.featureEnabled && Z.featureEnabled('pkgInstall'));
+  }
+
+  function syncPkgInstallFeature() {
+    var enabled = pkgInstallEnabled();
+    var nodes = D.querySelectorAll('.pkg-install-feature');
+    for (var i = 0; i < nodes.length; i++) {
+      nodes[i].hidden = !enabled;
+      nodes[i].setAttribute('aria-hidden', enabled ? 'false' : 'true');
+    }
+  }
 
   function bindUI() {
     if (_bound) return;
@@ -36,7 +61,7 @@ var ZFTPD = ZFTPD || {};
     var refreshBtn = $('games-refresh-btn');
     if (refreshBtn) refreshBtn.onclick = function () {
       loadInstalled();
-      pollInstallStatus();
+      if (pkgInstallEnabled()) pollInstallStatus();
     };
 
     var repairBtn = $('games-repair-btn');
@@ -55,16 +80,15 @@ var ZFTPD = ZFTPD || {};
       };
     }
 
-    var scanBtn = $('games-scan-btn');
-    if (scanBtn) scanBtn.onclick = scanImages;
+    var browseBtn = $('games-pkg-browse-btn');
+    if (browseBtn) browseBtn.onclick = pickPackage;
 
     var installBtn = $('games-install-btn');
     if (installBtn) {
       installBtn.onclick = function () {
-        var inp = $('games-install-path');
-        var p = inp ? (inp.value || '').trim() : '';
+        var p = selectedPackagePath();
         if (!p) {
-          Z.toast('Insert a PKG path', 'wn');
+          Z.toast('Select a PKG package first', 'wn');
           return;
         }
         doInstall(p, false);
@@ -74,25 +98,240 @@ var ZFTPD = ZFTPD || {};
     var reinstallBtn = $('games-reinstall-btn');
     if (reinstallBtn) {
       reinstallBtn.onclick = function () {
-        var inp = $('games-install-path');
-        var p = inp ? (inp.value || '').trim() : '';
+        var p = selectedPackagePath();
         if (!p) {
-          Z.toast('Insert a PKG path', 'wn');
+          Z.toast('Select a PKG package first', 'wn');
           return;
         }
         doInstall(p, true);
       };
     }
+
+    var uploadPickBtn = $('games-upload-pick-btn');
+    if (uploadPickBtn) uploadPickBtn.onclick = function () {
+      if (!pkgInstallEnabled()) return installDisabledNotice();
+      var input = $('games-upload-file');
+      if (input) input.click();
+    };
+
+    var uploadFile = $('games-upload-file');
+    if (uploadFile) {
+      uploadFile.onchange = function (ev) {
+        var files = ev && ev.target ? ev.target.files : null;
+        setUploadFile(files && files.length ? files[0] : null);
+        uploadFile.value = '';
+      };
+    }
+
+    var uploadDstPick = $('games-upload-dst-pick');
+    if (uploadDstPick) uploadDstPick.onclick = pickUploadDestination;
+
+    var uploadInstallBtn = $('games-upload-install-btn');
+    if (uploadInstallBtn) uploadInstallBtn.onclick = startPcUploadInstall;
+  }
+
+  function installDisabledNotice() {
+    Z.toast('PKG installation is disabled for now. Remote app launch remains available.', 'wn');
+  }
+
+  function pickPackage() {
+    if (!pkgInstallEnabled()) {
+      installDisabledNotice();
+      return;
+    }
+    if (!Z.modal || !Z.modal.filePicker) {
+      Z.toast('File picker unavailable', 'er');
+      return;
+    }
+
+    var startPath = (Z.state && Z.state.path) ? Z.state.path : '/';
+    Z.modal.filePicker('Select PKG package', startPath, {
+      extensions: ['pkg', 'fpkg', 'ffpkg'],
+      hint: 'Browse folders and choose a local PKG/fPKG package.'
+    }).then(function (path) {
+      if (!path) return;
+      setSelectedPackage(path);
+      Z.toast('Package selected', 'ok');
+    });
+  }
+
+  function selectedPackagePath() {
+    var inp = $('games-install-path');
+    var p = inp ? (inp.value || '').trim() : '';
+    return p || _selectedPackagePath;
+  }
+
+  function setSelectedPackage(path) {
+    _selectedPackagePath = path || '';
+    syncPackageSelection();
+  }
+
+  function syncPackageSelection() {
+    var p = _selectedPackagePath || '';
+    var hidden = $('games-install-path');
+    var selected = $('games-selected-pkg');
+    var installBtn = $('games-install-btn');
+    var reinstallBtn = $('games-reinstall-btn');
+
+    if (hidden) hidden.value = p;
+    if (selected) {
+      selected.textContent = p || 'No package selected';
+      selected.title = p || '';
+      if (p) selected.classList.remove('empty');
+      else selected.classList.add('empty');
+    }
+    if (installBtn) installBtn.disabled = !p || !pkgInstallEnabled();
+    if (reinstallBtn) reinstallBtn.disabled = !p || !pkgInstallEnabled();
+  }
+
+  function setUploadFile(file) {
+    if (!pkgInstallEnabled()) {
+      _uploadFile = null;
+      syncUploadSelection();
+      installDisabledNotice();
+      return;
+    }
+    if (file && Z.isGamePackage && !Z.isGamePackage(file.name)) {
+      Z.toast('Select a PKG/fPKG package from your computer', 'wn');
+      _uploadFile = null;
+    } else {
+      _uploadFile = file || null;
+    }
+    syncUploadSelection();
+  }
+
+  function syncUploadSelection() {
+    var label = $('games-upload-file-label');
+    var dst = $('games-upload-dst');
+    var btn = $('games-upload-install-btn');
+    if (dst && !(dst.value || '').trim()) dst.value = DEFAULT_UPLOAD_DIR;
+    if (label) {
+      if (_uploadFile) {
+        label.textContent = _uploadFile.name + ' • ' + Z.bytes(_uploadFile.size || 0);
+        label.title = _uploadFile.name;
+        label.classList.remove('empty');
+      } else {
+        label.textContent = 'No PC package selected';
+        label.title = '';
+        label.classList.add('empty');
+      }
+    }
+    if (btn) btn.disabled = !_uploadFile || !pkgInstallEnabled();
+  }
+
+  function pickUploadDestination() {
+    if (!pkgInstallEnabled()) {
+      installDisabledNotice();
+      return;
+    }
+    if (!Z.modal || !Z.modal.folderPicker) {
+      Z.toast('Folder picker unavailable', 'er');
+      return;
+    }
+    var dst = $('games-upload-dst');
+    var start = dst && (dst.value || '').trim() ? dst.value.trim() : DEFAULT_UPLOAD_DIR;
+    Z.modal.folderPicker('Choose upload destination', start).then(function (path) {
+      if (!path) return;
+      if (dst) dst.value = path;
+    });
+  }
+
+  function startPcUploadInstall() {
+    if (!pkgInstallEnabled()) {
+      installDisabledNotice();
+      return;
+    }
+    if (!_uploadFile) {
+      Z.toast('Choose a PC package first', 'wn');
+      return;
+    }
+    if (Z.isGamePackage && !Z.isGamePackage(_uploadFile.name)) {
+      Z.toast('Select a PKG/fPKG package from your computer', 'wn');
+      return;
+    }
+    if (!Z.ensureTransferIdle()) return;
+
+    var file = _uploadFile;
+    var dstEl = $('games-upload-dst');
+    var dst = dstEl ? (dstEl.value || '').trim() : DEFAULT_UPLOAD_DIR;
+    dst = dst || DEFAULT_UPLOAD_DIR;
+
+    var uploadedPath = Z.join(dst, file.name);
+    var started = Date.now();
+    var previousBytes = 0;
+    var previousTime = Date.now();
+
+    _uploadCancelled = false;
+    renderUploadStatus({ label: 'Streaming ' + file.name + ' from PC…', progress: 0, kind: 'ok' });
+
+    Z.showTransferLock({
+      label: 'UPLOADING PKG',
+      filename: file.name,
+      dest: dst,
+      onCancel: function () {
+        _uploadCancelled = true;
+        if (_uploadXhr) _uploadXhr.abort();
+        _uploadXhr = null;
+        Z.hideTransferLock();
+        renderUploadStatus({ label: 'Upload cancelled', progress: 100, kind: 'er' });
+      }
+    });
+
+    var uploadPromise = Z.api.upload(dst, file, function (pct, loaded, total) {
+      var now = Date.now();
+      var dt = (now - previousTime) / 1000;
+      var speed = dt > 0 ? (loaded - previousBytes) / dt : 0;
+      previousBytes = loaded;
+      previousTime = now;
+
+      renderUploadStatus({
+        label: 'Uploading ' + file.name + ' • ' + pct + '% • ' + Z.bytes(loaded) + ' / ' + Z.bytes(total),
+        progress: pct,
+        kind: 'ok'
+      });
+      Z.updateTransferLock({
+        pct: pct,
+        speed: speed > 0 ? Z.bps(speed) : '',
+        elapsed: Math.floor((now - started) / 1000) + 's'
+      });
+    });
+
+    _uploadXhr = uploadPromise._xhr || null;
+    uploadPromise.then(function () {
+      _uploadXhr = null;
+      Z.hideTransferLock();
+      renderUploadStatus({ label: 'Upload complete • starting install from ' + uploadedPath, progress: 100, kind: 'ok' });
+      setSelectedPackage(uploadedPath);
+      doInstall(uploadedPath, false);
+    }).catch(function (e) {
+      _uploadXhr = null;
+      Z.hideTransferLock();
+      if (_uploadCancelled) {
+        _uploadCancelled = false;
+        renderUploadStatus({ label: 'Upload cancelled', progress: 100, kind: 'er' });
+        return;
+      }
+      renderUploadStatus({ label: 'Upload failed: ' + (e && e.message ? e.message : 'error'), progress: 100, kind: 'er' });
+      Z.notify('PC package upload failed', (e && e.message) ? e.message : file.name, 'er');
+    });
+  }
+
+  function setText(id, value) {
+    var el = $(id);
+    if (el) el.textContent = value;
   }
 
   function loadInstalled() {
     var el = $('games-installed-list');
     if (el) el.innerHTML = '<div class="games-empty">Loading installed apps…</div>';
+    setText('games-installed-count', '…');
 
     Z.api.gamesInstalled().then(function (res) {
       _installed = (res && res.entries && Array.isArray(res.entries)) ? res.entries : [];
       renderInstalled();
     }).catch(function (err) {
+      _installed = [];
+      setText('games-installed-count', '0');
       if (el) el.innerHTML = '<div class="games-empty">Failed to load installed list</div>';
       Z.toast('Installed list failed: ' + (err && err.message ? err.message : 'error'), 'er');
     });
@@ -102,6 +341,7 @@ var ZFTPD = ZFTPD || {};
     var el = $('games-installed-list');
     if (!el) return;
     el.innerHTML = '';
+    setText('games-installed-count', String(_installed.length));
 
     if (!_installed.length) {
       el.innerHTML = '<div class="games-empty">No installed apps found</div>';
@@ -113,15 +353,14 @@ var ZFTPD = ZFTPD || {};
       var id = g.id || '';
       var name = g.name || id || 'Unknown';
       var path = g.path || '';
-      var icon = Z.api.gameInstalledIconUrl(id, path) + '&_t=' + Date.now();
 
       var row = D.createElement('article');
       row.className = 'games-card';
       row.innerHTML =
-        '<img class="games-card-cover" src="' + esc(icon) + '" alt="' + esc(name) + '">' +
+        '<div class="games-controller-icon" aria-hidden="true">' + (Z.ICO && Z.ICO.gamepad ? Z.ICO.gamepad : '') + '</div>' +
         '<div class="games-card-body">' +
           '<div class="games-card-title" title="' + esc(name) + '">' + esc(name) + '</div>' +
-          '<div class="games-card-meta">' + esc(id) + '</div>' +
+          '<div class="games-card-meta">' + esc(id || path || 'Registered title') + '</div>' +
           '<div class="games-card-actions">' +
             '<button class="btn games-btn-launch">Launch</button>' +
             '<button class="btn games-btn-repair">Repair</button>' +
@@ -181,142 +420,17 @@ var ZFTPD = ZFTPD || {};
     }
   }
 
-  function scanImages() {
-    var el = $('games-images-list');
-    if (el) {
-      el.innerHTML = '';
-      el.innerHTML = '<div class="games-empty">Scanning PKG/exFAT images…</div>';
-    }
-
-    _images = [];
-    var seen = {};
-    var pending = 0;
-
-    function scanDir(dirPath, depth) {
-      if (depth > 2) return;
-      pending++;
-      Z.api.list(dirPath).then(function (d) {
-        var entries = (d && Array.isArray(d.entries)) ? d.entries : [];
-        for (var i = 0; i < entries.length; i++) {
-          var e = entries[i];
-          var fullPath = Z.join(dirPath, e.name);
-
-          if (e.type === 'directory' && depth < 2) {
-            scanDir(fullPath, depth + 1);
-            continue;
-          }
-
-          if (e.type !== 'file') continue;
-          if (e.name.indexOf('._') === 0) continue;
-
-          var ext = Z.extname(e.name);
-          if (!_gameExts[ext]) continue;
-          if (seen[fullPath]) continue;
-          seen[fullPath] = 1;
-
-          _images.push({ path: fullPath, name: e.name, size: e.size || 0, meta: null });
-        }
-      }).catch(function () {
-        /* ignore per-root errors */
-      }).then(function () {
-        pending--;
-        if (pending === 0) {
-          enrichAndRenderImages();
-        }
-      });
-    }
-
-    for (var r = 0; r < _scanRoots.length; r++) {
-      scanDir(_scanRoots[r], 0);
-    }
-  }
-
-  function enrichAndRenderImages() {
-    if (!_images.length) {
-      renderImages();
-      return;
-    }
-
-    var tasks = [];
-    for (var i = 0; i < _images.length; i++) {
-      (function (img) {
-        var t = Z.api.gameMeta(img.path).then(function (m) {
-          img.meta = m || null;
-        }).catch(function () {});
-        tasks.push(t);
-      })(_images[i]);
-    }
-
-    Promise.all(tasks).then(renderImages).catch(renderImages);
-  }
-
-  function renderImages() {
-    var el = $('games-images-list');
-    if (!el) return;
-    el.innerHTML = '';
-
-    if (!_images.length) {
-      el.innerHTML = '<div class="games-empty">No PKG/exFAT images found</div>';
-      return;
-    }
-
-    _images.sort(function (a, b) {
-      return (a.name || '').localeCompare(b.name || '');
-    });
-
-    for (var i = 0; i < _images.length; i++) {
-      var g = _images[i];
-      var title = (g.meta && g.meta.title_name) ? g.meta.title_name : g.name;
-      var tid = (g.meta && g.meta.title_id) ? g.meta.title_id : '';
-      var path = g.path || '';
-      var canInstall = /\.(pkg|fpkg|ffpkg)$/i.test(path);
-
-      var cover = (g.meta && g.meta.icon_base64)
-        ? ('data:image/png;base64,' + g.meta.icon_base64)
-        : '/assets/zftpd-logo.png';
-
-      var row = D.createElement('article');
-      row.className = 'games-card';
-      row.innerHTML =
-        '<img class="games-card-cover" src="' + esc(cover) + '" alt="' + esc(title) + '">' +
-        '<div class="games-card-body">' +
-          '<div class="games-card-title" title="' + esc(title) + '">' + esc(title) + '</div>' +
-          '<div class="games-card-meta">' + (tid ? esc(tid) + ' • ' : '') + esc(Z.bytes(g.size || 0)) + '</div>' +
-          '<div class="games-card-actions">' +
-            '<button class="btn games-btn-launch">Launch</button>' +
-            '<button class="btn" ' + (canInstall ? '' : 'disabled') + '>Install</button>' +
-            '<button class="btn" ' + (canInstall ? '' : 'disabled') + '>Reinstall</button>' +
-          '</div>' +
-        '</div>';
-
-      (function (game, launchBtn, installBtn, reinstallBtn) {
-        if (launchBtn) {
-          launchBtn.onclick = function () {
-            Z.api.gameLaunch(game.meta && game.meta.title_id, game.path).then(function (r) {
-              var ok = !!(r && (r.ok === true || r.status === 'ok'));
-              Z.toast((r && r.message) || 'Launch signal sent', ok ? 'ok' : 'wn');
-            }).catch(function () {
-              Z.toast('Launch failed', 'er');
-            });
-          };
-        }
-
-        if (installBtn) {
-          installBtn.onclick = function () { doInstall(game.path, false); };
-        }
-
-        if (reinstallBtn) {
-          reinstallBtn.onclick = function () { doInstall(game.path, true); };
-        }
-      })(g, row.querySelector('.games-btn-launch'), row.querySelectorAll('.btn')[1], row.querySelectorAll('.btn')[2]);
-
-      el.appendChild(row);
-    }
-  }
-
   function doInstall(path, reinstall) {
+    if (!pkgInstallEnabled()) {
+      installDisabledNotice();
+      return;
+    }
     if (!path) {
       Z.toast('Missing path', 'er');
+      return;
+    }
+    if (Z.isGamePackage && !Z.isGamePackage(path)) {
+      Z.toast('Select a PKG/fPKG package', 'wn');
       return;
     }
 
@@ -332,6 +446,20 @@ var ZFTPD = ZFTPD || {};
     }).catch(function (e) {
       Z.toast((reinstall ? 'Reinstall failed: ' : 'Install failed: ') + (e && e.message ? e.message : 'error'), 'er');
     });
+  }
+
+  function renderUploadStatus(info) {
+    var el = $('games-upload-status');
+    if (!el) return;
+    info = info || {};
+    el.classList.remove('ok');
+    el.classList.remove('er');
+    if (info.kind === 'ok') el.classList.add('ok');
+    if (info.kind === 'er') el.classList.add('er');
+    var pct = Math.max(0, Math.min(100, info.progress || 0));
+    el.innerHTML =
+      '<span>' + esc(info.label || 'No active PC package upload') + '</span>' +
+      '<i><em style="width:' + pct + '%"></em></i>';
   }
 
   function shouldRepairVisibility(resp) {
@@ -391,6 +519,14 @@ var ZFTPD = ZFTPD || {};
     var taskId = (typeof s.task_id === 'number') ? s.task_id : -1;
     var titleId = s.title_id || '';
     var err = (typeof s.error === 'number') ? s.error : 0;
+    var safeProgress = Math.max(0, Math.min(100, progress || 0));
+
+    function setStatus(text, pct, taskLabel) {
+      el.innerHTML =
+        '<span>' + esc(text) + '</span>' +
+        '<i><em style="width:' + Math.max(0, Math.min(100, pct || 0)) + '%"></em></i>';
+      setText('games-task-count', taskLabel || 'Idle');
+    }
 
     if (taskId !== _lastTaskId) {
       _lastTaskId = taskId;
@@ -400,7 +536,7 @@ var ZFTPD = ZFTPD || {};
 
     if (active) {
       el.classList.add('ok');
-      el.textContent = 'BGFT task #' + taskId + ' • ' + progress + '% • ' + (titleId || 'unknown title');
+      setStatus('BGFT task #' + taskId + ' • ' + safeProgress + '% • ' + (titleId || 'unknown title'), safeProgress, '#' + taskId + ' ' + safeProgress + '%');
 
       var milestone = -1;
       if (progress >= 100) milestone = 100;
@@ -419,7 +555,7 @@ var ZFTPD = ZFTPD || {};
 
     if (err && err !== 0) {
       el.classList.add('er');
-      el.textContent = 'Last BGFT status error: ' + err;
+      setStatus('Last BGFT status error: ' + err, 100, 'Error ' + err);
       if (_lastErrorCode !== err && Z.notify) {
         _lastErrorCode = err;
         Z.notify('Install error', (titleId || 'task #' + taskId) + ' • code ' + err, 'er');
@@ -429,7 +565,7 @@ var ZFTPD = ZFTPD || {};
 
     if (taskId >= 0 && progress >= 100) {
       el.classList.add('ok');
-      el.textContent = 'Install task completed • ' + (titleId || 'done');
+      setStatus('Install task completed • ' + (titleId || 'done'), 100, 'Done');
       if (_lastMilestone < 100 && Z.notify) {
         _lastMilestone = 100;
         Z.notify('Install completed', titleId || ('task #' + taskId), 'ok');
@@ -438,7 +574,7 @@ var ZFTPD = ZFTPD || {};
       return;
     }
 
-    el.textContent = 'No active install task';
+    setStatus('No active install task', 0, 'Idle');
   }
 
   function esc(s) {
@@ -450,6 +586,9 @@ var ZFTPD = ZFTPD || {};
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
   }
+
+  games.pickPackage = pickPackage;
+  games.selectPackage = setSelectedPackage;
 
   Z.gamesView = games;
 

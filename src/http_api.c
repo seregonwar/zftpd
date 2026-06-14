@@ -71,6 +71,10 @@ SOFTWARE.
 #define SCE_LNC_APP_ID_BIG_BASE 0x60000000U
 #define SCE_LNC_APP_ID_TYPE_MASK 0xFF000000U
 
+#ifndef ENABLE_PKG_INSTALL
+#define ENABLE_PKG_INSTALL 0
+#endif
+
 #if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
 #include <dlfcn.h>
 
@@ -960,22 +964,68 @@ static int get_boot_epoch_seconds(uint64_t *out_epoch) {
 #endif
 }
 
+static int normalize_temp_c_from_raw(int64_t raw, int32_t *out_c) {
+  if (out_c == NULL) {
+    return -1;
+  }
+
+  if ((raw >= -40) && (raw <= 200)) {
+    *out_c = (int32_t)raw;
+    return 0;
+  }
+
+  /* FreeBSD-style sysctl values are often deci-Kelvin. */
+  if ((raw >= 2000) && (raw <= 5000)) {
+    int64_t c = (raw - 2731 + 5) / 10;
+    if ((c >= -40) && (c <= 200)) {
+      *out_c = (int32_t)c;
+      return 0;
+    }
+  }
+
+  /* Some sensors report milli-Kelvin. */
+  if ((raw >= 200000) && (raw <= 500000)) {
+    int64_t c = (raw - 273150 + 500) / 1000;
+    if ((c >= -40) && (c <= 200)) {
+      *out_c = (int32_t)c;
+      return 0;
+    }
+  }
+
+  return -1;
+}
+
 static int get_cpu_temp_c(int32_t *out_c) {
   if (out_c == NULL) {
     return -1;
   }
 
-#if defined(PLATFORM_PS4) || defined(PS4)
-  __attribute__((weak)) int32_t sceKernelGetCpuTemperature(
-      uint64_t *temperature);
-  if (sceKernelGetCpuTemperature != NULL) {
-    uint64_t raw = 0U;
-    int32_t rc = sceKernelGetCpuTemperature(&raw);
-    if (rc == 0) {
-      if ((raw >= 20U) && (raw <= 110U)) {
-        *out_c = (int32_t)raw;
+#if defined(PLATFORM_PS5) || defined(PS5)
+  /*
+   * PS5 payload SDK exposes SoC temperature as sceKernelGetSocSensorTemperature.
+   * Sensor 0 is the APU/SoC reading used by the SDK's hwinfo sample.
+   */
+  __attribute__((weak)) int sceKernelGetSocSensorTemperature(int sensor,
+                                                            int *temperature);
+  if (sceKernelGetSocSensorTemperature != NULL) {
+    for (int sensor = 0; sensor < 4; sensor++) {
+      int temp = 0;
+      if (sceKernelGetSocSensorTemperature(sensor, &temp) == 0 &&
+          normalize_temp_c_from_raw((int64_t)temp, out_c) == 0) {
         return 0;
       }
+    }
+  }
+#endif
+
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5) || defined(PS4) ||          \
+    defined(PS5)
+  __attribute__((weak)) int sceKernelGetCpuTemperature(int *temperature);
+  if (sceKernelGetCpuTemperature != NULL) {
+    int temp = 0;
+    if (sceKernelGetCpuTemperature(&temp) == 0 &&
+        normalize_temp_c_from_raw((int64_t)temp, out_c) == 0) {
+      return 0;
     }
   }
 #endif
@@ -986,9 +1036,15 @@ static int get_cpu_temp_c(int32_t *out_c) {
       "dev.cpu.0.temperature",
       "dev.cpu.0.coretemp.temperature",
       "dev.cpu.0.temp",
+      "dev.cpu.0.sensor0.temperature",
       "dev.amdtemp.0.temperature",
       "dev.amdtemp.0.core0.sensor0",
+      "dev.amdtemp.0.sensor0.temperature",
+      "dev.ps5.apu.temperature",
+      "dev.apu.0.temperature",
+      "dev.apu.temperature",
       "dev.thermal.0.temperature",
+      "dev.thermal.apu.temperature",
       "hw.acpi.thermal.tz0.temperature",
       "hw.temperature",
       NULL,
@@ -1004,18 +1060,9 @@ static int get_cpu_temp_c(int32_t *out_c) {
       continue;
     }
 
-    int32_t c = 0;
-    if (v > 1000) {
-      int32_t dk = (int32_t)v;
-      c = (dk - 2731 + 5) / 10;
-    } else {
-      c = (int32_t)v;
+    if (normalize_temp_c_from_raw((int64_t)v, out_c) == 0) {
+      return 0;
     }
-    if ((c < -40) || (c > 200)) {
-      continue;
-    }
-    *out_c = c;
-    return 0;
   }
 
   return -1;
@@ -3589,6 +3636,7 @@ static int is_valid_title_id_for_uninstall(const char *title_id) {
   return 1;
 }
 
+#if ENABLE_PKG_INSTALL
 static int has_pkg_extension(const char *path) {
   if (path == NULL) {
     return 0;
@@ -3601,6 +3649,7 @@ static int has_pkg_extension(const char *path) {
   return (strcasecmp(dot, "pkg") == 0 || strcasecmp(dot, "fpkg") == 0 ||
           strcasecmp(dot, "ffpkg") == 0);
 }
+#endif
 
 typedef struct {
   int active;
@@ -3695,6 +3744,7 @@ static int psx_bgft_ensure_initialized(fn_sceBgftServiceInit_t f_bgft_init) {
   return rc;
 }
 
+#if ENABLE_PKG_INSTALL
 static int psx_get_title_id_from_pkg(const char *pkg_path, char *out_title_id,
                                      size_t out_title_id_size) {
   if (!pkg_path || !out_title_id || out_title_id_size == 0U) {
@@ -3783,6 +3833,7 @@ static int psx_install_pkg_bgft(const char *pkg_path, const char *content_name,
   dlclose(bgft);
   return 0;
 }
+#endif
 
 static int psx_bgft_progress(int task_id, SceBgftTaskProgress *out_progress,
                              int *out_rc) {
@@ -3843,6 +3894,7 @@ static int psx_uninstall_title_id(const char *title_id, int *out_rc) {
   return 0;
 }
 
+#if ENABLE_PKG_INSTALL
 static int psx_install_pkg_path(const char *pkg_path, char *out_title_id,
                                 size_t out_title_id_size, int *out_install_rc) {
   if ((pkg_path == NULL) || (out_install_rc == NULL)) {
@@ -3888,6 +3940,7 @@ static int psx_install_pkg_path(const char *pkg_path, char *out_title_id,
   *out_install_rc = rc;
   return 0;
 }
+#endif
 
 typedef int (*sqlite3_cb_t)(void *, int, char **, char **);
 
@@ -4408,7 +4461,8 @@ static int psx_repair_appdb_visibility_for_title(const char *title_id,
   }
   return 0;
 }
-#endif
+
+#endif /* PLATFORM_PS4 || PLATFORM_PS5 */
 
 static int append_installed_entries_from_base(const char *base,
                                               char *body,
@@ -7794,6 +7848,11 @@ static http_response_t *api_games_uninstall(const http_request_t *request) {
 }
 
 static http_response_t *api_games_install(const http_request_t *request) {
+#if !ENABLE_PKG_INSTALL
+  (void)request;
+  return error_json(HTTP_STATUS_409_CONFLICT,
+                    "PKG installation is disabled for this build");
+#else
   if ((request->method != HTTP_METHOD_POST) &&
       (request->method != HTTP_METHOD_GET)) {
     return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED, "Use POST or GET");
@@ -7864,9 +7923,15 @@ static http_response_t *api_games_install(const http_request_t *request) {
   (void)safe;
   return status_json_200(0, "Install only available on PS4/PS5", -1);
 #endif
+#endif
 }
 
 static http_response_t *api_games_reinstall(const http_request_t *request) {
+#if !ENABLE_PKG_INSTALL
+  (void)request;
+  return error_json(HTTP_STATUS_409_CONFLICT,
+                    "PKG installation is disabled for this build");
+#else
   if ((request->method != HTTP_METHOD_POST) &&
       (request->method != HTTP_METHOD_GET)) {
     return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED, "Use POST or GET");
@@ -7945,5 +8010,6 @@ static http_response_t *api_games_reinstall(const http_request_t *request) {
   return resp;
 #else
   return status_json_200(0, "Reinstall only available on PS4/PS5", -1);
+#endif
 #endif
 }

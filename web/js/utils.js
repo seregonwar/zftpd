@@ -14,6 +14,15 @@ var ZFTPD = ZFTPD || {};
   Z.$ = function (id) { return D.getElementById(id); };
   Z.E = encodeURIComponent;
 
+  /* ── Feature flags ── */
+  Z.features = Z.features || {
+    pkgInstall: false
+  };
+
+  Z.featureEnabled = function (name) {
+    return !!(Z.features && Z.features[name] === true);
+  };
+
   /* ── CSRF ── */
   Z.csrf = function () {
     var m = D.querySelector('meta[name="csrf-token"]');
@@ -48,6 +57,15 @@ var ZFTPD = ZFTPD || {};
     if (!name) return '';
     var i = name.lastIndexOf('.');
     return i > 0 ? name.slice(i + 1).toLowerCase() : '';
+  };
+
+  Z.h = function (value) {
+    return String(value == null ? '' : value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   };
 
   /* ── Download helper (avoids full-page navigation) ── */
@@ -121,6 +139,82 @@ var ZFTPD = ZFTPD || {};
       }
     }
     return 'generic';
+  };
+
+  Z.fileKind = function (name, isDir) {
+    if (isDir) return 'Folder';
+    var cat = Z.fileCategory(name, false);
+    var map = {
+      code: 'Source code',
+      web: 'Web document',
+      style: 'Stylesheet',
+      script: 'Script',
+      data: 'Data file',
+      doc: 'Document',
+      img: 'Image',
+      video: 'Video',
+      audio: 'Audio',
+      arch: 'Archive',
+      bin: 'Binary',
+      db: 'Database',
+      lock: 'Certificate or key',
+      log: 'Log file',
+      sheet: 'Spreadsheet',
+      slide: 'Presentation',
+      game: 'Game package'
+    };
+    return map[cat] || 'File';
+  };
+
+  Z.mediaKind = function (name, isDir) {
+    if (isDir) return 'folder';
+    var ext = Z.extname(name);
+    if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', 'ico'].indexOf(ext) >= 0) return 'image';
+    if (['mp4', 'mkv', 'avi', 'mov', 'webm', 'm4v', 'flv'].indexOf(ext) >= 0) return 'video';
+    if (['mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a', 'opus'].indexOf(ext) >= 0) return 'audio';
+    if (ext === 'pdf') return 'pdf';
+    if (['txt', 'md', 'log', 'json', 'xml', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf', 'env', 'csv',
+         'c', 'cpp', 'h', 'hpp', 'py', 'rs', 'go', 'java', 'rb', 'php', 'swift', 'kt',
+         'html', 'htm', 'css', 'scss', 'sass', 'less', 'js', 'ts', 'sh', 'bash', 'zsh', 'lua'].indexOf(ext) >= 0) {
+      return 'text';
+    }
+    if (['pkg', 'fpkg', 'ffpkg', 'exfat'].indexOf(ext) >= 0) return 'game';
+    if (['zip', 'tar', 'gz', 'bz2', 'xz', '7z', 'rar', 'zst', 'lz4'].indexOf(ext) >= 0) return 'archive';
+    return 'file';
+  };
+
+  Z.isGamePackage = function (name) {
+    var ext = Z.extname(name);
+    return ext === 'pkg' || ext === 'fpkg' || ext === 'ffpkg';
+  };
+
+  Z.isPreviewable = function (name, isDir, size) {
+    var kind = Z.mediaKind(name, isDir);
+    if (kind === 'folder' || kind === 'image' || kind === 'video' || kind === 'audio' || kind === 'pdf') return true;
+    if (kind === 'text') return !size || size <= 2 * 1024 * 1024;
+    return false;
+  };
+
+  Z.copyText = function (text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text);
+    }
+    return new Promise(function (resolve, reject) {
+      var ta = D.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', 'readonly');
+      ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px;';
+      D.body.appendChild(ta);
+      ta.select();
+      try {
+        if (!D.execCommand('copy')) throw new Error('copy failed');
+        D.body.removeChild(ta);
+        resolve();
+      } catch (e) {
+        D.body.removeChild(ta);
+        reject(e);
+      }
+    });
   };
 
   /* ── Toast notifications (closable) ── */
@@ -431,7 +525,10 @@ var ZFTPD = ZFTPD || {};
       D.body.appendChild(overlay);
 
       /* ── Close ── */
+      var escClose = null;
+
       function close(val) {
+        if (escClose) D.removeEventListener('keydown', escClose);
         if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
         resolve(val);
       }
@@ -524,6 +621,245 @@ var ZFTPD = ZFTPD || {};
               'Error: ' + err.message + '</div>';
         });
       }
+
+      loadDir(browsePath);
+    });
+  };
+
+  /**
+   * File picker modal — browse folders and select one matching file.
+   * @param {string} title
+   * @param {string} startPath
+   * @param {{extensions?: string[], accept?: Function, hint?: string}} opts
+   * @returns {Promise<string|null>}
+   */
+  Z.modal.filePicker = function (title, startPath, opts) {
+    opts = opts || {};
+
+    return new Promise(function (resolve) {
+      var browsePath = Z.norm(startPath || '/');
+      if (browsePath !== '/' && /\.[^\/]+$/.test(browsePath)) {
+        browsePath = Z.parent(browsePath) || '/';
+      }
+
+      var extensions = opts.extensions || [];
+      var hint = opts.hint || 'Browse folders and choose a file.';
+
+      var overlay = D.createElement('div');
+      overlay.style.cssText = 'position:fixed;inset:0;z-index:2000;background:rgba(0,0,0,.65);' +
+          'display:flex;align-items:center;justify-content:center;animation:fadeIn .15s ease;';
+
+      var card = D.createElement('div');
+      card.style.cssText = 'background:var(--sf);border:1px solid var(--bd2);border-radius:14px;' +
+          'width:min(560px,92vw);max-height:76vh;display:flex;flex-direction:column;' +
+          'box-shadow:0 32px 80px rgba(0,0,0,.6);overflow:hidden;';
+
+      var hdr = D.createElement('div');
+      hdr.style.cssText = 'display:flex;align-items:center;padding:14px 18px;' +
+          'border-bottom:1px solid var(--bd);gap:8px;';
+
+      var hdrTitle = D.createElement('div');
+      hdrTitle.style.cssText = 'flex:1;font-weight:700;font-size:13px;color:var(--tx);';
+      hdrTitle.textContent = title || 'Choose file';
+
+      var closeBtn = D.createElement('button');
+      closeBtn.className = 'fp-close';
+      closeBtn.style.cssText = 'background:none;border:none;color:var(--tx3);font-size:18px;' +
+          'cursor:pointer;padding:0 4px;line-height:1;';
+      closeBtn.innerHTML = '&times;';
+
+      hdr.appendChild(hdrTitle);
+      hdr.appendChild(closeBtn);
+
+      var bcBar = D.createElement('div');
+      bcBar.style.cssText = 'padding:10px 18px 4px;font-size:11px;color:var(--tx3);' +
+          'font-family:monospace;white-space:nowrap;overflow-x:auto;';
+
+      var hintBar = D.createElement('div');
+      hintBar.style.cssText = 'padding:0 18px 8px;color:var(--tx3);font-size:11px;font-weight:600;';
+      hintBar.textContent = hint;
+
+      var body = D.createElement('div');
+      body.className = 'fp-body';
+      body.style.cssText = 'flex:1;overflow-y:auto;padding:8px 12px;min-height:180px;max-height:54vh;';
+
+      var ftr = D.createElement('div');
+      ftr.style.cssText = 'padding:12px 18px;border-top:1px solid var(--bd);display:flex;gap:8px;align-items:center;';
+
+      var upBtn = D.createElement('button');
+      upBtn.className = 'fp-up btn';
+      upBtn.style.cssText = 'padding:6px 10px;font-size:11px;';
+      upBtn.innerHTML = '&uarr; Back';
+
+      var cancelBtn = D.createElement('button');
+      cancelBtn.className = 'fp-cancel btn';
+      cancelBtn.style.cssText = 'padding:7px 14px;font-size:12px;margin-left:auto;';
+      cancelBtn.textContent = 'Cancel';
+
+      ftr.appendChild(upBtn);
+      ftr.appendChild(cancelBtn);
+
+      card.appendChild(hdr);
+      card.appendChild(bcBar);
+      card.appendChild(hintBar);
+      card.appendChild(body);
+      card.appendChild(ftr);
+      overlay.appendChild(card);
+      D.body.appendChild(overlay);
+
+      var escClose = null;
+
+      function close(val) {
+        if (escClose) D.removeEventListener('keydown', escClose);
+        if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+        resolve(val);
+      }
+
+      function isDir(entry) {
+        return entry && (entry.type === 'directory' || entry.type === 'dir' || entry.is_dir === true);
+      }
+
+      function acceptFile(entry) {
+        if (!entry || isDir(entry)) return false;
+        if (typeof opts.accept === 'function') return !!opts.accept(entry);
+        if (!extensions.length) return true;
+        var ext = Z.extname(entry.name || '');
+        for (var i = 0; i < extensions.length; i++) {
+          if (String(extensions[i]).toLowerCase() === ext) return true;
+        }
+        return false;
+      }
+
+      function renderMessage(text, kind) {
+        body.innerHTML = '';
+        var msg = D.createElement('div');
+        msg.style.cssText = 'text-align:center;padding:28px 18px;color:' +
+            (kind === 'error' ? 'var(--er)' : 'var(--tx3)') + ';font-size:12px;font-weight:700;';
+        msg.textContent = text;
+        body.appendChild(msg);
+      }
+
+      function renderBreadcrumb(path) {
+        bcBar.innerHTML = '';
+        var parts = path.split('/').filter(function (s) { return s.length > 0; });
+        var cum = '';
+
+        function addCrumb(label, value) {
+          var crumb = D.createElement('span');
+          crumb.style.cssText = 'color:var(--ac);cursor:pointer;';
+          crumb.textContent = label;
+          crumb.setAttribute('data-fp', value);
+          crumb.onclick = function () {
+            browsePath = value;
+            loadDir(browsePath);
+          };
+          bcBar.appendChild(crumb);
+        }
+
+        addCrumb('/', '/');
+        for (var i = 0; i < parts.length; i++) {
+          cum += '/' + parts[i];
+          var sep = D.createElement('span');
+          sep.style.cssText = 'color:var(--tx3);';
+          sep.textContent = ' \u203a ';
+          bcBar.appendChild(sep);
+          addCrumb(parts[i], cum);
+        }
+      }
+
+      function icon(kind) {
+        if (kind === 'dir') {
+          return '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+              'stroke-width="2" style="flex-shrink:0;color:var(--ac);"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 ' +
+              '1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
+        }
+        return '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+            'stroke-width="2" style="flex-shrink:0;color:var(--ac2);"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 ' +
+            '0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>';
+      }
+
+      function makeRow(entry, directory) {
+        var fullPath = Z.join(browsePath, entry.name);
+        var row = D.createElement('div');
+        row.className = 'fp-row ' + (directory ? 'fp-dir' : 'fp-file');
+        row.setAttribute('data-path', fullPath);
+        row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:9px 12px;' +
+            'border-radius:8px;cursor:pointer;color:var(--tx2);transition:all .1s;font-size:12px;';
+
+        var ico = D.createElement('span');
+        ico.innerHTML = icon(directory ? 'dir' : 'file');
+
+        var name = D.createElement('span');
+        name.style.cssText = 'flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:700;';
+        name.textContent = entry.name || fullPath;
+
+        var meta = D.createElement('span');
+        meta.style.cssText = 'color:var(--tx3);font-size:10px;font-weight:700;white-space:nowrap;';
+        meta.textContent = directory ? '\u203a' : (typeof entry.size === 'number' ? Z.bytes(entry.size) : 'PKG');
+
+        row.appendChild(ico);
+        row.appendChild(name);
+        row.appendChild(meta);
+
+        row.onmouseenter = function () { row.style.background = 'var(--sf2)'; row.style.color = 'var(--tx)'; };
+        row.onmouseleave = function () { row.style.background = 'none'; row.style.color = 'var(--tx2)'; };
+        row.onclick = function () {
+          if (directory) {
+            browsePath = fullPath;
+            loadDir(browsePath);
+          } else {
+            close(fullPath);
+          }
+        };
+
+        return row;
+      }
+
+      function loadDir(path) {
+        browsePath = Z.norm(path);
+        renderBreadcrumb(browsePath);
+        renderMessage('Loading\u2026');
+
+        Z.api.list(browsePath).then(function (data) {
+          body.innerHTML = '';
+          var entries = data && data.entries ? data.entries : [];
+          var dirs = [];
+          var files = [];
+
+          for (var i = 0; i < entries.length; i++) {
+            var entry = entries[i] || {};
+            if (isDir(entry)) dirs.push(entry);
+            else if (acceptFile(entry)) files.push(entry);
+          }
+
+          dirs.sort(function (a, b) { return String(a.name || '').localeCompare(String(b.name || '')); });
+          files.sort(function (a, b) { return String(a.name || '').localeCompare(String(b.name || '')); });
+
+          for (var d = 0; d < dirs.length; d++) body.appendChild(makeRow(dirs[d], true));
+          for (var f = 0; f < files.length; f++) body.appendChild(makeRow(files[f], false));
+
+          if (!dirs.length && !files.length) {
+            renderMessage(extensions.length ? 'No matching package files in this folder' : 'No selectable files in this folder');
+          }
+        }).catch(function (err) {
+          renderMessage('Error: ' + (err && err.message ? err.message : 'failed to load directory'), 'error');
+        });
+      }
+
+      closeBtn.onclick = function () { close(null); };
+      cancelBtn.onclick = function () { close(null); };
+      overlay.addEventListener('click', function (e) { if (e.target === overlay) close(null); });
+      escClose = function (e) {
+        if (e.key === 'Escape' && overlay.parentNode) {
+          close(null);
+        }
+      };
+      D.addEventListener('keydown', escClose);
+
+      upBtn.onclick = function () {
+        var parent = Z.parent(browsePath);
+        if (parent !== null) loadDir(parent);
+      };
 
       loadDir(browsePath);
     });

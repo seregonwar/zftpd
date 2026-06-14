@@ -53,7 +53,8 @@ var ZFTPD = ZFTPD || {};
     showSystemFolders: false,
     showHiddenFiles: false,
     defaultView: 'grid',
-    animationsEnabled: true
+    animationsEnabled: true,
+    fanThreshold: 60
   };
 
   var DANGEROUS_FOLDERS = [
@@ -212,10 +213,33 @@ var ZFTPD = ZFTPD || {};
             '<div class="sett-about-name">zftpd</div>' +
             '<div class="sett-about-ver">v1.5.0</div>' +
             '<div class="sett-about-desc">The ultimate PS4/PS5 file manager.<br>FTP + HTTP + PKG installer.</div>' +
-            '<div class="sett-about-link">' +
+            '<a class="sett-about-link" href="https://github.com/seregonwar/zftpd" target="_blank" rel="noopener noreferrer">' +
               '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.4 5.4 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65S8.93 17.38 9 18v4"/><path d="M9 18c-4.51 2-5-2-7-2"/></svg>' +
               ' github.com/seregonwar/zftpd' +
+            '</a>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+
+      /* ══ Credits Section ══ */
+      '<div class="sett-section">' +
+        '<div class="sett-section-title">' +
+          '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>' +
+          ' Credits' +
+        '</div>' +
+        '<div class="sett-credits">' +
+          '<div class="sett-credit-card primary">' +
+            '<div class="sett-credit-role">Creator, maintainer, principal developer</div>' +
+            '<div class="sett-credit-name">SeregonWar</div>' +
+            '<div class="sett-credit-links">' +
+              '<a href="https://github.com/seregonwar" target="_blank" rel="noopener noreferrer">GitHub</a>' +
+              '<a href="https://x.com/SeregonWar" target="_blank" rel="noopener noreferrer">X / Social</a>' +
+              '<a href="https://www.seregonwar.com/donations" target="_blank" rel="noopener noreferrer">Donations</a>' +
             '</div>' +
+          '</div>' +
+          '<div class="sett-credit-card">' +
+            '<div class="sett-credit-role">Main tester</div>' +
+            '<div class="sett-credit-name">M///Class</div>' +
           '</div>' +
         '</div>' +
       '</div>';
@@ -290,6 +314,13 @@ var ZFTPD = ZFTPD || {};
       viewSel.onchange = function () {
         Z.settings.defaultView = this.value;
         Z.saveSettings();
+        try {
+          localStorage.setItem('zftpd_explorer_view', this.value);
+        } catch (e) { /* ignore */ }
+        if (Z.explorer && Z.explorer.setView) {
+          Z.explorer.setView(this.value);
+        }
+        Z.toast('Default explorer view saved', 'ok');
       };
     }
 

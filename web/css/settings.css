@@ -266,13 +266,18 @@
 }
 
 .sett-about-link {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 5px;
   font-size: 11px;
   color: var(--ac);
   margin-top: 8px;
   font-weight: 600;
+  text-decoration: none;
+}
+
+.sett-about-link:hover {
+  text-decoration: underline;
 }
 
 .sett-about-link svg {
@@ -284,6 +289,67 @@
 #settings-content {
   max-width: 680px;
   margin: 0 auto;
+}
+
+.sett-credits {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, .8fr);
+  gap: 12px;
+  padding: 16px 18px;
+}
+
+.sett-credit-card {
+  min-width: 0;
+  border: 1px solid var(--bd);
+  border-radius: 10px;
+  background: var(--bg);
+  padding: 14px;
+}
+
+.sett-credit-card.primary {
+  border-color: var(--tgb);
+  background: linear-gradient(135deg, rgba(var(--acR), .1), transparent 60%), var(--bg);
+}
+
+.sett-credit-role {
+  color: var(--tx3);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.sett-credit-name {
+  margin-top: 5px;
+  color: var(--tx);
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.sett-credit-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.sett-credit-links a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  border: 1px solid var(--bd2);
+  border-radius: 999px;
+  padding: 4px 10px;
+  background: var(--sf2);
+  color: var(--ac);
+  font-size: 11px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.sett-credit-links a:hover {
+  border-color: var(--ac);
+  background: var(--tg);
 }
 
 /* ══ MOBILE RESPONSIVE ═══════════════════════════════════════════════════ */
@@ -307,5 +373,14 @@
   .sett-about {
     flex-direction: column;
     text-align: center;
+  }
+
+  .sett-credits {
+    grid-template-columns: 1fr;
+    padding: 14px;
+  }
+
+  .sett-credit-links {
+    justify-content: center;
   }
 }

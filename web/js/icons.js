@@ -56,7 +56,17 @@ var ZFTPD = ZFTPD || {};
     monitor:    s('<rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>'),
     cloud:      s('<path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/>'),
     cloudDown:  s('<path d="M12 13v8l-4-4"/><path d="m12 21 4-4"/><path d="M4.393 15.269A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.436 8.284"/>'),
-    sendTo:     s('<path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>')
+    sendTo:     s('<path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>'),
+    eye:        s('<path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0Z"/><circle cx="12" cy="12" r="3"/>'),
+    panelRight: s('<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M15 3v18"/>'),
+    sortAsc:    s('<path d="m7 15 5 5 5-5"/><path d="M12 20V4"/>'),
+    sortDesc:   s('<path d="m7 9 5-5 5 5"/><path d="M12 4v16"/>'),
+    clipboard:  s('<rect width="8" height="4" x="8" y="2" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>'),
+    external:   s('<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>'),
+    fileText:   s('<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 13h6"/><path d="M10 17h4"/>'),
+    image:      s('<rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>'),
+    film:       s('<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M7 3v18"/><path d="M17 3v18"/><path d="M3 7h4"/><path d="M3 17h4"/><path d="M17 7h4"/><path d="M17 17h4"/>'),
+    music:      s('<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>')
   };
 
 })(ZFTPD);

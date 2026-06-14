@@ -195,4 +195,7 @@
   --glass: rgba(255, 255, 255, .85);
   --glass-border: rgba(255, 255, 255, .4);
   --shadow: rgba(0, 0, 0, .08);
+  --topbar-bg: linear-gradient(180deg, #ffffff 0%, #f7f9fc 100%);
+  --card-shadow: 0 2px 12px rgba(15, 23, 42, .08);
+  --card-hover-shadow: 0 12px 34px rgba(15, 23, 42, .14), 0 0 0 1px rgba(var(--acR), .18);
 }

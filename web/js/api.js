@@ -134,8 +134,10 @@ var ZFTPD = ZFTPD || {};
 
   /* ── Upload (XMLHttpRequest for progress tracking) ── */
   api.upload = function (dirPath, file, onProgress) {
-    return new Promise(function (resolve, reject) {
+    var xhrHandle = null;
+    var promise = new Promise(function (resolve, reject) {
       var xhr = new XMLHttpRequest();
+      xhrHandle = xhr;
       xhr.open('POST', '/api/upload?path=' + Z.E(dirPath) + '&name=' + Z.E(file.name), true);
       var token = Z.csrf();
       if (token) xhr.setRequestHeader('X-CSRF-Token', token);
@@ -149,10 +151,11 @@ var ZFTPD = ZFTPD || {};
         else reject(new Error('HTTP ' + xhr.status));
       };
       xhr.onerror = function () { reject(new Error('Network error')); };
+      xhr.onabort = function () { reject(new Error('Upload cancelled')); };
       xhr.send(file);
-      /* Return xhr handle for cancellation */
-      resolve._xhr = xhr;
     });
+    promise._xhr = xhrHandle;
+    return promise;
   };
 
   /* ── Download URL ── */
@@ -198,10 +201,16 @@ var ZFTPD = ZFTPD || {};
   };
 
   api.gameInstall = function (path) {
+    if (!Z.featureEnabled || !Z.featureEnabled('pkgInstall')) {
+      return Promise.reject(new Error('PKG installation is disabled'));
+    }
     return post('/api/admin/games/install?path=' + Z.E(path || ''));
   };
 
   api.gameReinstall = function (path) {
+    if (!Z.featureEnabled || !Z.featureEnabled('pkgInstall')) {
+      return Promise.reject(new Error('PKG installation is disabled'));
+    }
     return post('/api/admin/games/reinstall?path=' + Z.E(path || ''));
   };
 

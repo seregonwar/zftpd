@@ -1,0 +1,221 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create/update, for example v1.5.0"
+        required: false
+        type: string
+      draft:
+        description: "Create the GitHub release as draft"
+        required: false
+        default: false
+        type: boolean
+      prerelease:
+        description: "Mark the GitHub release as prerelease"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.platform }} / ${{ matrix.variant }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            os: ubuntu-latest
+            zhttpd: "0"
+            variant: ftp
+          - platform: linux
+            os: ubuntu-latest
+            zhttpd: "1"
+            variant: zhttp
+          - platform: macos
+            os: macos-latest
+            zhttpd: "0"
+            variant: ftp
+          - platform: macos
+            os: macos-latest
+            zhttpd: "1"
+            variant: zhttp
+          - platform: ps4
+            os: ubuntu-latest
+            zhttpd: "0"
+            variant: ftp
+          - platform: ps4
+            os: ubuntu-latest
+            zhttpd: "1"
+            variant: zhttp
+          - platform: ps5
+            os: ubuntu-latest
+            zhttpd: "0"
+            variant: ftp
+          - platform: ps5
+            os: ubuntu-latest
+            zhttpd: "1"
+            variant: zhttp
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            binutils \
+            clang \
+            curl \
+            gcc \
+            libarchive-dev \
+            libcurl4-openssl-dev \
+            lld \
+            llvm \
+            make \
+            python3 \
+            xxd
+
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install libarchive llvm || true
+          if [ -d /opt/homebrew/opt/llvm/bin ]; then
+            echo "/opt/homebrew/opt/llvm/bin" >> "$GITHUB_PATH"
+          fi
+          if [ -d /usr/local/opt/llvm/bin ]; then
+            echo "/usr/local/opt/llvm/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Validate console SDK
+        if: matrix.platform == 'ps4' || matrix.platform == 'ps5'
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.platform }}" = "ps4" ]; then
+            test -x external/ps4-payload-sdk/bin/orbis-clang
+            test -x external/ps4-payload-sdk/bin/orbis-strip
+          fi
+          if [ "${{ matrix.platform }}" = "ps5" ]; then
+            test -x external/ps5-payload-sdk/bin/prospero-clang
+            test -x external/ps5-payload-sdk/bin/prospero-strip
+          fi
+
+      - name: Build release variant
+        run: |
+          set -euo pipefail
+          make resources
+          make \
+            TARGET="${{ matrix.platform }}" \
+            BUILD_TYPE=release \
+            ENABLE_ZHTTPD="${{ matrix.zhttpd }}" \
+            ENABLE_MCP=0 \
+            ENABLE_PKG_INSTALL=0 \
+            clean all
+
+      - name: Package artifact
+        run: |
+          set -euo pipefail
+          variant_dir="build/${{ matrix.platform }}/release"
+          if [ "${{ matrix.zhttpd }}" = "1" ]; then
+            variant_dir="${variant_dir}-zhttp"
+          fi
+
+          mkdir -p "dist/${{ matrix.platform }}-${{ matrix.variant }}"
+          find "$variant_dir" -maxdepth 1 -type f -print -exec cp {} "dist/${{ matrix.platform }}-${{ matrix.variant }}/" \;
+
+          cat > "dist/${{ matrix.platform }}-${{ matrix.variant }}/BUILD_INFO.txt" <<EOF
+          project=zftpd
+          platform=${{ matrix.platform }}
+          zhttpd=${{ matrix.zhttpd }}
+          mcp=0
+          pkg_install=0
+          build_type=release
+          ref=${{ github.ref_name }}
+          sha=${{ github.sha }}
+          EOF
+
+          tar -C dist -czf "zftpd-${{ matrix.platform }}-${{ matrix.variant }}.tar.gz" "${{ matrix.platform }}-${{ matrix.variant }}"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zftpd-${{ matrix.platform }}-${{ matrix.variant }}
+          path: zftpd-${{ matrix.platform }}-${{ matrix.variant }}.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Prepare release assets
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          find release-artifacts -type f -name '*.tar.gz' -exec cp {} release-assets/ \;
+          cd release-assets
+          sha256sum *.tar.gz > SHA256SUMS.txt
+          ls -lh
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_DRAFT: ${{ inputs.draft }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+
+          tag="${GITHUB_REF_NAME}"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            tag="${INPUT_TAG}"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            if ! git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+              git tag "${tag}" "${GITHUB_SHA}"
+              git push origin "refs/tags/${tag}"
+            fi
+          fi
+
+          flags=(--title "zftpd ${tag}" --generate-notes)
+          if [ "${INPUT_DRAFT}" = "true" ]; then
+            flags+=(--draft)
+          fi
+          if [ "${INPUT_PRERELEASE}" = "true" ]; then
+            flags+=(--prerelease)
+          fi
+
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            gh release upload "${tag}" release-assets/* --clobber
+          else
+            gh release create "${tag}" release-assets/* "${flags[@]}"
+          fi
