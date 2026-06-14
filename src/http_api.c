@@ -3213,7 +3213,7 @@ static http_response_t *api_processes(const http_request_t *request) {
         snprintf(comm, sizeof(comm), "pid%d", pid);
 
       uint64_t mem_mb =
-          (uint64_t)(rss > 0 ? rss : 0) * 4096UL / (1024UL * 1024UL));
+          (uint64_t)(rss > 0 ? rss : 0) * 4096UL / (1024UL * 1024UL);
       const char *status_str = "running";
       if (state == 'S' || state == 'D')
         status_str = "sleep";
