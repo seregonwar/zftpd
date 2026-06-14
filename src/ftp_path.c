@@ -265,7 +265,9 @@ ftp_error_t ftp_path_resolve(const ftp_session_t *session,
     }
 
     char joined[FTP_PATH_MAX];
-    int nn = snprintf(joined, sizeof(joined), "%s/%s", dir_real, base_buf);
+    int max_dir = (int)(sizeof(joined) - 2 - strlen(base_buf));
+    if (max_dir < 0) { return FTP_ERR_PATH_TOO_LONG; }
+    int nn = snprintf(joined, sizeof(joined), "%.*s/%s", max_dir, dir_real, base_buf);
     if ((nn < 0) || ((size_t)nn >= sizeof(joined))) {
         return FTP_ERR_PATH_TOO_LONG;
     }

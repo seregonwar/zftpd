@@ -860,11 +860,13 @@ static uint64_t dir_size_walk(const char *path, int depth, dir_size_ctx_t *ctx) 
     }
 
     char child[FTP_PATH_MAX];
+    int nmax_dw = (int)(sizeof(child) - 2 - strlen(ent->d_name));
+    if (nmax_dw < 0) { continue; }
     int n;
     if (strcmp(path, "/") == 0) {
       n = snprintf(child, sizeof(child), "/%s", ent->d_name);
     } else {
-      n = snprintf(child, sizeof(child), "%s/%s", path, ent->d_name);
+      n = snprintf(child, sizeof(child), "%.*s/%s", nmax_dw, path, ent->d_name);
     }
     if ((n < 0) || ((size_t)n >= sizeof(child))) {
       continue;
@@ -2021,9 +2023,13 @@ static http_response_t *api_create_file(const http_request_t *request) {
 
   char full[FTP_PATH_MAX];
   if (strcmp(safe_dir, "/") == 0) {
+    int room = (int)(sizeof(full) - 3 - strlen(name));
+    if (room < 0) room = 0;
     (void)snprintf(full, sizeof(full), "/%s", name);
   } else {
-    (void)snprintf(full, sizeof(full), "%s/%s", safe_dir, name);
+    int room = (int)(sizeof(full) - 2 - strlen(name));
+    if (room < 1) room = 1;
+    (void)snprintf(full, sizeof(full), "%.*s/%s", room, safe_dir, name);
   }
 
   char safe_full[FTP_PATH_MAX];
@@ -2094,9 +2100,13 @@ static http_response_t *api_mkdir(const http_request_t *request) {
 
   char full[FTP_PATH_MAX];
   if (strcmp(safe_dir, "/") == 0) {
+    int room_md = (int)(sizeof(full) - 3 - strlen(name));
+    if (room_md < 0) room_md = 0;
     (void)snprintf(full, sizeof(full), "/%s", name);
   } else {
-    (void)snprintf(full, sizeof(full), "%s/%s", safe_dir, name);
+    int room_md = (int)(sizeof(full) - 2 - strlen(name));
+    if (room_md < 1) room_md = 1;
+    (void)snprintf(full, sizeof(full), "%.*s/%s", room_md, safe_dir, name);
   }
 
   char safe_full[FTP_PATH_MAX];
@@ -2307,9 +2317,15 @@ static http_response_t *api_rename(const http_request_t *request) {
   size_t parent_len = (size_t)(last_slash - safe_old);
   if (parent_len == 0U) {
     /* file is directly under root "/" */
+    int room_rn = (int)(sizeof(new_path) - 3 - strlen(name));
+    if (room_rn < 0) room_rn = 0;
     (void)snprintf(new_path, sizeof(new_path), "/%s", name);
   } else {
-    (void)snprintf(new_path, sizeof(new_path), "%.*s/%s", (int)parent_len,
+    int room_rn = (int)(sizeof(new_path) - 2 - strlen(name));
+    int actual = (int)parent_len;
+    if (room_rn < 1) room_rn = 1;
+    if (actual > room_rn) actual = room_rn;
+    (void)snprintf(new_path, sizeof(new_path), "%.*s/%s", actual,
                    safe_old, name);
   }
 
@@ -2620,9 +2636,13 @@ static http_response_t *api_copy(const http_request_t *request) {
 
   char full_dst[FTP_PATH_MAX];
   if (strcmp(safe_dst_dir, "/") == 0) {
+    int room_cp = (int)(sizeof(full_dst) - 3 - strlen(base));
+    if (room_cp < 0) room_cp = 0;
     (void)snprintf(full_dst, sizeof(full_dst), "/%s", base);
   } else {
-    (void)snprintf(full_dst, sizeof(full_dst), "%s/%s", safe_dst_dir, base);
+    int room_cp = (int)(sizeof(full_dst) - 2 - strlen(base));
+    if (room_cp < 1) room_cp = 1;
+    (void)snprintf(full_dst, sizeof(full_dst), "%.*s/%s", room_cp, safe_dst_dir, base);
   }
 
   /* Re-validate the composed destination */
@@ -2968,7 +2988,12 @@ static http_response_t *api_disk_tree(const http_request_t *request) {
     if (strcmp(safe, "/") == 0) {
       (void)snprintf(child, sizeof(child), "/%s", ent->d_name);
     } else {
-      (void)snprintf(child, sizeof(child), "%s/%s", safe, ent->d_name);
+      int max_dt = (int)(sizeof(child) - 2 - strlen(ent->d_name));
+      if (max_dt < 0) {
+        count++;
+        continue;
+      }
+      (void)snprintf(child, sizeof(child), "%.*s/%s", max_dt, safe, ent->d_name);
     }
 
     struct stat st;

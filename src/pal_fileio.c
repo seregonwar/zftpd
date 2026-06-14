@@ -433,9 +433,9 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
   char tmp_path[FTP_PATH_MAX];
   const char *last_slash = strrchr(dst_path, '/');
   if (last_slash != NULL) {
-    size_t dir_len = (size_t)(last_slash - dst_path);
-    int n = snprintf(tmp_path, sizeof(tmp_path), "%.*s/.zftpd.%lu.%lu.tmp",
-                     (int)dir_len, dst_path, (unsigned long)getpid(),
+    size_t dir_len = (size_t)(last_slash - dst_path);    int n = snprintf(tmp_path, sizeof(tmp_path), "%.*s/.zftpd.%lu.%lu.tmp",
+                     (int)(sizeof(tmp_path) - 20 - 24), dst_path,
+                     (unsigned long)getpid(),
                      (unsigned long)counter);
     if ((n < 0) || ((size_t)n >= sizeof(tmp_path))) {
       return FTP_ERR_PATH_TOO_LONG;
@@ -1488,7 +1488,9 @@ static ftp_error_t pal_dir_remove_recursive(const char *path, unsigned depth) {
     }
 
     char child[FTP_PATH_MAX];
-    int n = snprintf(child, sizeof(child), "%s/%s", path, ent->d_name);
+    int nmax = (int)(sizeof(child) - 2 - strlen(ent->d_name));
+    if (nmax < 0) { err = FTP_ERR_PATH_TOO_LONG; break; }
+    int n = snprintf(child, sizeof(child), "%.*s/%s", nmax, path, ent->d_name);
     if ((n < 0) || ((size_t)n >= sizeof(child))) {
       err = FTP_ERR_PATH_TOO_LONG;
       break;
@@ -1695,8 +1697,12 @@ static ftp_error_t pal_copy_cross_device_r_ex(const char *src, const char *dst,
     char src_child[FTP_PATH_MAX];
     char dst_child[FTP_PATH_MAX];
 
-    int ns = snprintf(src_child, sizeof(src_child), "%s/%s", src, ent->d_name);
-    int nd = snprintf(dst_child, sizeof(dst_child), "%s/%s", dst, ent->d_name);
+    int ns = snprintf(src_child, sizeof(src_child), "%.*s/%s",
+                      (int)(sizeof(src_child) - 2 - strlen(ent->d_name)),
+                      src, ent->d_name);
+    int nd = snprintf(dst_child, sizeof(dst_child), "%.*s/%s",
+                      (int)(sizeof(dst_child) - 2 - strlen(ent->d_name)),
+                      dst, ent->d_name);
 
     if ((ns < 0) || ((size_t)ns >= sizeof(src_child)) || (nd < 0) ||
         ((size_t)nd >= sizeof(dst_child))) {

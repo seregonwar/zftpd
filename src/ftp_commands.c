@@ -306,9 +306,9 @@ static ftp_error_t mlsx_format_line(const vfs_stat_t *st,
   const char *prefix = (leading_space != 0) ? " " : "";
 
   int n = snprintf(buffer, size,
-                   "%stype=%s;size=%llu;modify=%s;unix.mode=%04o; %s\r\n",
+                   "%stype=%s;size=%llu;modify=%s;unix.mode=%04o; %.*s\r\n",
                    prefix, type_str, size_value, timebuf, mode_value,
-                   display_name);
+                   (int)(size > 50 ? size - 50 : 0), display_name);
   if ((n < 0) || ((size_t)n >= size)) {
     return FTP_ERR_PATH_TOO_LONG;
   }
@@ -455,10 +455,14 @@ ftp_error_t cmd_PWD(ftp_session_t *session, const char *args) {
     return FTP_ERR_INVALID_PARAM;
   }
 
-  /* Format: 257 "pathname" */
+  /* Format: 257 "pathname" — truncate path to fit the fixed-size reply buffer.
+   * FTP_PATH_MAX (4096 on Linux) may exceed FTP_REPLY_BUFFER_SIZE (1024). */
   char reply[FTP_REPLY_BUFFER_SIZE];
-  int n = snprintf(reply, sizeof(reply), "\"%s\" is current directory.",
-                   session->cwd);
+  size_t cwd_len = strlen(session->cwd);
+  size_t max_path = sizeof(reply) - 24; /* "..." is current directory. + NUL */
+  if (cwd_len > max_path) { cwd_len = max_path; }
+  int n = snprintf(reply, sizeof(reply), "\"%.*s\" is current directory.",
+                   (int)cwd_len, session->cwd);
 
   if ((n < 0) || ((size_t)n >= sizeof(reply))) {
     return FTP_ERR_INVALID_PARAM;
@@ -526,8 +530,10 @@ static ftp_error_t send_directory_listing(ftp_session_t *session,
       int have_stat = 0;
       if (skip_stat == 0) {
         char fullpath[FTP_PATH_MAX];
+        int max_path_len = (int)(sizeof(fullpath) - 2 - strlen(entry->d_name));
+        if (max_path_len < 0) { continue; }
         int n =
-            snprintf(fullpath, sizeof(fullpath), "%s/%s", path, entry->d_name);
+            snprintf(fullpath, sizeof(fullpath), "%.*s/%s", max_path_len, path, entry->d_name);
         if ((n >= 0) && ((size_t)n < sizeof(fullpath))) {
           if (vfs_stat(fullpath, &st) == FTP_OK) {
             have_stat = 1;
@@ -747,7 +753,9 @@ ftp_error_t cmd_MLSD(ftp_session_t *session, const char *args) {
       vfs_stat_t st;
       int have_stat = 0;
       char fullpath[FTP_PATH_MAX];
-      int n = snprintf(fullpath, sizeof(fullpath), "%s/%s", resolved,
+      int max_ml = (int)(sizeof(fullpath) - 2 - strlen(entry->d_name));
+      if (max_ml < 0) { continue; }
+      int n = snprintf(fullpath, sizeof(fullpath), "%.*s/%s", max_ml, resolved,
                        entry->d_name);
       if ((n >= 0) && ((size_t)n < sizeof(fullpath))) {
         if (vfs_stat(fullpath, &st) == FTP_OK) {
@@ -823,7 +831,9 @@ ftp_error_t cmd_MLST(ftp_session_t *session, const char *args) {
   }
 
   char reply[FTP_REPLY_BUFFER_SIZE];
-  int n = snprintf(reply, sizeof(reply), "250-Listing %s\r\n", client_path);
+  int n = snprintf(reply, sizeof(reply), "250-Listing %.*s\r\n",
+                   (int)(sizeof(reply) - 17), client_path);
+  /* 250-Listing + \r\n + NUL = 17 bytes reserved */
   if ((n < 0) || ((size_t)n >= sizeof(reply))) {
     return ftp_session_send_reply(session, FTP_REPLY_451_LOCAL_ERROR,
                                   "MLST formatting failed.");
@@ -919,7 +929,11 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
 
   /* DIAGNOSTIC: log transfer configuration so bottlenecks are visible in klog */
   {
-    char diag[256];
+    char diag[320];
+    /* Truncate resolved path to fit the fixed-size log buffer.
+     * The full path is already visible in the command handler args. */
+    const char *short_name = strrchr(resolved, '/');
+    if (short_name != NULL) { short_name++; } else { short_name = resolved; }
 #if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
     struct statfs sfs;
     const char *fstype = "unknown";
@@ -927,14 +941,14 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
     snprintf(diag, sizeof(diag),
       "[RETR] file=%s size=%llu fs=%s sendfile=%d "
       "chunk=%u eagain_sleep=%u sndbuf=%u",
-      resolved, (unsigned long long)file_size, fstype, use_sendfile,
+      short_name, (unsigned long long)file_size, fstype, use_sendfile,
       (unsigned)FTP_RETR_SENDFILE_CHUNK,
       (unsigned)FTP_SENDFILE_EAGAIN_SLEEP_US,
       (unsigned)FTP_TCP_DATA_SNDBUF);
 #else
     snprintf(diag, sizeof(diag),
       "[RETR] file=%s size=%llu sendfile=%d chunk=%u",
-      resolved, (unsigned long long)file_size, use_sendfile,
+      short_name, (unsigned long long)file_size, use_sendfile,
       (unsigned)FTP_RETR_SENDFILE_CHUNK);
 #endif
     ftp_log_line(FTP_LOG_INFO, diag);
@@ -1212,10 +1226,27 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
     const char *slash = strrchr(resolved, '/');
     if (slash != NULL) {
       size_t dir_len = (size_t)(slash - resolved);
-      snprintf(tmp_path, sizeof(tmp_path), "%.*s/.zftpd.tmp.%s", (int)dir_len,
-               resolved, slash + 1);
+      size_t tail_len = strlen(slash + 1);
+      /* Truncate basename if the temp path would exceed FTP_PATH_MAX.
+       * Use overflow-safe comparison to avoid size_t wrap-around when
+       * dir_len is very large. */
+      size_t overhead = 14; /* "/.zftpd.tmp." + NUL */
+      if (dir_len < sizeof(tmp_path) - overhead) {
+        size_t max_tail = sizeof(tmp_path) - dir_len - overhead;
+        if (tail_len > max_tail) { tail_len = max_tail; }
+      } else {
+        tail_len = 0; /* dir too long — truncate basename entirely */
+      }
+      int n = snprintf(tmp_path, sizeof(tmp_path), "%.*s/.zftpd.tmp.%.*s",
+                       (int)dir_len, resolved, (int)tail_len, slash + 1);
+      (void)n;
     } else {
-      snprintf(tmp_path, sizeof(tmp_path), ".zftpd.tmp.%s", resolved);
+      size_t name_len = strlen(resolved);
+      size_t max_name = sizeof(tmp_path) - 13; /* .zftpd.tmp. + NUL */
+      if (name_len > max_name) { name_len = max_name; }
+      int n = snprintf(tmp_path, sizeof(tmp_path), ".zftpd.tmp.%.*s",
+                       (int)name_len, resolved);
+      (void)n;
     }
   }
 
@@ -1925,7 +1956,11 @@ ftp_error_t cmd_MKD(ftp_session_t *session, const char *args) {
   }
 
   char reply[FTP_REPLY_BUFFER_SIZE];
-  int n = snprintf(reply, sizeof(reply), "\"%s\" created.", resolved);
+  size_t res_len = strlen(resolved);
+  size_t max_path = sizeof(reply) - 14; /* "..." created. + NUL */
+  if (res_len > max_path) { res_len = max_path; }
+  int n = snprintf(reply, sizeof(reply), "\"%.*s\" created.",
+                   (int)res_len, resolved);
 
   /* VULN-05 fix: check for truncation (same as cmd_PWD) */
   if ((n < 0) || ((size_t)n >= sizeof(reply))) {
@@ -2422,7 +2457,7 @@ ftp_error_t cmd_OPTS(ftp_session_t *session, const char *args) {
   }
   upper[len] = '\0';
 
-  if ((strncmp(upper, "UTF8", 4) == 0) &&
+  if ((len >= 4U) && (strncmp(upper, "UTF8", 4) == 0) &&
       (len == 4U || strcmp(upper + 4, " ON") == 0)) {
     return ftp_session_send_reply(session, FTP_REPLY_200_OK,
                                   "UTF8 mode enabled.");

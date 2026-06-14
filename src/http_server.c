@@ -887,9 +887,13 @@ static int http_client_callback(int fd, uint32_t events, void *data) {
 
         char full[1024];
         if (strcmp(dir_path, "/") == 0) {
+          int room = (int)(sizeof(full) - 3 - strlen(file_name));
+          if (room < 0) room = 0;
           (void)snprintf(full, sizeof(full), "/%s", file_name);
         } else {
-          (void)snprintf(full, sizeof(full), "%s/%s", dir_path, file_name);
+          int room = (int)(sizeof(full) - 2 - strlen(file_name));
+          if (room < 1) room = 1;
+          (void)snprintf(full, sizeof(full), "%.*s/%s", room, dir_path, file_name);
         }
         if (!is_safe_path_local(full)) {
           http_close_connection(conn);
@@ -1241,7 +1245,10 @@ static int http_handle_request(http_connection_t *conn) {
       }
 
       char fullpath[2048];
-      snprintf(fullpath, sizeof(fullpath), "%s/%s", response->stream_path,
+      int max_stream = (int)(sizeof(fullpath) - 2 - strlen(entry->d_name));
+      if (max_stream < 0) { continue; }
+      snprintf(fullpath, sizeof(fullpath), "%.*s/%s", max_stream,
+               response->stream_path,
                entry->d_name);
 
       struct stat st;
