@@ -40,10 +40,6 @@ jobs:
             os: ubuntu-latest
             zhttpd: "0"
             variant: ftp
-          - platform: linux
-            os: ubuntu-latest
-            zhttpd: "1"
-            variant: zhttp
           - platform: macos
             os: macos-latest
             zhttpd: "0"
