@@ -893,10 +893,10 @@ static uint64_t dir_size_walk(const char *path, int depth, dir_size_ctx_t *ctx) 
 uint64_t http_dir_size_recursive(const char *path, int depth) {
   dir_size_ctx_t ctx;
   gettimeofday(&ctx.deadline, NULL);
-  ctx.deadline.tv_usec += DIR_SIZE_TIMEOUT_MS * 1000;
-  if (ctx.deadline.tv_usec >= 1000000) {
-    ctx.deadline.tv_sec  += ctx.deadline.tv_usec / 1000000;
-    ctx.deadline.tv_usec  = ctx.deadline.tv_usec % 1000000;
+  {
+    int64_t usec = (int64_t)ctx.deadline.tv_usec + (int64_t)DIR_SIZE_TIMEOUT_MS * 1000;
+    ctx.deadline.tv_sec  += (time_t)(usec / 1000000);
+    ctx.deadline.tv_usec  = (suseconds_t)(usec % 1000000);
   }
   ctx.entries = 0;
   ctx.partial = 0;
@@ -911,10 +911,10 @@ uint64_t http_dir_size_recursive(const char *path, int depth) {
 static uint64_t http_dir_size_with_partial(const char *path, int *out_partial) {
   dir_size_ctx_t ctx;
   gettimeofday(&ctx.deadline, NULL);
-  ctx.deadline.tv_usec += DIR_SIZE_TIMEOUT_MS * 1000;
-  if (ctx.deadline.tv_usec >= 1000000) {
-    ctx.deadline.tv_sec  += ctx.deadline.tv_usec / 1000000;
-    ctx.deadline.tv_usec  = ctx.deadline.tv_usec % 1000000;
+  {
+    int64_t usec = (int64_t)ctx.deadline.tv_usec + (int64_t)DIR_SIZE_TIMEOUT_MS * 1000;
+    ctx.deadline.tv_sec  += (time_t)(usec / 1000000);
+    ctx.deadline.tv_usec  = (suseconds_t)(usec % 1000000);
   }
   ctx.entries = 0;
   ctx.partial = 0;
@@ -2638,11 +2638,17 @@ static http_response_t *api_copy(const http_request_t *request) {
   if (strcmp(safe_dst_dir, "/") == 0) {
     int room_cp = (int)(sizeof(full_dst) - 3 - strlen(base));
     if (room_cp < 0) room_cp = 0;
-    (void)snprintf(full_dst, sizeof(full_dst), "/%s", base);
+    (void)snprintf(full_dst, sizeof(full_dst), "/%.*s", room_cp, base);
   } else {
-    int room_cp = (int)(sizeof(full_dst) - 2 - strlen(base));
-    if (room_cp < 1) room_cp = 1;
-    (void)snprintf(full_dst, sizeof(full_dst), "%.*s/%s", room_cp, safe_dst_dir, base);
+    size_t dirlen = strlen(safe_dst_dir);
+    size_t baselen = strlen(base);
+    size_t overhead = 2; /* '/' + NUL */
+    if (dirlen + baselen + overhead > sizeof(full_dst)) {
+      if (dirlen > sizeof(full_dst) - overhead) { dirlen = sizeof(full_dst) - overhead; }
+      baselen = sizeof(full_dst) - dirlen - overhead;
+    }
+    (void)snprintf(full_dst, sizeof(full_dst), "%.*s/%.*s",
+                   (int)dirlen, safe_dst_dir, (int)baselen, base);
   }
 
   /* Re-validate the composed destination */
@@ -3196,7 +3202,7 @@ static http_response_t *api_processes(const http_request_t *request) {
           if (p) {
             sscanf(p + 2,
                    " %c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u "
-                   "%*lu %*lu %*d %*d %*d %*d %*d %*d %*u %*u %ld",
+                   "%*u %*u %*d %*d %*d %*d %*d %*d %*u %*u %ld",
                    &state, &rss);
           }
         }
@@ -3207,7 +3213,7 @@ static http_response_t *api_processes(const http_request_t *request) {
         snprintf(comm, sizeof(comm), "pid%d", pid);
 
       uint64_t mem_mb =
-          (uint64_t)((rss > 0 ? rss : 0) * 4096UL / (1024UL * 1024UL));
+          (uint64_t)(rss > 0 ? rss : 0) * 4096UL / (1024UL * 1024UL));
       const char *status_str = "running";
       if (state == 'S' || state == 'D')
         status_str = "sleep";
@@ -4526,7 +4532,7 @@ static int append_installed_entries_from_base(const char *base,
 
     char title_id[64] = {0};
     char title_name[256] = {0};
-    (void)snprintf(title_id, sizeof(title_id), "%s", ent->d_name);
+    (void)snprintf(title_id, sizeof(title_id), "%.63s", ent->d_name);
     (void)read_installed_game_sfo(app_dir, title_id, sizeof(title_id), title_name,
                                   sizeof(title_name));
     if (title_name[0] == '\0') {
@@ -5226,7 +5232,9 @@ static http_response_t *api_extract(const http_request_t *request) {
   /* Set up extraction state */
   memset(&g_extract, 0, sizeof(g_extract));
   strncpy(g_extract.archive_path, safe_path, sizeof(g_extract.archive_path) - 1);
+  g_extract.archive_path[sizeof(g_extract.archive_path) - 1] = '\0';
   strncpy(g_extract.dest_path, safe_dst, sizeof(g_extract.dest_path) - 1);
+  g_extract.dest_path[sizeof(g_extract.dest_path) - 1] = '\0';
   g_extract.active = 1;
 
   /* Get archive size for progress tracking */
@@ -6159,7 +6167,9 @@ static http_response_t *api_dl_start(const http_request_t *request) {
   memset(dl, 0, sizeof(dl_entry_t));
   dl->id = g_dl_next_id++;
   strncpy(dl->url, url, sizeof(dl->url) - 1);
+  dl->url[sizeof(dl->url) - 1] = '\0';
   strncpy(dl->dst_path, safe_dst, sizeof(dl->dst_path) - 1);
+  dl->dst_path[sizeof(dl->dst_path) - 1] = '\0';
   dl_extract_filename(url, dl->filename, sizeof(dl->filename));
   dl->start_time = time(NULL);
   dl->active = 1;
