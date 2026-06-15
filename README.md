@@ -358,7 +358,7 @@ All configuration is compile-time, in [`include/ftp_config.h`](include/ftp_confi
 
 | Macro | Default | Notes |
 |---|---|---|
-| `FTP_DEFAULT_PORT` | `2121` (POSIX) · `2122` (console) | Listening port |
+| `FTP_DEFAULT_PORT` | `2121` (POSIX) · `2120` (console) | Listening port |
 | `FTP_MAX_SESSIONS` | — | Maximum concurrent client sessions |
 | `FTP_SESSION_TIMEOUT` | — | Idle session timeout |
 | `FTP_TRANSFER_RATE_LIMIT_BPS` | *disabled* | Token-bucket average rate cap |
