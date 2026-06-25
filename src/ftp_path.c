@@ -502,3 +502,54 @@ ftp_error_t ftp_path_join(const char *base,
     /* Normalize the joined path */
     return ftp_path_normalize(temp, output, size);
 }
+
+/*
+ * LIST flag disambiguation.
+ * curlftpfs sends "LIST -a" by default; treat "-a"/"-l"/"-la"/"-al"
+ * as flags (case-insensitive), stat single tokens to tell flag from path.
+ */
+static int is_list_flag_char(int c) {
+  return (c == 'a' || c == 'A' || c == 'l' || c == 'L');
+}
+
+static int is_list_flag(const char *s) {
+  if (s == NULL || *s != '-') return 0;
+  for (const char *p = s + 1; *p != '\0' && *p != ' '; p++)
+    if (!is_list_flag_char((unsigned char)*p)) return 0;
+  return s[1] != '\0';
+}
+
+static int has_multi_tokens(const char *s) {
+  while (*s != '\0' && *s != ' ') s++;
+  while (*s == ' ') s++;
+  return *s != '\0';
+}
+
+int ftp_path_has_list_flag(const char *args, const char *cwd,
+                           char *scratch, size_t scratch_size) {
+  if (args == NULL || *args == '\0') return 0;
+  if (!is_list_flag(args)) return 0;
+
+  /* args like "-a /data" → definitely a flag, strip it */
+  if (has_multi_tokens(args)) return 1;
+
+  /* Single token like "-a": stat(CWD/-a).
+   * Exists → path  (e.g. a directory actually named "-a")
+   * Absent → flag  (curlftpfs default) */
+  size_t cwd_len = strlen(cwd);
+  size_t arg_len = strlen(args);
+  size_t needed = cwd_len + 1U + arg_len + 1U;
+  if (needed > scratch_size) return 1;  /* buffer too small, assume flag */
+
+  memcpy(scratch, cwd, cwd_len);
+  if (cwd_len > 0U && cwd[cwd_len - 1U] != '/') scratch[cwd_len++] = '/';
+  memcpy(scratch + cwd_len, args, arg_len);
+  scratch[cwd_len + arg_len] = '\0';
+  return pal_path_exists(scratch) ? 0 : 1;  /* exists=path, absent=flag */
+}
+
+const char *ftp_path_skip_list_flag(const char *args, const char *cwd) {
+  while (*args != '\0' && *args != ' ') args++;
+  while (*args == ' ') args++;
+  return (*args == '\0') ? cwd : args;
+}
