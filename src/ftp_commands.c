@@ -604,8 +604,19 @@ ftp_error_t cmd_LIST(ftp_session_t *session, const char *args) {
     return FTP_ERR_INVALID_PARAM;
   }
 
-  /* Resolve path (use CWD if no args) */
-  const char *path_arg = (args != NULL) ? args : session->cwd;
+  /*
+   * Strip well-known LIST flags (-a, -l, -la, -al) that clients like
+   * curlftpfs send by default.  Uses ProFTPD's have_options() heuristic:
+   * a single "-…" token is stat()'d to decide flag-vs-path.
+   */
+  char list_scratch[FTP_PATH_MAX];
+  const char *path_arg;
+  if (ftp_path_has_list_flag(args, session->cwd, list_scratch,
+                             sizeof(list_scratch))) {
+    path_arg = ftp_path_skip_list_flag(args, session->cwd);
+  } else {
+    path_arg = (args != NULL && *args != '\0') ? args : session->cwd;
+  }
 
   char resolved[FTP_PATH_MAX];
   ftp_error_t err =
@@ -662,8 +673,15 @@ ftp_error_t cmd_NLST(ftp_session_t *session, const char *args) {
     return FTP_ERR_INVALID_PARAM;
   }
 
-  /* Similar to LIST but simpler format */
-  const char *path_arg = (args != NULL) ? args : session->cwd;
+  /* Strip well-known NLST flags — same ProFTPD-style logic as cmd_LIST. */
+  char nlist_scratch[FTP_PATH_MAX];
+  const char *path_arg;
+  if (ftp_path_has_list_flag(args, session->cwd, nlist_scratch,
+                             sizeof(nlist_scratch))) {
+    path_arg = ftp_path_skip_list_flag(args, session->cwd);
+  } else {
+    path_arg = (args != NULL && *args != '\0') ? args : session->cwd;
+  }
 
   char resolved[FTP_PATH_MAX];
   ftp_error_t err =

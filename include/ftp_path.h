@@ -214,4 +214,21 @@ ftp_error_t ftp_path_join(const char *base,
                            char *output,
                            size_t size);
 
+/*===========================================================================*
+ * LIST FLAG DISAMBIGUATION
+ *===========================================================================*/
+
+/*
+ * Returns 1 if args start with a LIST flag (-a/-l/-la/-al) that
+ * should be stripped, 0 otherwise.  Single-token args (e.g. "LIST -a")
+ * are stat()'d relative to CWD to disambiguate flag from real path.
+ */
+int ftp_path_has_list_flag(const char *args, const char *cwd,
+                           char *scratch, size_t scratch_size);
+
+/*
+ * Strips the leading flag token; returns remainder or CWD.
+ */
+const char *ftp_path_skip_list_flag(const char *args, const char *cwd);
+
 #endif /* FTP_PATH_H */
