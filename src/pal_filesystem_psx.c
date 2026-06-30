@@ -178,6 +178,13 @@ static void ps5_resolve_pager_addresses(void)
         case 0x1270:
             g_ps5_pager_table = (intptr_t)KERNEL_ADDRESS_DATA_BASE + 0xDF2860;
             break;
+        case 0x1300:
+        case 0x1320:
+            g_ps5_pager_table = (intptr_t)KERNEL_ADDRESS_DATA_BASE + 0xE038D0;
+            break;
+        case 0x1340:
+            g_ps5_pager_table = (intptr_t)KERNEL_ADDRESS_DATA_BASE + 0xE03910;
+            break;
         default:
             g_ps5_pager_table = 0;
             return;
