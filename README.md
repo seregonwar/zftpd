@@ -267,7 +267,7 @@ Transfer speed to the **internal storage** (`/data/...`) varies significantly ac
 - ELF: `build/<target>/release[/ -zhttp]/zftpd-<platform-tag>[-zhttp]-v<version>.elf`
 - BIN (console): `... .bin`
 
-** Execution (binaries host):**
+**Execution (binaries host):**
 
 ```
 ./build/macos/release/zftpd-macos-$(uname -m)-v1.3.0 -p <port> -d <root>
