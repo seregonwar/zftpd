@@ -45,14 +45,14 @@ Philosophy
 
 ## ⚡ Performance
 
-> `zftpd` saturates a full Gigabit Ethernet link — **~112 MB/s sustained** in both directions.
+> `zftpd` saturates a full Gigabit Ethernet link — **~117 MB/s sustained** in both directions.
 
 This is the physical ceiling of a 1 GbE connection. It is achieved out of the box, with no kernel tuning required.
 
 ```
   Benchmark — single stream, wired 1 GbE, plain transfer
 
-  Download  ████████████████████████████████████████████  112 MB/s
+  Download  ████████████████████████████████████████████  117 MB/s
   Upload    █████████████████████████████████████████     108 MB/s
                                                           ────────
   Physical ceiling (1 GbE)                                125 MB/s
