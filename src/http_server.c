@@ -49,6 +49,7 @@ SOFTWARE.
 
 #include "http_server.h"
 #include "ftp_config.h"
+#include "ftp_log.h"
 #include "http_api.h"
 #include "http_config.h"
 #if ENABLE_WEB_UPLOAD
@@ -58,11 +59,14 @@ SOFTWARE.
 #include "http_response.h"
 #include "pal_fileio.h"
 #include "pal_network.h"
+#include "pal_notification.h"
+#include "pal_resilient_server.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h> /* TCP_NODELAY */
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -83,6 +87,17 @@ struct http_server {
   uint16_t port;
   atomic_int connection_count;  /* Phase 4: thread-safe counter */
   char root_path[FTP_PATH_MAX]; /* filesystem confinement root */
+
+  /* Rest-mode resilience: recreate listen FD after EBADF / stack drop */
+  char bind_addr[128];
+  struct sockaddr_storage listen_addr;
+  socklen_t listen_addr_len;
+  int af;
+  int wake_r; /* event-loop wake pipe (read) */
+  int wake_w; /* event-loop wake pipe (write) */
+  int pending_listen_fd;
+  atomic_int recreating;
+  atomic_int alive; /* 1 while server exists */
 };
 
 typedef struct {
@@ -185,8 +200,11 @@ static void http_connection_release(http_connection_t *conn) {
 
 static int http_accept_callback(int fd, uint32_t events, void *data);
 static int http_client_callback(int fd, uint32_t events, void *data);
+static int http_wake_callback(int fd, uint32_t events, void *data);
 static int http_handle_request(http_connection_t *conn);
 static void http_close_connection(http_connection_t *conn);
+static void http_schedule_listener_recreate(http_server_t *server);
+static int http_open_listen_socket(http_server_t *server, int *out_fd);
 
 /*===========================================================================*
  * SET NON-BLOCKING
@@ -437,6 +455,190 @@ static int is_safe_filename_local(const char *name) {
 #endif
 
 /*===========================================================================*
+ * REST-MODE LISTENER RESILIENCE
+ *===========================================================================*/
+
+static int http_open_listen_socket(http_server_t *server, int *out_fd) {
+  int fd;
+  int reuse = 1;
+
+  if ((server == NULL) || (out_fd == NULL)) {
+    return -1;
+  }
+
+  fd = socket(server->af, SOCK_STREAM, 0);
+  if (fd < 0) {
+    return -1;
+  }
+
+  (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+  if (server->af == AF_INET6) {
+    int v6only = 0;
+    (void)setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
+  }
+
+  if (bind(fd, (struct sockaddr *)&server->listen_addr,
+           server->listen_addr_len) < 0) {
+    close(fd);
+    return -1;
+  }
+
+  if (listen(fd, 128) < 0) {
+    close(fd);
+    return -1;
+  }
+
+  if (set_nonblocking(fd) != 0) {
+    close(fd);
+    return -1;
+  }
+
+  *out_fd = fd;
+  return 0;
+}
+
+static void http_wake_event_loop(http_server_t *server) {
+  char byte = 1;
+  ssize_t n;
+  if ((server == NULL) || (server->wake_w < 0)) {
+    return;
+  }
+  n = write(server->wake_w, &byte, 1);
+  if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+    /* Best-effort wake; recreate thread will retry on next attempt. */
+  }
+}
+
+static int http_wake_callback(int fd, uint32_t events, void *data) {
+  http_server_t *server = (http_server_t *)data;
+  char buf[32];
+  (void)events;
+
+  if ((server == NULL) || (atomic_load(&server->alive) == 0)) {
+    return -1;
+  }
+
+  /* Drain wake pipe */
+  for (;;) {
+    ssize_t n = read(fd, buf, sizeof(buf));
+    if (n <= 0) {
+      break;
+    }
+  }
+
+  if (server->pending_listen_fd >= 0) {
+    int new_fd = server->pending_listen_fd;
+    server->pending_listen_fd = -1;
+
+    if (server->listen_fd >= 0 && server->listen_fd != new_fd) {
+      (void)event_loop_remove(server->loop, server->listen_fd);
+      close(server->listen_fd);
+    }
+
+    if (event_loop_add(server->loop, new_fd, EVENT_READ, http_accept_callback,
+                       server) != 0) {
+      ftp_log_line(FTP_LOG_ERROR,
+                   "[restmode-http] Failed to register recreated listen FD");
+      close(new_fd);
+      atomic_store(&server->recreating, 0);
+      http_schedule_listener_recreate(server);
+      return 0;
+    }
+
+    server->listen_fd = new_fd;
+    atomic_store(&server->recreating, 0);
+    ftp_log_line(FTP_LOG_INFO,
+                 "[restmode-http] Listen socket recreated successfully");
+    {
+      char msg[96];
+      (void)snprintf(msg, sizeof(msg), "zftpd: HTTP resumed on port %u",
+                     (unsigned)server->port);
+      pal_notification_send(msg);
+    }
+  }
+
+  return 0;
+}
+
+static void *http_recreate_thread(void *arg) {
+  http_server_t *server = (http_server_t *)arg;
+  unsigned attempt = 0U;
+
+  if (server == NULL) {
+    return NULL;
+  }
+
+  while (atomic_load(&server->alive) != 0) {
+    int new_fd = -1;
+
+    if ((attempt % 3U) == 0U && attempt > 0U) {
+      (void)pal_network_reinit();
+    }
+
+    if (http_open_listen_socket(server, &new_fd) == 0) {
+      server->pending_listen_fd = new_fd;
+      http_wake_event_loop(server);
+      return NULL;
+    }
+
+    {
+      unsigned delay = pal_restmode_backoff_ms(attempt);
+      char log_msg[128];
+      (void)snprintf(log_msg, sizeof(log_msg),
+                     "[restmode-http] recreate failed — retry in %u ms", delay);
+      ftp_log_line(FTP_LOG_WARN, log_msg);
+      if (pal_restmode_sleep_ms(delay, &server->alive) != 0) {
+        break;
+      }
+    }
+    attempt++;
+  }
+
+  atomic_store(&server->recreating, 0);
+  return NULL;
+}
+
+static void http_schedule_listener_recreate(http_server_t *server) {
+  pthread_t tid;
+  pthread_attr_t attr;
+  int expected = 0;
+
+  if ((server == NULL) || (atomic_load(&server->alive) == 0)) {
+    return;
+  }
+
+  if (!atomic_compare_exchange_strong(&server->recreating, &expected, 1)) {
+    return; /* already recreating */
+  }
+
+  ftp_log_line(FTP_LOG_WARN,
+               "[restmode-http] Listener lost — scheduling recreate");
+
+  if (server->listen_fd >= 0) {
+    (void)event_loop_remove(server->loop, server->listen_fd);
+    close(server->listen_fd);
+    server->listen_fd = -1;
+  }
+
+  if (pthread_attr_init(&attr) == 0) {
+    (void)pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    if (pthread_create(&tid, &attr, http_recreate_thread, server) != 0) {
+      atomic_store(&server->recreating, 0);
+      ftp_log_line(FTP_LOG_ERROR,
+                   "[restmode-http] Failed to start recreate thread");
+    }
+    (void)pthread_attr_destroy(&attr);
+  } else if (pthread_create(&tid, NULL, http_recreate_thread, server) != 0) {
+    atomic_store(&server->recreating, 0);
+    ftp_log_line(FTP_LOG_ERROR,
+                 "[restmode-http] Failed to start recreate thread");
+  } else {
+    (void)pthread_detach(tid);
+  }
+}
+
+/*===========================================================================*
  * CREATE / DESTROY
  *===========================================================================*/
 
@@ -452,8 +654,13 @@ http_server_t *http_server_create(event_loop_t *loop, const char *bind_addr,
 
   memset(&g_http_server, 0, sizeof(g_http_server));
   g_http_server.listen_fd = -1;
+  g_http_server.wake_r = -1;
+  g_http_server.wake_w = -1;
+  g_http_server.pending_listen_fd = -1;
   g_http_server.loop = loop;
   atomic_store(&g_http_server.connection_count, 0);
+  atomic_store(&g_http_server.recreating, 0);
+  atomic_store(&g_http_server.alive, 1);
 
   /* Store root path for filesystem confinement */
   size_t rlen = strlen(root_path);
@@ -462,69 +669,76 @@ http_server_t *http_server_create(event_loop_t *loop, const char *bind_addr,
   }
   memcpy(g_http_server.root_path, root_path, rlen + 1U);
 
+  size_t blen = strlen(bind_addr);
+  if (blen >= sizeof(g_http_server.bind_addr)) {
+    return NULL;
+  }
+  memcpy(g_http_server.bind_addr, bind_addr, blen + 1U);
+
   /* Propagate root to API layer */
   http_api_set_root(root_path);
 
   http_connections_init();
 
   /* Parse bind address (supports "[::1]:8888" and "0.0.0.0:8888") */
-  struct sockaddr_storage addr_storage;
-  socklen_t addr_len;
-  if (pal_make_sockaddr_ex(bind_addr, &addr_storage, &addr_len) != FTP_OK) {
+  if (pal_make_sockaddr_ex(bind_addr, &g_http_server.listen_addr,
+                           &g_http_server.listen_addr_len) != FTP_OK) {
     return NULL;
   }
 
   /* Determine address family and extract port */
-  int af = addr_storage.ss_family;
+  g_http_server.af = g_http_server.listen_addr.ss_family;
   uint16_t port = 0;
-  if (af == AF_INET6) {
-    struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *)&addr_storage;
+  if (g_http_server.af == AF_INET6) {
+    struct sockaddr_in6 *addr6 =
+        (struct sockaddr_in6 *)&g_http_server.listen_addr;
     port = ntohs(addr6->sin6_port);
-  } else if (af == AF_INET) {
-    struct sockaddr_in *addr4 = (struct sockaddr_in *)&addr_storage;
+  } else if (g_http_server.af == AF_INET) {
+    struct sockaddr_in *addr4 =
+        (struct sockaddr_in *)&g_http_server.listen_addr;
     port = ntohs(addr4->sin_port);
   } else {
     return NULL;
   }
   g_http_server.port = port;
 
-  /* Create TCP listen socket with detected address family */
-  g_http_server.listen_fd = socket(af, SOCK_STREAM, 0);
-  if (g_http_server.listen_fd < 0) {
+  if (http_open_listen_socket(&g_http_server, &g_http_server.listen_fd) != 0) {
     return NULL;
   }
 
-  int reuse = 1;
-  setsockopt(g_http_server.listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuse,
-             sizeof(reuse));
-
-  /* Dual-stack: accept both IPv4 and IPv6 on a single [::] socket.
-   * FreeBSD/PS5 defaults IPV6_V6ONLY=1, so we must explicitly disable it. */
-  if (af == AF_INET6) {
-    int v6only = 0;
-    setsockopt(g_http_server.listen_fd, IPPROTO_IPV6, IPV6_V6ONLY,
-               &v6only, sizeof(v6only));
+  /* Wake pipe: recreate thread → event-loop thread (safe event_loop_add). */
+  {
+    int fds[2];
+    if (pipe(fds) == 0) {
+      g_http_server.wake_r = fds[0];
+      g_http_server.wake_w = fds[1];
+      (void)set_nonblocking(g_http_server.wake_r);
+      if (event_loop_add(loop, g_http_server.wake_r, EVENT_READ,
+                         http_wake_callback, &g_http_server) != 0) {
+        close(g_http_server.wake_r);
+        close(g_http_server.wake_w);
+        g_http_server.wake_r = -1;
+        g_http_server.wake_w = -1;
+        ftp_log_line(FTP_LOG_WARN,
+                     "[restmode-http] Wake pipe registration failed — "
+                     "HTTP recreate disabled");
+      }
+    } else {
+      ftp_log_line(FTP_LOG_WARN,
+                   "[restmode-http] pipe() failed — HTTP recreate disabled");
+    }
   }
-
-  if (bind(g_http_server.listen_fd, (struct sockaddr *)&addr_storage,
-           addr_len) < 0) {
-    close(g_http_server.listen_fd);
-    g_http_server.listen_fd = -1;
-    return NULL;
-  }
-
-  if (listen(g_http_server.listen_fd, 128) < 0) {
-    close(g_http_server.listen_fd);
-    g_http_server.listen_fd = -1;
-    return NULL;
-  }
-
-  /* Non-blocking accept */
-  (void)set_nonblocking(g_http_server.listen_fd);
 
   /* Register with event loop */
   if (event_loop_add(loop, g_http_server.listen_fd, EVENT_READ,
                      http_accept_callback, &g_http_server) != 0) {
+    if (g_http_server.wake_r >= 0) {
+      event_loop_remove(loop, g_http_server.wake_r);
+      close(g_http_server.wake_r);
+      close(g_http_server.wake_w);
+      g_http_server.wake_r = -1;
+      g_http_server.wake_w = -1;
+    }
     close(g_http_server.listen_fd);
     g_http_server.listen_fd = -1;
     return NULL;
@@ -537,6 +751,9 @@ http_server_t *http_server_create(event_loop_t *loop, const char *bind_addr,
 void http_server_destroy(http_server_t *server) {
   if (server != NULL) {
     if (server == &g_http_server) {
+      atomic_store(&server->alive, 0);
+      http_wake_event_loop(server);
+
       for (size_t i = 0; i < (size_t)HTTP_MAX_CONNECTIONS; i++) {
         if (g_http_connections[i].fd >= 0) {
           http_close_connection(&g_http_connections[i]);
@@ -546,6 +763,27 @@ void http_server_destroy(http_server_t *server) {
         event_loop_remove(server->loop, server->listen_fd);
         close(server->listen_fd);
         server->listen_fd = -1;
+      }
+      if (server->pending_listen_fd >= 0) {
+        close(server->pending_listen_fd);
+        server->pending_listen_fd = -1;
+      }
+      if (server->wake_r >= 0) {
+        event_loop_remove(server->loop, server->wake_r);
+        close(server->wake_r);
+        server->wake_r = -1;
+      }
+      if (server->wake_w >= 0) {
+        close(server->wake_w);
+        server->wake_w = -1;
+      }
+      /* Wait briefly for recreate thread to observe alive==0 */
+      {
+        unsigned waited = 0U;
+        while ((atomic_load(&server->recreating) != 0) && (waited < 2000U)) {
+          usleep(50U * 1000U);
+          waited += 50U;
+        }
       }
       atomic_store(&g_http_server_in_use, 0);
     }
@@ -558,14 +796,37 @@ void http_server_destroy(http_server_t *server) {
 
 static int http_accept_callback(int fd, uint32_t events, void *data) {
   http_server_t *server = (http_server_t *)data;
-  (void)events;
+
+  if (server == NULL) {
+    return -1;
+  }
+
+  /* Rest Mode / kernel reclaim: listen FD errored or closed. */
+  if (events & (EVENT_ERROR | EVENT_CLOSE)) {
+    http_schedule_listener_recreate(server);
+    return -1; /* remove this (dead) FD from the event loop */
+  }
 
   struct sockaddr_storage client_addr;
   socklen_t addr_len = sizeof(client_addr);
 
   int client_fd = accept(fd, (struct sockaddr *)&client_addr, &addr_len);
   if (client_fd < 0) {
-    return 0; /* EAGAIN or error, keep listening */
+    int err = errno;
+    if ((err == EAGAIN) || (err == EWOULDBLOCK) || (err == EINTR)) {
+      /* Opportunistic stale-FD probe when the listen socket woke with no
+       * client — catches the "FD survives but stack is dead" Rest Mode case. */
+      if (!pal_listen_fd_alive(fd)) {
+        http_schedule_listener_recreate(server);
+        return -1;
+      }
+      return 0;
+    }
+    if (pal_errno_is_listener_lost(err)) {
+      http_schedule_listener_recreate(server);
+      return -1;
+    }
+    return 0; /* transient error, keep listening */
   }
 
   /*

@@ -164,6 +164,16 @@ ftp_error_t pal_file_close(int fd);
 ftp_error_t pal_file_stat(const char *path, struct stat *st);
 
 /**
+ * @brief Change file or directory permission bits
+ *
+ * @param path Absolute filesystem path
+ * @param mode Permission bits (e.g. 0777), typically masked to 07777
+ *
+ * @return FTP_OK on success, negative error code on failure
+ */
+ftp_error_t pal_file_chmod(const char *path, mode_t mode);
+
+/**
  * @brief Get file status from descriptor
  *
  * @param fd File descriptor

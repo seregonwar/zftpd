@@ -33,6 +33,7 @@ SOFTWARE.
  */
 
 #include "ftp_server.h"
+#include "ftp_instance.h"
 #include "ftp_session.h"
 #include "pal_network.h"
 #include "pal_resilient_server.h"
@@ -74,6 +75,9 @@ ftp_error_t ftp_server_init(ftp_server_context_t *ctx,
     if (err != FTP_OK) {
         return err;
     }
+
+    /* Process-lifetime identity for rest-mode reconnect clients */
+    ftp_instance_init();
     
     /* Create listen socket */
     int fd = PAL_SOCKET(AF_INET, SOCK_STREAM, 0);

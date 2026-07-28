@@ -349,7 +349,7 @@ ftp_error_t cmd_OPTS(ftp_session_t *session, const char *args);
  * @param session Client session
  * @param args    Site command (e.g. "CHMOD 755 file")
  *
- * @return FTP_OK (accepts CHMOD as no-op)
+ * @return FTP_OK after sending a reply (SITE CHMOD applies chmod(2))
  */
 ftp_error_t cmd_SITE(ftp_session_t *session, const char *args);
 

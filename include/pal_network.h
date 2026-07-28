@@ -229,6 +229,13 @@ typedef int socket_t;
 ftp_error_t pal_network_init(void);
 
 /**
+ * @brief Best-effort network stack re-init after Rest Mode.
+ *
+ * Calls fini + init. Safe no-op on platforms where networking is always up.
+ */
+ftp_error_t pal_network_reinit(void);
+
+/**
  * @brief Cleanup platform network subsystem
  *
  * @note PS4: Terminates libkernel networking

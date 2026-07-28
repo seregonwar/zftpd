@@ -885,6 +885,31 @@ var ZFTPD = ZFTPD || {};
     wireTopbarTools();
     Z.updateTopbarContext();
 
+    /* Rest-mode reconnect monitor (ZHTTP ↔ daemon) */
+    Z.onReconnectPhase = function (phase, reason) {
+      if (phase === 'waiting' || phase === 'reconnecting') {
+        if (Z.toast) Z.toast('Reconnecting' + (reason ? ': ' + reason : '…'), 'wn');
+      }
+    };
+    Z.onReconnected = function () {
+      if (Z.notify) Z.notify('Connection restored', 'Server is online again', 'ok');
+      else if (Z.toast) Z.toast('Connection restored', 'ok');
+      if (Z.state.view === 'explorer' && Z.explorer && Z.explorer.nav) {
+        Z.explorer.nav(Z.state.path || '/');
+      }
+      if (Z.state.view === 'dashboard' && Z.dashboard && Z.dashboard.refresh) {
+        Z.dashboard.refresh();
+      }
+    };
+    Z.onDaemonRotated = function () {
+      if (Z.notify) {
+        Z.notify('Daemon restarted', 'Payload instance changed after rest mode', 'wn');
+      }
+    };
+    if (Z.api && Z.api.startReconnectMonitor) {
+      Z.api.startReconnectMonitor();
+    }
+
     /* Stats polling */
     Z.state.statsTimer = setInterval(refreshStats, 15000);
     refreshStats();

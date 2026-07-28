@@ -111,6 +111,7 @@ This is the physical ceiling of a 1 GbE connection. It is achieved out of the bo
 **Platform extras**
 - Linux, macOS, PS4, PS5
 - On-screen IP/port notification on PS4 and PS5
+- Rest Mode resilience — listener recreate + daemon `instance_id` *(see [docs/restmode.md](docs/restmode.md))*
 - ZHTTP web file explorer *(compile-time, see [ZHTTP](#-zhttp))*
 
 </td>
@@ -134,7 +135,7 @@ This is the physical ceiling of a 1 GbE connection. It is achieved out of the bo
 | Metadata | `SIZE` `MDTM` `STAT` `SYST` `FEAT` `HELP` |
 | Transfer parameters | `TYPE` `MODE` `STRU` |
 | Negotiation | `OPTS` `CLNT` |
-| Site extensions | `SITE CHMOD` |
+| Site extensions | `SITE CHMOD` — change Unix permission bits |
 | Encryption | `AUTH XCRYPT` — ChaCha20 with PSK *(opt-in)* |
 
 </details>
@@ -381,6 +382,8 @@ Once the daemon is running, open `http://<ip>:<port>/` — the HTTP port mirrors
 Upload support is enabled automatically alongside ZHTTP (`ENABLE_WEB_UPLOAD=1`).
 
 > **Security:** ZHTTP has no authentication beyond network access. It is designed for local-network use. Do not expose it on a public interface.
+
+After console Rest Mode, ZHTTP auto-reconnects via `/api/status` (see [docs/restmode.md](docs/restmode.md)).
 
 ---
 

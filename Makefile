@@ -222,6 +222,7 @@ SOURCES += src/ftp_log.c
 SOURCES += src/ftp_crypto.c
 SOURCES += src/main.c
 SOURCES += src/pal_resilient_server.c
+SOURCES += src/ftp_instance.c
 
 # PS5-specific modules
 ifeq ($(TARGET),ps5)
@@ -715,6 +716,9 @@ TEST_BINS += $(BUILD_DIR)/tests/test_mlst_ascii
 TEST_BINS += $(BUILD_DIR)/tests/test_http_query
 TEST_BINS += $(BUILD_DIR)/tests/test_http_confinement
 TEST_BINS += $(BUILD_DIR)/tests/test_list_flag
+TEST_BINS += $(BUILD_DIR)/tests/test_instance
+TEST_BINS += $(BUILD_DIR)/tests/test_chmod
+TEST_BINS += $(BUILD_DIR)/tests/test_copy_atomic
 
 ifeq ($(filter $(TARGET),linux macos),)
 test: $(OUTPUT_BIN)

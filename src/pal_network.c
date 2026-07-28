@@ -123,8 +123,16 @@ void pal_network_fini(void) {
 #if defined(PLATFORM_PS3)
   netFinalize();
 #else
-  /* POSIX: No cleanup needed */
+  /* POSIX / Orbis: No cleanup needed */
 #endif
+}
+
+/**
+ * @brief Best-effort network stack re-init after Rest Mode
+ */
+ftp_error_t pal_network_reinit(void) {
+  pal_network_fini();
+  return pal_network_init();
 }
 
 /*===========================================================================*

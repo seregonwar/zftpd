@@ -433,10 +433,29 @@ pal_file_copy_atomic_ex(const char *src_path, const char *dst_path,
   char tmp_path[FTP_PATH_MAX];
   const char *last_slash = strrchr(dst_path, '/');
   if (last_slash != NULL) {
-    int n = snprintf(tmp_path, sizeof(tmp_path), "%.*s/.zftpd.%lu.%lu.tmp",
-                     (int)(sizeof(tmp_path) - 20 - 24), dst_path,
-                     (unsigned long)getpid(),
-                     (unsigned long)counter);
+    size_t dir_len = (size_t)(last_slash - dst_path);
+    /*
+     * Precision must be the parent directory length, NOT remaining buffer
+     * capacity. Using sizeof(tmp_path)-N here previously produced paths like:
+     *   /mnt/usb/foo.ffpfsc/.zftpd.PID.N.tmp
+     * (filename treated as a directory → ENOTDIR on open). That broke every
+     * dashboard cross-device / atomic copy (issue #7).
+     */
+    int n;
+    if (dir_len == 0U) {
+      /* Destination is "/basename" — parent is root. */
+      n = snprintf(tmp_path, sizeof(tmp_path), "/.zftpd.%lu.%lu.tmp",
+                   (unsigned long)getpid(), (unsigned long)counter);
+    } else {
+      /* Reserve room for "/.zftpd.<pid>.<counter>.tmp" + NUL (~40 bytes). */
+      const size_t suffix_reserve = 48U;
+      if (dir_len + suffix_reserve > sizeof(tmp_path)) {
+        return FTP_ERR_PATH_TOO_LONG;
+      }
+      n = snprintf(tmp_path, sizeof(tmp_path), "%.*s/.zftpd.%lu.%lu.tmp",
+                   (int)dir_len, dst_path, (unsigned long)getpid(),
+                   (unsigned long)counter);
+    }
     if ((n < 0) || ((size_t)n >= sizeof(tmp_path))) {
       return FTP_ERR_PATH_TOO_LONG;
     }
@@ -1415,6 +1434,35 @@ ftp_error_t pal_file_delete(const char *path) {
       return FTP_ERR_PERMISSION;
     case EISDIR:
       return FTP_ERR_INVALID_PARAM; /* Use rmdir for directories */
+    default:
+      return FTP_ERR_FILE_WRITE;
+    }
+  }
+
+  return FTP_OK;
+}
+
+/**
+ * @brief Change permission bits (SITE CHMOD)
+ */
+ftp_error_t pal_file_chmod(const char *path, mode_t mode) {
+  if (path == NULL) {
+    return FTP_ERR_INVALID_PARAM;
+  }
+
+  if (chmod(path, mode) < 0) {
+    switch (errno) {
+    case ENOENT:
+      return FTP_ERR_NOT_FOUND;
+    case EACCES:
+    case EPERM:
+    case EINVAL:
+#if defined(EOPNOTSUPP)
+    case EOPNOTSUPP:
+#elif defined(ENOTSUP)
+    case ENOTSUP:
+#endif
+      return FTP_ERR_PERMISSION;
     default:
       return FTP_ERR_FILE_WRITE;
     }

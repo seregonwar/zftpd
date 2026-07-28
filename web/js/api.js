@@ -1,6 +1,12 @@
 /* ══ API LAYER ════════════════════════════════════════════════════════════
  * Centralized fetch wrappers for all backend endpoints.
  * ES5 compatible for PS5 browser.
+ *
+ * Rest-mode resilience:
+ *   - Transport failures bump epoch and enter WaitingForWake
+ *   - /api/status probe with exponential backoff until the daemon returns
+ *   - instance_id rotation clears the "same process" assumption
+ *   - remoteReady() gates mutating operations while stale/reconnecting
  * ═════════════════════════════════════════════════════════════════════════ */
 
 var ZFTPD = ZFTPD || {};
@@ -10,15 +16,180 @@ var ZFTPD = ZFTPD || {};
 
   var api = {};
 
+  /* ── Rest-mode reconnect state ── */
+  var BACKOFF_MS = [500, 1000, 2000, 4000, 8000, 10000];
+  var reconnect = {
+    enabled: true,
+    phase: 'online', /* online | waiting | reconnecting */
+    stale: false,
+    epoch: 0,
+    attempt: 0,
+    failures: 0,
+    instanceId: null,
+    timer: null,
+    healthTimer: null
+  };
+
+  function backoffMs(attempt) {
+    if (attempt >= BACKOFF_MS.length) return BACKOFF_MS[BACKOFF_MS.length - 1];
+    return BACKOFF_MS[attempt];
+  }
+
+  function setPhase(phase, reason) {
+    reconnect.phase = phase;
+    if (Z.onReconnectPhase) {
+      try { Z.onReconnectPhase(phase, reason || ''); } catch (e) { /* ignore */ }
+    }
+  }
+
+  function beginReconnect(reason) {
+    if (!reconnect.enabled) return;
+    if (reconnect.phase !== 'online') return;
+    reconnect.epoch++;
+    reconnect.stale = true;
+    reconnect.attempt = 0;
+    reconnect.failures = 0;
+    setPhase('waiting', reason || 'transport lost');
+    scheduleReconnect();
+  }
+
+  function scheduleReconnect() {
+    if (reconnect.timer) {
+      clearTimeout(reconnect.timer);
+      reconnect.timer = null;
+    }
+    if (!reconnect.enabled) return;
+    if (reconnect.phase !== 'waiting' && reconnect.phase !== 'reconnecting') return;
+
+    var delay = backoffMs(reconnect.attempt);
+    setPhase('waiting', 'retry in ' + delay + 'ms');
+    reconnect.timer = setTimeout(function () {
+      reconnect.timer = null;
+      tryReconnect();
+    }, delay);
+  }
+
+  function tryReconnect() {
+    if (!reconnect.enabled) return;
+    if (reconnect.phase === 'online' && !reconnect.stale) return;
+
+    setPhase('reconnecting', 'attempt ' + (reconnect.attempt + 1));
+    var epoch = reconnect.epoch;
+
+    fetch('/api/status').then(function (r) {
+      if (epoch !== reconnect.epoch) return null;
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }).then(function (j) {
+      if (epoch !== reconnect.epoch) return;
+      if (!j || !j.ok) throw new Error('bad status');
+
+      var rotated = (reconnect.instanceId !== null &&
+                     j.instance_id &&
+                     j.instance_id !== reconnect.instanceId);
+      reconnect.instanceId = j.instance_id || reconnect.instanceId;
+      reconnect.stale = false;
+      reconnect.attempt = 0;
+      reconnect.failures = 0;
+      setPhase('online', rotated ? 'daemon restarted' : 'reconnected');
+
+      if (rotated && Z.onDaemonRotated) {
+        try { Z.onDaemonRotated(j); } catch (e) { /* ignore */ }
+      }
+      if (Z.onReconnected) {
+        try { Z.onReconnected(j); } catch (e) { /* ignore */ }
+      }
+    }).catch(function () {
+      if (epoch !== reconnect.epoch) return;
+      reconnect.attempt++;
+      setPhase('waiting', 'daemon unreachable');
+      scheduleReconnect();
+    });
+  }
+
+  function noteTransportFailure() {
+    reconnect.failures++;
+    /* Two consecutive failures before auto-reconnect. */
+    if (reconnect.failures >= 2) {
+      beginReconnect('network error');
+    }
+  }
+
+  function noteTransportOk(j) {
+    reconnect.failures = 0;
+    if (j && j.instance_id) {
+      if (reconnect.instanceId === null) {
+        reconnect.instanceId = j.instance_id;
+      } else if (j.instance_id !== reconnect.instanceId && reconnect.phase === 'online') {
+        reconnect.instanceId = j.instance_id;
+        if (Z.onDaemonRotated) {
+          try { Z.onDaemonRotated(j); } catch (e) { /* ignore */ }
+        }
+      }
+    }
+  }
+
+  function startHealthPoll() {
+    if (reconnect.healthTimer) return;
+    reconnect.healthTimer = setInterval(function () {
+      if (!reconnect.enabled) return;
+      if (reconnect.phase !== 'online') return;
+      fetch('/api/status').then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      }).then(function (j) {
+        noteTransportOk(j);
+      }).catch(function () {
+        noteTransportFailure();
+      });
+    }, 5000);
+  }
+
+  /** True when remote mutations are allowed. */
+  api.remoteReady = function () {
+    return reconnect.phase === 'online' && !reconnect.stale;
+  };
+
+  api.reconnectState = function () {
+    return {
+      phase: reconnect.phase,
+      stale: reconnect.stale,
+      epoch: reconnect.epoch,
+      attempt: reconnect.attempt,
+      instanceId: reconnect.instanceId
+    };
+  };
+
+  api.startReconnectMonitor = function () {
+    reconnect.enabled = true;
+    startHealthPoll();
+    /* Seed instance id immediately. */
+    fetch('/api/status').then(function (r) {
+      return r.ok ? r.json() : null;
+    }).then(function (j) {
+      if (j) noteTransportOk(j);
+    }).catch(function () {
+      beginReconnect('initial probe failed');
+    });
+  };
+
   /* ── Internal helpers ── */
   function get(url) {
     return fetch(url).then(function (r) {
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.json();
+    }).catch(function (e) {
+      if (!e || !e.message || e.message.indexOf('HTTP ') !== 0) {
+        noteTransportFailure();
+      }
+      throw e;
     });
   }
 
   function post(url, body) {
+    if (!api.remoteReady()) {
+      return Promise.reject(new Error('Reconnecting — try again shortly'));
+    }
     var opts = {
       method: 'POST',
       headers: { 'X-CSRF-Token': Z.csrf() }
@@ -39,8 +210,19 @@ var ZFTPD = ZFTPD || {};
         }
         throw e;
       });
+    }).catch(function (e) {
+      if (!e || !e.message || (e.message.indexOf('HTTP ') !== 0 &&
+          e.message.indexOf('Reconnecting') !== 0)) {
+        noteTransportFailure();
+      }
+      throw e;
     });
   }
+
+  /* ── Status ── */
+  api.status = function () {
+    return get('/api/status');
+  };
 
   /* ── Directory listing ── */
   api.list = function (path) {
@@ -85,6 +267,9 @@ var ZFTPD = ZFTPD || {};
 
   /* ── File operations (require ENABLE_WEB_UPLOAD) ── */
   api.createFile = function (dirPath, name) {
+    if (!api.remoteReady()) {
+      return Promise.reject(new Error('Reconnecting — try again shortly'));
+    }
     return fetch('/api/create_file?path=' + Z.E(dirPath) + '&name=' + Z.E(name), {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain', 'X-CSRF-Token': Z.csrf() },
@@ -92,6 +277,11 @@ var ZFTPD = ZFTPD || {};
     }).then(function (r) {
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.json();
+    }).catch(function (e) {
+      if (!e || !e.message || e.message.indexOf('HTTP ') !== 0) {
+        noteTransportFailure();
+      }
+      throw e;
     });
   };
 
@@ -134,6 +324,9 @@ var ZFTPD = ZFTPD || {};
 
   /* ── Upload (XMLHttpRequest for progress tracking) ── */
   api.upload = function (dirPath, file, onProgress) {
+    if (!api.remoteReady()) {
+      return Promise.reject(new Error('Reconnecting — try again shortly'));
+    }
     var xhrHandle = null;
     var promise = new Promise(function (resolve, reject) {
       var xhr = new XMLHttpRequest();
@@ -150,7 +343,10 @@ var ZFTPD = ZFTPD || {};
         if (xhr.status >= 200 && xhr.status < 300) resolve(xhr);
         else reject(new Error('HTTP ' + xhr.status));
       };
-      xhr.onerror = function () { reject(new Error('Network error')); };
+      xhr.onerror = function () {
+        noteTransportFailure();
+        reject(new Error('Network error'));
+      };
       xhr.onabort = function () { reject(new Error('Upload cancelled')); };
       xhr.send(file);
     });

@@ -28,12 +28,15 @@ SOFTWARE.
  * ENDPOINTS:
  *   GET /api/list?path=<dir>        Directory listing (JSON)
  *   GET /api/download?path=<file>   File download (binary)
+ *   GET /api/status                 Daemon identity (rest-mode reconnect)
  *   GET /                           Serve embedded index.html
  *   GET /style.css                  Serve embedded stylesheet
  *   GET /app.js                     Serve embedded JavaScript
  */
 
 #include "http_api.h"
+#include "ftp_config.h"
+#include "ftp_instance.h"
 #include "ftp_path.h"
 #include "ftp_server.h" /* ftp_server_context_t — for network reset endpoint */
 #include "ftp_log.h"
@@ -337,6 +340,7 @@ static http_response_t *api_download(const http_request_t *request);
 static http_response_t *api_stats(const http_request_t *request);
 static http_response_t *api_stats_ram(const http_request_t *request);
 static http_response_t *api_stats_system(const http_request_t *request);
+static http_response_t *api_status(const http_request_t *request);
 static http_response_t *api_disk_info(const http_request_t *request);
 static http_response_t *api_disk_tree(const http_request_t *request);
 static http_response_t *api_processes(const http_request_t *request);
@@ -1461,6 +1465,11 @@ http_response_t *http_api_handle(const http_request_t *request) {
   /*  /api/stats/system  */
   if (strncmp(request->uri, "/api/stats/system", 17) == 0) {
     return api_stats_system(request);
+  }
+
+  /*  /api/status — daemon identity for rest-mode reconnect */
+  if (strncmp(request->uri, "/api/status", 11) == 0) {
+    return api_status(request);
   }
 
   /*  /api/stats?path=... (legacy widget)  */
@@ -2888,6 +2897,42 @@ static http_response_t *api_stats_system(const http_request_t *request) {
                             ",\"uptime_seconds\":null,\"boot_epoch\":null");
   }
   pos += (size_t)snprintf(body + pos, cap - pos, "}");
+
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  http_response_add_header(resp, "Content-Type", "application/json");
+  http_response_add_header(resp, "Cache-Control", "no-store");
+  http_response_set_body(resp, body, pos);
+  return resp;
+}
+
+/*===========================================================================*
+ * GET /api/status — daemon identity for rest-mode reconnect
+ *
+ *  RESPONSE: {
+ *    "ok": true,
+ *    "version": "...",
+ *    "instance_id": "0123...abcd",
+ *    "start_monotonic_ns": N,
+ *    "pid": N
+ *  }
+ *===========================================================================*/
+
+static http_response_t *api_status(const http_request_t *request) {
+  (void)request;
+
+  uint64_t instance_id = ftp_daemon_instance_id();
+  uint64_t start_ns = ftp_daemon_start_monotonic_ns();
+
+  char body[320];
+  size_t pos = 0;
+  size_t cap = sizeof(body);
+
+  pos += (size_t)snprintf(
+      body + pos, cap - pos,
+      "{\"ok\":true,\"version\":\"%s\",\"instance_id\":\"%016llx\","
+      "\"start_monotonic_ns\":%" PRIu64 ",\"pid\":%d}",
+      RELEASE_VERSION, (unsigned long long)instance_id, start_ns,
+      (int)getpid());
 
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
   http_response_add_header(resp, "Content-Type", "application/json");

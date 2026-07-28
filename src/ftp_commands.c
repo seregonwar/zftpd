@@ -38,6 +38,7 @@ SOFTWARE.
 #include "ftp_commands.h"
 #include "ftp_buffer_pool.h"
 #include "ftp_crypto.h"
+#include "ftp_instance.h"
 #include "ftp_log.h"
 #include "ftp_path.h"
 #include "ftp_session.h"
@@ -2505,10 +2506,12 @@ ftp_error_t cmd_OPTS(ftp_session_t *session, const char *args) {
  * SITE  (RFC 959 — Site-Specific Commands)
  *
  *   Client:  SITE CHMOD 755 somefile.txt
- *   Server:  200 CHMOD ok.          (no-op on consoles)
+ *   Server:  200 CHMOD command successful.
  *
- *   WinSCP sends SITE CHMOD after every upload. Without this
- *   command the client logs errors and some abort the transfer.
+ *   FileZilla / WinSCP send SITE CHMOD after uploads and from the
+ *   "File permissions" dialog. We apply chmod(2) on the resolved path.
+ *   Filesystems that lack Unix permission bits (some console mounts)
+ *   may return an error — we surface that instead of faking success.
  *---------------------------------------------------------------------------*/
 
 ftp_error_t cmd_SITE(ftp_session_t *session, const char *args) {
@@ -2521,24 +2524,106 @@ ftp_error_t cmd_SITE(ftp_session_t *session, const char *args) {
                                   "SITE requires a command.");
   }
 
-  /* Accept CHMOD as a no-op (console filesystems don't use UNIX perms) */
-  char upper[16];
-  size_t len = strlen(args);
-  if (len > 5U) {
-    len = 5U;
+  /* Match leading verb case-insensitively (CHMOD / chmod / Chmod). */
+  char verb[8];
+  size_t vi = 0U;
+  while ((args[vi] != '\0') && (args[vi] != ' ') && (args[vi] != '\t') &&
+         (vi + 1U < sizeof(verb))) {
+    verb[vi] = (char)toupper((unsigned char)args[vi]);
+    vi++;
   }
-  for (size_t i = 0U; i < len; i++) {
-    upper[i] = (char)toupper((unsigned char)args[i]);
-  }
-  upper[len] = '\0';
+  verb[vi] = '\0';
 
-  if (strncmp(upper, "CHMOD", 5) == 0) {
-    return ftp_session_send_reply(session, FTP_REPLY_200_OK,
-                                  "CHMOD command successful.");
+  if (strcmp(verb, "CHMOD") != 0) {
+    return ftp_session_send_reply(session, FTP_REPLY_502_NOT_IMPLEMENTED,
+                                  "SITE command not supported.");
   }
 
-  return ftp_session_send_reply(session, FTP_REPLY_502_NOT_IMPLEMENTED,
-                                "SITE command not supported.");
+  /* Skip verb + whitespace → "CHMOD <mode> <path>" */
+  const char *p = args + vi;
+  while ((*p == ' ') || (*p == '\t')) {
+    p++;
+  }
+  if (*p == '\0') {
+    return ftp_session_send_reply(session, FTP_REPLY_501_SYNTAX_ARGS,
+                                  "SITE CHMOD requires mode and path.");
+  }
+
+  char *end = NULL;
+  errno = 0;
+  unsigned long mode_ul = strtoul(p, &end, 8);
+  if ((end == p) || (errno == ERANGE) || (mode_ul > 07777UL)) {
+    return ftp_session_send_reply(session, FTP_REPLY_501_SYNTAX_ARGS,
+                                  "Invalid CHMOD mode (octal 0-7777).");
+  }
+
+  while ((*end == ' ') || (*end == '\t')) {
+    end++;
+  }
+  if (*end == '\0') {
+    return ftp_session_send_reply(session, FTP_REPLY_501_SYNTAX_ARGS,
+                                  "SITE CHMOD requires a path.");
+  }
+
+  /* Strip optional quotes used by some clients around the path. */
+  const char *path_arg = end;
+  size_t path_len = strlen(path_arg);
+  char path_buf[FTP_PATH_MAX];
+  if ((path_len >= 2U) &&
+      (((path_arg[0] == '"') && (path_arg[path_len - 1U] == '"')) ||
+       ((path_arg[0] == '\'') && (path_arg[path_len - 1U] == '\'')))) {
+    if (path_len - 2U >= sizeof(path_buf)) {
+      return ftp_session_send_reply(session, FTP_REPLY_550_FILE_ERROR,
+                                    "Path too long.");
+    }
+    memcpy(path_buf, path_arg + 1, path_len - 2U);
+    path_buf[path_len - 2U] = '\0';
+    path_arg = path_buf;
+  }
+
+  char resolved[FTP_PATH_MAX];
+  ftp_error_t err =
+      ftp_path_resolve(session, path_arg, resolved, sizeof(resolved));
+  if (err != FTP_OK) {
+    return ftp_session_send_reply(session, FTP_REPLY_550_FILE_ERROR,
+                                  "Invalid path.");
+  }
+
+  mode_t mode = (mode_t)(mode_ul & 07777UL);
+  err = pal_file_chmod(resolved, mode);
+  if (err == FTP_ERR_NOT_FOUND) {
+    return ftp_session_send_reply(session, FTP_REPLY_550_FILE_ERROR,
+                                  "File not found.");
+  }
+  if (err == FTP_ERR_PERMISSION) {
+    return ftp_session_send_reply(session, FTP_REPLY_550_FILE_ERROR,
+                                  "Permission denied or CHMOD unsupported "
+                                  "on this filesystem.");
+  }
+  if (err != FTP_OK) {
+    return ftp_session_send_reply(session, FTP_REPLY_550_FILE_ERROR,
+                                  "Cannot change permissions.");
+  }
+
+  /*
+   * Some mounts accept chmod() but ignore bits (no Unix ACL). Verify when
+   * possible and warn the client if the effective mode differs.
+   */
+  struct stat st;
+  if (pal_file_stat(resolved, &st) == FTP_OK) {
+    mode_t applied = (mode_t)(st.st_mode & 07777);
+    if (applied != mode) {
+      char msg[96];
+      (void)snprintf(msg, sizeof(msg),
+                     "CHMOD accepted but filesystem reports %04o "
+                     "(requested %04o).",
+                     (unsigned)applied, (unsigned)mode);
+      return ftp_session_send_reply(session, FTP_REPLY_200_OK, msg);
+    }
+  }
+
+  return ftp_session_send_reply(session, FTP_REPLY_200_OK,
+                                "CHMOD command successful.");
 }
 
 /*---------------------------------------------------------------------------*
@@ -2642,9 +2727,13 @@ ftp_error_t cmd_STAT(ftp_session_t *session, const char *args) {
     return FTP_ERR_INVALID_PARAM;
   }
 
-  /* Simple status reply */
-  return ftp_session_send_reply(session, FTP_REPLY_211_SYSTEM_STATUS,
-                                "Server status OK.");
+  {
+    char msg[128];
+    (void)snprintf(msg, sizeof(msg),
+                   "Server status OK. Instance %016llx",
+                   (unsigned long long)ftp_daemon_instance_id());
+    return ftp_session_send_reply(session, FTP_REPLY_211_SYSTEM_STATUS, msg);
+  }
 }
 
 /**
@@ -2679,8 +2768,14 @@ ftp_error_t cmd_FEAT(ftp_session_t *session, const char *args) {
    *   REST STREAM
    *   APPE
    *   UTF8
+   *   XZFTPD INSTANCE <hex>
    *  211 End
    */
+  char feat_instance[48];
+  (void)snprintf(feat_instance, sizeof(feat_instance),
+                 " XZFTPD INSTANCE %016llx",
+                 (unsigned long long)ftp_daemon_instance_id());
+
   const char *features[] = {"Extensions supported:",
 #if FTP_ENABLE_SIZE
                             " SIZE",
@@ -2706,6 +2801,8 @@ ftp_error_t cmd_FEAT(ftp_session_t *session, const char *args) {
                             " CPFR",
                             " CPTO",
                             " COPY",
+                            " SITE CHMOD",
+                            feat_instance,
                             "End"};
 
   return ftp_session_send_multiline_reply(
@@ -2730,6 +2827,7 @@ ftp_error_t cmd_HELP(ftp_session_t *session, const char *args) {
                          " DELE RMD MKD RNFR RNTO",
                          " PORT PASV SIZE MDTM STAT",
                          " SYST FEAT HELP TYPE MODE STRU",
+                         " SITE CHMOD",
                          "End"};
 
   return ftp_session_send_multiline_reply(session, FTP_REPLY_214_HELP, lines,
