@@ -32,6 +32,21 @@ SOFTWARE.
 
 int pal_notification_init(void);
 void pal_notification_shutdown(void);
+
+/**
+ * @brief Send a system notification with the default icon.
+ *
+ * On PS4/PS5 this shows a console toast. On other platforms it logs via syslog.
+ */
 void pal_notification_send(const char *message);
+
+/**
+ * @brief Send a system notification with an optional icon name.
+ *
+ * @param message   Notification text (required). Truncated to 1023 bytes.
+ * @param icon_name PS notification texture suffix (e.g. "icon_system").
+ *                  If NULL or empty, uses "icon_system". Ignored on non-PS.
+ */
+void pal_notification_send_ex(const char *message, const char *icon_name);
 
 #endif /* PAL_NOTIFICATION_H */

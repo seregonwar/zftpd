@@ -385,6 +385,8 @@ Upload support is enabled automatically alongside ZHTTP (`ENABLE_WEB_UPLOAD=1`).
 
 After console Rest Mode, ZHTTP auto-reconnects via `/api/status` (see [docs/restmode.md](docs/restmode.md)).
 
+Custom console toasts are available via `GET /api/notify?text=Hello` (useful for Home Assistant and similar local automation — see [docs/API.md](docs/API.md)).
+
 ---
 
 ## Acknowledgements

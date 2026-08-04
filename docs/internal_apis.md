@@ -150,8 +150,10 @@ ftp_log_session_event(session, "MYMODULE", FTP_OK, bytes_processed);
 - Lightweight wrapper to display toast messages on consoles.
 ```c
 #include "pal_notification.h"
-pal_notify("zftpd", "Started on 192.168.0.10:2122");
+pal_notification_send("Started on 192.168.0.10:2122");
+pal_notification_send_ex("Doorbell", "icon_system");
 ```
+- HTTP: `GET /api/notify?text=...[&icon=...]` (see [API.md](API.md)).
 
 ## Crypto (optional) (`ftp_crypto`)
 - ChaCha20 PSK via `AUTH XCRYPT`; keep disabled unless explicitly required.

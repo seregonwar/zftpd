@@ -29,6 +29,7 @@ SOFTWARE.
  *   GET /api/list?path=<dir>        Directory listing (JSON)
  *   GET /api/download?path=<file>   File download (binary)
  *   GET /api/status                 Daemon identity (rest-mode reconnect)
+ *   GET|POST /api/notify?text=...   Custom PS4/PS5 system notification
  *   GET /                           Serve embedded index.html
  *   GET /style.css                  Serve embedded stylesheet
  *   GET /app.js                     Serve embedded JavaScript
@@ -43,7 +44,7 @@ SOFTWARE.
 #include "http_config.h"
 #include "pal_fileio.h"
 #include "pal_network.h"      /* pal_network_reset_ftp_stack() */
-#include "pal_notification.h" /* pal_notification_send() — fallback notify */
+#include "pal_notification.h" /* pal_notification_send_ex() — /api/notify */
 #include "exfat_unpacker.h"  /* exFAT image parsing for game metadata */
 #include "pkg_unpacker.h"    /* PKG archive parsing for game metadata */
 #include "builtin_unzip.h"   /* built-in ZIP extractor (PS5 fallback) */
@@ -341,6 +342,7 @@ static http_response_t *api_stats(const http_request_t *request);
 static http_response_t *api_stats_ram(const http_request_t *request);
 static http_response_t *api_stats_system(const http_request_t *request);
 static http_response_t *api_status(const http_request_t *request);
+static http_response_t *api_notify(const http_request_t *request);
 static http_response_t *api_disk_info(const http_request_t *request);
 static http_response_t *api_disk_tree(const http_request_t *request);
 static http_response_t *api_processes(const http_request_t *request);
@@ -1470,6 +1472,11 @@ http_response_t *http_api_handle(const http_request_t *request) {
   /*  /api/status — daemon identity for rest-mode reconnect */
   if (strncmp(request->uri, "/api/status", 11) == 0) {
     return api_status(request);
+  }
+
+  /*  GET|POST /api/notify?text=...[&icon=...] — system toast notification */
+  if (strncmp(request->uri, "/api/notify", 11) == 0) {
+    return api_notify(request);
   }
 
   /*  /api/stats?path=... (legacy widget)  */
@@ -2936,6 +2943,95 @@ static http_response_t *api_status(const http_request_t *request) {
 
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
   http_response_add_header(resp, "Content-Type", "application/json");
+  http_response_add_header(resp, "Cache-Control", "no-store");
+  http_response_set_body(resp, body, pos);
+  return resp;
+}
+
+/*===========================================================================*
+ * GET|POST /api/notify?text=<msg>[&icon=<name>]
+ *
+ *  Show a custom PS4/PS5 system notification (toast). On non-console builds
+ *  the message is forwarded to syslog via pal_notification_send_ex().
+ *
+ *  Intended for local-network automation (e.g. Home Assistant):
+ *    GET /api/notify?text=Washing%20machine%20is%20done
+ *
+ *  RESPONSE: { "ok": true, "text": "...", "icon": "..." }
+ *===========================================================================*/
+
+#define NOTIFY_TEXT_MAX 1024
+#define NOTIFY_ICON_MAX 64
+
+static int notify_icon_is_safe(const char *icon) {
+  if ((icon == NULL) || (icon[0] == '\0')) {
+    return 0;
+  }
+  for (const char *p = icon; *p != '\0'; p++) {
+    unsigned char c = (unsigned char)*p;
+    if (!(isalnum(c) || c == '_')) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static http_response_t *api_notify(const http_request_t *request) {
+  if ((request->method != HTTP_METHOD_GET) &&
+      (request->method != HTTP_METHOD_POST)) {
+    return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED,
+                      "Use GET or POST");
+  }
+
+  const char *query = strchr(request->uri, '?');
+  if (query == NULL) {
+    return error_json(HTTP_STATUS_400_BAD_REQUEST,
+                      "Missing query string (text=...)");
+  }
+
+  char text[NOTIFY_TEXT_MAX];
+  if (parse_query_param(query, "text", text, sizeof(text)) != 0) {
+    return error_json(HTTP_STATUS_400_BAD_REQUEST,
+                      "Missing or empty 'text' parameter");
+  }
+
+  /* Reject control characters so toast text stays printable */
+  for (const char *p = text; *p != '\0'; p++) {
+    unsigned char c = (unsigned char)*p;
+    if ((c < 0x20U) || (c == 0x7FU)) {
+      return error_json(HTTP_STATUS_400_BAD_REQUEST,
+                        "Notification text contains control characters");
+    }
+  }
+
+  char icon[NOTIFY_ICON_MAX];
+  icon[0] = '\0';
+  if (parse_query_param(query, "icon", icon, sizeof(icon)) == 0) {
+    if (!notify_icon_is_safe(icon)) {
+      return error_json(HTTP_STATUS_400_BAD_REQUEST,
+                        "Invalid 'icon' parameter (use [A-Za-z0-9_])");
+    }
+  } else {
+    (void)snprintf(icon, sizeof(icon), "%s", "icon_system");
+  }
+
+  pal_notification_send_ex(text, icon);
+
+  char body[NOTIFY_TEXT_MAX + NOTIFY_ICON_MAX + 64];
+  size_t pos = 0;
+  size_t cap = sizeof(body);
+
+  if (buf_append_cstr(body, cap, &pos, "{\"ok\":true,\"text\":\"") != 0 ||
+      json_escape_append(body, cap, &pos, text) != 0 ||
+      buf_append_cstr(body, cap, &pos, "\",\"icon\":\"") != 0 ||
+      json_escape_append(body, cap, &pos, icon) != 0 ||
+      buf_append_cstr(body, cap, &pos, "\"}") != 0) {
+    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+  }
+
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  http_response_add_header(resp, "Content-Type", "application/json");
+  http_response_add_header(resp, "Access-Control-Allow-Origin", "*");
   http_response_add_header(resp, "Cache-Control", "no-store");
   http_response_set_body(resp, body, pos);
   return resp;

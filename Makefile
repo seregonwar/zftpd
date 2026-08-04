@@ -715,6 +715,7 @@ TEST_BINS += $(BUILD_DIR)/tests/test_alloc
 TEST_BINS += $(BUILD_DIR)/tests/test_mlst_ascii
 TEST_BINS += $(BUILD_DIR)/tests/test_http_query
 TEST_BINS += $(BUILD_DIR)/tests/test_http_confinement
+TEST_BINS += $(BUILD_DIR)/tests/test_notify
 TEST_BINS += $(BUILD_DIR)/tests/test_list_flag
 TEST_BINS += $(BUILD_DIR)/tests/test_instance
 TEST_BINS += $(BUILD_DIR)/tests/test_chmod

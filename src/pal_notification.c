@@ -25,104 +25,87 @@ SOFTWARE.
 /**
  * @file pal_notification.c
  * @brief Platform Abstraction Layer - Notification Implementation (PS4/PS5)
- *  
+ *
  * @author SeregonWar
- * @version 1.0.0
+ * @version 1.1.0
  * @date 2026-02-13
- * 
+ *
  */
 #include "pal_notification.h"
 
-#if defined(PLATFORM_PS4)
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
 
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
+/*
+ * Layout matches OrbisNotificationRequest used by the console notification
+ * service. Fields before `message` total 45 bytes — the same offset used by
+ * the classic homebrew padding[45] + message[] approach.
+ */
 typedef struct notify_request {
-    char padding[45];
-    char message[3075];
+  int32_t type;
+  int32_t req_id;
+  int32_t priority;
+  int32_t msg_id;
+  int32_t target_id;
+  int32_t user_id;
+  int32_t unk1;
+  int32_t unk2;
+  int32_t app_id;
+  int32_t error_num;
+  int32_t unk3;
+  uint8_t use_icon_image_uri;
+  char message[1024];
+  char icon_uri[1024];
+  char unk[1024];
 } notify_request_t;
 
-__attribute__((weak))
-int sceKernelSendNotificationRequest(int, notify_request_t *, size_t, int);
+__attribute__((weak)) int sceKernelSendNotificationRequest(int,
+                                                           notify_request_t *,
+                                                           size_t, int);
 
 static int g_notify_available = 0;
 
-int pal_notification_init(void)
-{
-    if (sceKernelSendNotificationRequest == NULL) {
-        g_notify_available = 0;
-        return -1;
-    }
-    g_notify_available = 1;
-    return 0;
-}
-
-void pal_notification_shutdown(void)
-{
+int pal_notification_init(void) {
+  if (sceKernelSendNotificationRequest == NULL) {
     g_notify_available = 0;
+    return -1;
+  }
+  g_notify_available = 1;
+  return 0;
 }
 
-void pal_notification_send(const char *message)
-{
-    if ((g_notify_available == 0) || (message == NULL)) {
-        return;
-    }
+void pal_notification_shutdown(void) { g_notify_available = 0; }
 
-    notify_request_t req;
-    memset(&req, 0, sizeof(req));
-    (void)snprintf(req.message, sizeof(req.message), "%s", message);
-    if (sceKernelSendNotificationRequest != NULL) {
-        (void)sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
-    }
+void pal_notification_send(const char *message) {
+  pal_notification_send_ex(message, NULL);
 }
 
-#elif defined(PLATFORM_PS5)
+void pal_notification_send_ex(const char *message, const char *icon_name) {
+  if ((g_notify_available == 0) || (message == NULL) || (message[0] == '\0')) {
+    return;
+  }
 
-#include <stddef.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <string.h>
+  const char *icon = icon_name;
+  if ((icon == NULL) || (icon[0] == '\0')) {
+    icon = "icon_system";
+  }
 
-typedef struct notify_request {
-    char padding[45];
-    char message[3075];
-} notify_request_t;
+  notify_request_t req;
+  memset(&req, 0, sizeof(req));
+  req.type = 0; /* NotificationRequest */
+  req.target_id = -1;
+  req.use_icon_image_uri = 1U;
+  (void)snprintf(req.message, sizeof(req.message), "%s", message);
+  (void)snprintf(req.icon_uri, sizeof(req.icon_uri),
+                 "cxml://psnotification/tex_%s", icon);
 
-__attribute__((weak))
-int sceKernelSendNotificationRequest(int, notify_request_t *, size_t, int);
-
-static int g_notify_available = 0;
-
-int pal_notification_init(void)
-{
-    if (sceKernelSendNotificationRequest == NULL) {
-        g_notify_available = 0;
-        return -1;
-    }
-    g_notify_available = 1;
-    return 0;
-}
-
-void pal_notification_shutdown(void)
-{
-    g_notify_available = 0;
-}
-
-void pal_notification_send(const char *message)
-{
-    if ((g_notify_available == 0) || (message == NULL)) {
-        return;
-    }
-
-    notify_request_t req;
-    memset(&req, 0, sizeof(req));
-    (void)snprintf(req.message, sizeof(req.message), "%s", message);
-    if (sceKernelSendNotificationRequest != NULL) {
-        (void)sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
-    }
+  if (sceKernelSendNotificationRequest != NULL) {
+    (void)sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
+  }
 }
 
 #else
@@ -132,35 +115,38 @@ void pal_notification_send(const char *message)
 
 static int g_syslog_open = 0;
 
-int pal_notification_init(void)
-{
-    if (g_syslog_open == 0) {
-        openlog("zftpd", LOG_PID | LOG_CONS, LOG_DAEMON);
-        g_syslog_open = 1;
-    }
-    return 0;
+int pal_notification_init(void) {
+  if (g_syslog_open == 0) {
+    openlog("zftpd", LOG_PID | LOG_CONS, LOG_DAEMON);
+    g_syslog_open = 1;
+  }
+  return 0;
 }
 
-void pal_notification_shutdown(void)
-{
-    if (g_syslog_open != 0) {
-        closelog();
-        g_syslog_open = 0;
-    }
+void pal_notification_shutdown(void) {
+  if (g_syslog_open != 0) {
+    closelog();
+    g_syslog_open = 0;
+  }
 }
 
-void pal_notification_send(const char *message)
-{
-    if (message == NULL) {
-        return;
-    }
+void pal_notification_send(const char *message) {
+  pal_notification_send_ex(message, NULL);
+}
 
-    if (g_syslog_open == 0) {
-        openlog("zftpd", LOG_PID | LOG_CONS, LOG_DAEMON);
-        g_syslog_open = 1;
-    }
+void pal_notification_send_ex(const char *message, const char *icon_name) {
+  (void)icon_name;
 
-    syslog(LOG_INFO, "%s", message);
+  if (message == NULL) {
+    return;
+  }
+
+  if (g_syslog_open == 0) {
+    openlog("zftpd", LOG_PID | LOG_CONS, LOG_DAEMON);
+    g_syslog_open = 1;
+  }
+
+  syslog(LOG_INFO, "%s", message);
 }
 
 #endif
