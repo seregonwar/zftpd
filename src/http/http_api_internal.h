@@ -31,11 +31,13 @@ http_response_t *http_api_status_json_200(int ok, const char *message, int code)
 http_response_t *http_api_png_fallback_response(void);
 http_response_t *http_api_legacy_disabled_json(const char *json_body);
 
+http_response_t *http_api_transfer_handle(const http_request_t *request);
 http_response_t *http_api_transfer_start(const http_request_t *request);
 http_response_t *http_api_transfer_status(const http_request_t *request);
 http_response_t *http_api_transfer_pause(const http_request_t *request);
 http_response_t *http_api_transfer_cancel(const http_request_t *request);
 http_response_t *http_static_serve(const http_request_t *request);
+http_response_t *http_api_archive_handle(const http_request_t *request);
 http_response_t *http_api_archive_start(const http_request_t *request);
 http_response_t *http_api_archive_progress(const http_request_t *request);
 http_response_t *http_api_archive_cancel(const http_request_t *request);

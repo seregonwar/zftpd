@@ -216,3 +216,12 @@ http_response_t *http_api_transfer_cancel(const http_request_t *request) {
   return http_api_status_json_200(1, "Transfer cancellation requested", id);
 }
 
+
+http_response_t *http_api_transfer_handle(const http_request_t *request) {
+  if (request == NULL) return NULL;
+  if (http_api_route_is(request->uri, "/api/download/start")) return http_api_transfer_start(request);
+  if (http_api_route_is(request->uri, "/api/download/status")) return http_api_transfer_status(request);
+  if (http_api_route_is(request->uri, "/api/download/pause")) return http_api_transfer_pause(request);
+  if (http_api_route_is(request->uri, "/api/download/cancel")) return http_api_transfer_cancel(request);
+  return NULL;
+}

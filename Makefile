@@ -279,7 +279,7 @@ ifeq ($(ENABLE_ZHTTPD),1)
     SOURCES += src/http/http_api_common.c
     SOURCES += src/http/http_api_files.c
     SOURCES += src/http/http_api_process.c
-    SOURCES += src/http/http_api_system.c
+    SOURCES += src/http/http_api_system.c src/http/games/common.c src/http/games/psx_install.c src/http/games/psx_appdb.c src/http/games/psx_launch.c src/http/games/admin_api.c src/http/games/metadata_api.c src/http/games/catalog.c
     SOURCES += src/http/http_api_transfer.c
     SOURCES += src/http/http_static.c
     SOURCES += src/http/http_api_archive.c
@@ -813,6 +813,7 @@ TEST_BINS += $(BUILD_DIR)/tests/test_http_api_common
 TEST_BINS += $(BUILD_DIR)/tests/test_http_files
 TEST_BINS += $(BUILD_DIR)/tests/test_http_process
 TEST_BINS += $(BUILD_DIR)/tests/test_http_system
+TEST_BINS += $(BUILD_DIR)/tests/test_http_games
 endif
 
 ifeq ($(filter $(TARGET),linux macos),)

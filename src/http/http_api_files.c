@@ -14,7 +14,155 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <unistd.h>
+
+/**
+ * @brief Recursively sum the size of all regular files under a directory.
+ *
+ * Uses a shared context to enforce:
+ *   - Time budget  (DIR_SIZE_TIMEOUT_MS) — bail out after ~200 ms
+ *   - Entry limit  (DIR_SIZE_MAX_ENTRIES) — bail after 10 000 stat() calls
+ *   - Depth limit  (DIR_SIZE_MAX_DEPTH)   — max 8 levels deep
+ *
+ * On slow USB/exFAT media with deeply nested trees the scan returns
+ * a partial result instead of blocking the HTTP server for seconds.
+ *
+ *   ┌──────────────────────────────────────────────┐
+ *   │  200 ms budget ──► partial=true, ~size       │
+ *   │  10 000 entries ──► partial=true, ~size      │
+ *   │  depth > 8      ──► skip subtree             │
+ *   │  otherwise      ──► full scan, partial=false │
+ *   └──────────────────────────────────────────────┘
+ */
+#define DIR_SIZE_MAX_DEPTH    8
+#define DIR_SIZE_MAX_ENTRIES  10000
+#define DIR_SIZE_TIMEOUT_MS   200
+
+typedef struct {
+  struct timeval deadline;  /* absolute wallclock deadline */
+  uint32_t      entries;   /* stat() calls so far         */
+  int           partial;   /* set to 1 if limits exceeded */
+} dir_size_ctx_t;
+
+/* Return 1 if the context limits have been exceeded. */
+static int dir_size_exceeded(dir_size_ctx_t *ctx) {
+  if (ctx->partial) {
+    return 1;
+  }
+  if (ctx->entries >= DIR_SIZE_MAX_ENTRIES) {
+    ctx->partial = 1;
+    return 1;
+  }
+  /* Check clock every 64 entries to minimise gettimeofday overhead */
+  if ((ctx->entries & 63U) == 0U) {
+    struct timeval now;
+    gettimeofday(&now, NULL);
+    if ((now.tv_sec > ctx->deadline.tv_sec) ||
+        (now.tv_sec == ctx->deadline.tv_sec &&
+         now.tv_usec >= ctx->deadline.tv_usec)) {
+      ctx->partial = 1;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static uint64_t dir_size_walk(const char *path, int depth, dir_size_ctx_t *ctx) {
+  if ((path == NULL) || (depth > DIR_SIZE_MAX_DEPTH)) {
+    return 0U;
+  }
+  if (dir_size_exceeded(ctx)) {
+    return 0U;
+  }
+
+  DIR *dir = opendir(path);
+  if (dir == NULL) {
+    return 0U;
+  }
+
+  uint64_t total = 0U;
+
+  for (;;) {
+    if (dir_size_exceeded(ctx)) {
+      break;
+    }
+
+    errno = 0;
+    struct dirent *ent = readdir(dir);
+    if (ent == NULL) {
+      break;
+    }
+    if ((strcmp(ent->d_name, ".") == 0) || (strcmp(ent->d_name, "..") == 0)) {
+      continue;
+    }
+
+    char child[FTP_PATH_MAX];
+    int nmax_dw = (int)(sizeof(child) - 2 - strlen(ent->d_name));
+    if (nmax_dw < 0) { continue; }
+    int n;
+    if (strcmp(path, "/") == 0) {
+      n = snprintf(child, sizeof(child), "/%s", ent->d_name);
+    } else {
+      n = snprintf(child, sizeof(child), "%.*s/%s", nmax_dw, path, ent->d_name);
+    }
+    if ((n < 0) || ((size_t)n >= sizeof(child))) {
+      continue;
+    }
+
+    struct stat st;
+    if (lstat(child, &st) != 0) {
+      continue;
+    }
+    ctx->entries++;
+
+    if (S_ISREG(st.st_mode)) {
+      total += (uint64_t)st.st_blocks * 512U;
+    } else if (S_ISDIR(st.st_mode)) {
+      total += dir_size_walk(child, depth + 1, ctx);
+    }
+    /* skip symlinks, devices, etc. */
+  }
+
+  closedir(dir);
+  return total;
+}
+
+uint64_t http_dir_size_recursive(const char *path, int depth) {
+  dir_size_ctx_t ctx;
+  gettimeofday(&ctx.deadline, NULL);
+  {
+    int64_t usec = (int64_t)ctx.deadline.tv_usec + (int64_t)DIR_SIZE_TIMEOUT_MS * 1000;
+    ctx.deadline.tv_sec  += (time_t)(usec / 1000000);
+    ctx.deadline.tv_usec  = (suseconds_t)(usec % 1000000);
+  }
+  ctx.entries = 0;
+  ctx.partial = 0;
+
+  return dir_size_walk(path, depth, &ctx);
+}
+
+/**
+ * @brief Same as http_dir_size_recursive but also reports whether
+ *        the scan was truncated by the time/entry budget.
+ */
+uint64_t http_api_dir_size_with_partial(const char *path, int *out_partial) {
+  dir_size_ctx_t ctx;
+  gettimeofday(&ctx.deadline, NULL);
+  {
+    int64_t usec = (int64_t)ctx.deadline.tv_usec + (int64_t)DIR_SIZE_TIMEOUT_MS * 1000;
+    ctx.deadline.tv_sec  += (time_t)(usec / 1000000);
+    ctx.deadline.tv_usec  = (suseconds_t)(usec % 1000000);
+  }
+  ctx.entries = 0;
+  ctx.partial = 0;
+
+  uint64_t sz = dir_size_walk(path, 0, &ctx);
+  if (out_partial != NULL) {
+    *out_partial = ctx.partial;
+  }
+  return sz;
+}
 
 static http_response_t *api_list(const http_request_t *request) {
   /* Extract ?path= */

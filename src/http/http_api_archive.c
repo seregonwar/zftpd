@@ -285,3 +285,11 @@ http_response_t *http_api_archive_cancel(const http_request_t *request) {
   return resp;
 }
 
+
+http_response_t *http_api_archive_handle(const http_request_t *request) {
+  if (request == NULL) return NULL;
+  if (http_api_route_is(request->uri, "/api/extract_progress")) return http_api_archive_progress(request);
+  if (http_api_route_is(request->uri, "/api/extract_cancel")) return http_api_archive_cancel(request);
+  if (http_api_route_is(request->uri, "/api/extract")) return http_api_archive_start(request);
+  return NULL;
+}
