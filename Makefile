@@ -277,6 +277,7 @@ ifeq ($(ENABLE_ZHTTPD),1)
     SOURCES += src/http/http_response.c
     SOURCES += src/http/http_api.c
     SOURCES += src/http/http_api_common.c
+    SOURCES += src/http/http_api_files.c
     SOURCES += src/http/http_api_transfer.c
     SOURCES += src/http/http_static.c
     SOURCES += src/http/http_api_archive.c
@@ -807,6 +808,7 @@ TEST_BINS += $(BUILD_DIR)/tests/test_copy_atomic
 ifeq ($(ENABLE_ZHTTPD),1)
 TEST_BINS += $(BUILD_DIR)/tests/test_transfer
 TEST_BINS += $(BUILD_DIR)/tests/test_http_api_common
+TEST_BINS += $(BUILD_DIR)/tests/test_http_files
 endif
 
 ifeq ($(filter $(TARGET),linux macos),)

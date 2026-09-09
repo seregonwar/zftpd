@@ -40,4 +40,6 @@ http_response_t *http_api_archive_start(const http_request_t *request);
 http_response_t *http_api_archive_progress(const http_request_t *request);
 http_response_t *http_api_archive_cancel(const http_request_t *request);
 
+http_response_t *http_api_files_handle(const http_request_t *request);
+uint64_t http_api_dir_size_with_partial(const char *path, int *out_partial);
 #endif
