@@ -498,3 +498,9 @@ http_response_t *http_api_legacy_disabled_json(const char *json_body) {
   return resp;
 }
 
+
+int http_api_route_is(const char *uri, const char *path) {
+  if (uri == NULL || path == NULL) return 0;
+  size_t n = strlen(path);
+  return strncmp(uri, path, n) == 0 && (uri[n] == '\0' || uri[n] == '?');
+}

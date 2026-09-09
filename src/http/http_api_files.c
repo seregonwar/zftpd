@@ -861,27 +861,22 @@ static http_response_t *api_copy(const http_request_t *request) {
 
 #endif
 
-static int route_is(const char *uri, const char *path) {
-  if (uri == NULL || path == NULL) return 0;
-  size_t n = strlen(path);
-  return strncmp(uri, path, n) == 0 && (uri[n] == '\0' || uri[n] == '?');
-}
 
 http_response_t *http_api_files_handle(const http_request_t *request) {
   if (request == NULL) return NULL;
-  if (route_is(request->uri, "/api/list")) return api_list(request);
-  if (route_is(request->uri, "/api/dirsize")) return api_dirsize(request);
-  if (route_is(request->uri, "/api/file/get") || route_is(request->uri, "/api/download"))
+  if (http_api_route_is(request->uri, "/api/list")) return api_list(request);
+  if (http_api_route_is(request->uri, "/api/dirsize")) return api_dirsize(request);
+  if (http_api_route_is(request->uri, "/api/file/get") || http_api_route_is(request->uri, "/api/download"))
     return api_download(request);
 #if ENABLE_WEB_UPLOAD
-  if (route_is(request->uri, "/api/create_file")) return api_create_file(request);
-  if (route_is(request->uri, "/api/mkdir")) return api_mkdir(request);
-  if (route_is(request->uri, "/api/delete")) return api_delete(request);
-  if (route_is(request->uri, "/api/rename")) return api_rename(request);
-  if (route_is(request->uri, "/api/copy_progress")) return api_copy_progress(request);
-  if (route_is(request->uri, "/api/copy_cancel")) return api_copy_cancel(request);
-  if (route_is(request->uri, "/api/copy_pause")) return api_copy_pause(request);
-  if (route_is(request->uri, "/api/copy")) return api_copy(request);
+  if (http_api_route_is(request->uri, "/api/create_file")) return api_create_file(request);
+  if (http_api_route_is(request->uri, "/api/mkdir")) return api_mkdir(request);
+  if (http_api_route_is(request->uri, "/api/delete")) return api_delete(request);
+  if (http_api_route_is(request->uri, "/api/rename")) return api_rename(request);
+  if (http_api_route_is(request->uri, "/api/copy_progress")) return api_copy_progress(request);
+  if (http_api_route_is(request->uri, "/api/copy_cancel")) return api_copy_cancel(request);
+  if (http_api_route_is(request->uri, "/api/copy_pause")) return api_copy_pause(request);
+  if (http_api_route_is(request->uri, "/api/copy")) return api_copy(request);
 #endif
   return NULL;
 }

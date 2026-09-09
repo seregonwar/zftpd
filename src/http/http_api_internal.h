@@ -42,5 +42,7 @@ http_response_t *http_api_archive_cancel(const http_request_t *request);
 
 http_response_t *http_api_files_handle(const http_request_t *request);
 http_response_t *http_api_process_handle(const http_request_t *request);
+http_response_t *http_api_system_handle(const http_request_t *request);
 uint64_t http_api_dir_size_with_partial(const char *path, int *out_partial);
+int http_api_route_is(const char *uri, const char *path);
 #endif

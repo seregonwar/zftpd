@@ -267,15 +267,10 @@ static http_response_t *api_process_kill(const http_request_t *request) {
   return resp;
 }
 
-static int route_is(const char *uri, const char *path) {
-  if (uri == NULL || path == NULL) return 0;
-  size_t n = strlen(path);
-  return strncmp(uri, path, n) == 0 && (uri[n] == '\0' || uri[n] == '?');
-}
 
 http_response_t *http_api_process_handle(const http_request_t *request) {
   if (request == NULL) return NULL;
-  if (route_is(request->uri, "/api/process/kill")) return api_process_kill(request);
-  if (route_is(request->uri, "/api/processes")) return api_processes(request);
+  if (http_api_route_is(request->uri, "/api/process/kill")) return api_process_kill(request);
+  if (http_api_route_is(request->uri, "/api/processes")) return api_processes(request);
   return NULL;
 }
