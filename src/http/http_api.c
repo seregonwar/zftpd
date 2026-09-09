@@ -36,6 +36,7 @@ SOFTWARE.
  */
 
 #include "http_api.h"
+#include "http_api_internal.h"
 #include "ftp_config.h"
 #include "ftp_instance.h"
 #include "ftp_path.h"
@@ -212,127 +213,6 @@ typedef struct {
 #include "http_resources.h"
 
 /*===========================================================================*
- * ROOT PATH CONFINEMENT
- *
- *   FTP side:   ftp_path_resolve() -> ftp_path_normalize() ->
- *               realpath() -> ftp_path_is_within_root()
- *   HTTP side:  http_validate_and_confine() reuses the same primitives.
- *
- *   Root is stored in http_server.root_path and propagated here via
- *   http_api_set_root() during http_server_create().
- *===========================================================================*/
-
-static char g_http_root[FTP_PATH_MAX] = "/";
-
-/*
- * Pointer to the FTP server context.
- *
- * Set once by http_api_set_server_ctx() during server startup.
- * Used by the /api/network/reset endpoint (Fix #4) to reach the session pool
- * and call pal_network_reset_ftp_stack().
- *
- * NULL if not set (e.g. HTTP server started standalone without FTP).
- * Access is single-threaded from the HTTP event loop — no lock needed.
- */
-static ftp_server_context_t *g_ftp_server_ctx = NULL;
-
-/**
- * @brief Set the FTP server context for the HTTP API layer.
- *
- * Must be called after ftp_server_init() and before http_server_create().
- *
- * @param ctx  Pointer to the initialized FTP server context, or NULL to clear.
- */
-void http_api_set_server_ctx(ftp_server_context_t *ctx) {
-  g_ftp_server_ctx = ctx;
-}
-
-void http_api_set_root(const char *root) {
-  if ((root == NULL) || (root[0] == '\0')) {
-    g_http_root[0] = '/';
-    g_http_root[1] = '\0';
-    return;
-  }
-  size_t len = strlen(root);
-  if (len >= sizeof(g_http_root)) {
-    len = sizeof(g_http_root) - 1U;
-  }
-  memcpy(g_http_root, root, len);
-  g_http_root[len] = '\0';
-
-  /* Strip trailing slash (unless root is exactly "/") */
-  while (len > 1U && g_http_root[len - 1U] == '/') {
-    g_http_root[--len] = '\0';
-  }
-}
-
-const char *http_api_get_root(void) { return g_http_root; }
-
-/**
- * @brief Validate and confine an HTTP path to the server root
- *
- * Reuses the same path security primitives as the FTP core:
- *
- *   Step 1: ftp_path_normalize()       - resolve .., ., //
- *   Step 2: ftp_path_is_within_root()  - pre-realpath confinement
- *   Step 3: realpath()                 - resolve symlinks
- *   Step 4: ftp_path_is_within_root()  - post-realpath re-check
- *
- * @param[in]  input     Raw path from URL (already URL-decoded)
- * @param[in]  root      Root directory (absolute)
- * @param[out] out       Buffer for the canonical confined path
- * @param[in]  out_size  Size of out (>= FTP_PATH_MAX)
- *
- * @return 0 on success, -1 if path escapes root
- *
- * @pre input != NULL, root != NULL, out != NULL
- * @post On success, ftp_path_is_within_root(out, root) == 1
- */
-static int http_validate_and_confine(const char *input, const char *root,
-                                     char *out, size_t out_size) {
-  if ((input == NULL) || (root == NULL) || (out == NULL)) {
-    return -1;
-  }
-
-  /* Step 1: normalize (resolve .., ., //) */
-  char normalized[FTP_PATH_MAX];
-  if (ftp_path_normalize(input, normalized, sizeof(normalized)) != FTP_OK) {
-    return -1;
-  }
-
-  /* Step 2: pre-realpath confinement check */
-  if (ftp_path_is_within_root(normalized, root) != 1) {
-    return -1;
-  }
-
-  /* Step 3: resolve symlinks */
-  char real[FTP_PATH_MAX];
-  if (realpath(normalized, real) != NULL) {
-    /* Step 4: post-realpath re-check (anti symlink traversal) */
-    if (ftp_path_is_within_root(real, root) != 1) {
-      return -1;
-    }
-    size_t n = strlen(real);
-    if ((n + 1U) > out_size) {
-      return -1;
-    }
-    memcpy(out, real, n + 1U);
-  } else {
-    /*
-     * Path doesn't exist yet (upload target, new directory).
-     * Pre-realpath check already passed — use normalized.
-     */
-    size_t n = strlen(normalized);
-    if ((n + 1U) > out_size) {
-      return -1;
-    }
-    memcpy(out, normalized, n + 1U);
-  }
-
-  return 0;
-}
-
-/*===========================================================================*
  * FORWARD DECLARATIONS
  *===========================================================================*/
 
@@ -378,11 +258,6 @@ static http_response_t *api_games_repair_visibility(const http_request_t *reques
 static http_response_t *api_games_uninstall(const http_request_t *request);
 static http_response_t *api_games_install(const http_request_t *request);
 static http_response_t *api_games_reinstall(const http_request_t *request);
-static http_response_t *api_legacy_disabled_json(const char *json_body);
-static http_response_t *error_json(http_status_t code, const char *message);
-static http_response_t *status_json_200(int ok, const char *message,
-                                        int code);
-static http_response_t *png_fallback_response(void);
 
 static void launch_diag_log(const char *stage, const char *title_id, int code,
                             const char *detail) {
@@ -474,157 +349,6 @@ static int ps4_load_prx_symbol(const char *module_path, const char *symbol,
 }
 #endif
 #endif
-
-/*===========================================================================*
- * PATH SECURITY
- *
- *   ┌──────────────────────────────────────────────────┐
- *   │  BLOCKED PATTERNS            REASON              │
- *   │  ../                         traversal           │
- *   │  //                          double-slash trick  │
- *   │  /dev /proc /sys /kern       PS kernel crash     │
- *   │  outside g_http_root         VULN-01/02 fix      │
- *   └──────────────────────────────────────────────────┘
- *===========================================================================*/
-
-/**
- * @brief Check for directory-traversal attacks
- *
- * Returns 1 if path is safe, 0 if it contains ".." components.
- */
-static int is_safe_path(const char *path) {
-  if (path == NULL) {
-    return 0;
-  }
-
-  /* Must start with '/' */
-  if (path[0] != '/') {
-    return 0;
-  }
-
-  /* Search for ".." components */
-  const char *p = path;
-  while (*p != '\0') {
-    if (p[0] == '.' && p[1] == '.') {
-      /* ".." at start of path, or preceded by '/' */
-      if (p == path || p[-1] == '/') {
-        return 0;
-      }
-    }
-    p++;
-  }
-
-  return 1;
-}
-
-#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5) || defined(PS4) ||          \
-    defined(PS5)
-/**
- * @brief PS4/PS5 forbidden path blacklist
- *
- * Accessing these causes "Fatal trap 12: page fault" on unjailbroken kernels.
- */
-static const char *forbidden_prefixes[] = {"/dev", "/proc", "/sys", "/kern",
-                                           NULL};
-
-static int is_ps_safe_path(const char *path) {
-  for (size_t i = 0; forbidden_prefixes[i] != NULL; i++) {
-    size_t len = strlen(forbidden_prefixes[i]);
-    if (strncmp(path, forbidden_prefixes[i], len) == 0) {
-      /* Exact match or followed by '/' */
-      if (path[len] == '\0' || path[len] == '/') {
-        return 0;
-      }
-    }
-  }
-  return 1;
-}
-#endif
-
-/**
- * @brief Combined path validation
- *
- *   1. Reject traversal patterns ("..")
- *   2. Reject PS kernel-crash paths (/dev, /proc, ...)
- *   3. Confine to g_http_root via http_validate_and_confine()
- *
- * @param[in]  path  Raw input path
- * @param[out] safe  Canonical path confined to root (FTP_PATH_MAX)
- *
- * @return 1 if safe, 0 if rejected
- */
-static int validate_path(const char *path, char *safe, size_t safe_size) {
-  if (!is_safe_path(path)) {
-    return 0;
-  }
-
-#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5) || defined(PS4) ||          \
-    defined(PS5)
-  if (!is_ps_safe_path(path)) {
-    return 0;
-  }
-#endif
-
-  /* Root confinement via ftp_path_normalize + ftp_path_is_within_root */
-  if (http_validate_and_confine(path, g_http_root, safe, safe_size) != 0) {
-    return 0;
-  }
-
-  return 1;
-}
-
-static int buf_append_bytes(char *buf, size_t cap, size_t *pos,
-                            const char *data, size_t len) {
-  if ((buf == NULL) || (pos == NULL) || (data == NULL)) {
-    return -1;
-  }
-  if (*pos > cap) {
-    return -1;
-  }
-  if (len > (cap - *pos)) {
-    return -1;
-  }
-  if (len > 0U) {
-    memcpy(buf + *pos, data, len);
-    *pos += len;
-  }
-  return 0;
-}
-
-static int buf_append_cstr(char *buf, size_t cap, size_t *pos,
-                           const char *str) {
-  if (str == NULL) {
-    return -1;
-  }
-  return buf_append_bytes(buf, cap, pos, str, strlen(str));
-}
-
-static int buf_append_u64(char *buf, size_t cap, size_t *pos, uint64_t v) {
-  char tmp[32];
-  int n = snprintf(tmp, sizeof(tmp), "%" PRIu64, v);
-  if ((n < 0) || ((size_t)n >= sizeof(tmp))) {
-    return -1;
-  }
-  return buf_append_bytes(buf, cap, pos, tmp, (size_t)n);
-}
-
-static int buf_append_u32(char *buf, size_t cap, size_t *pos, uint32_t v) {
-  char tmp[16];
-  int n = snprintf(tmp, sizeof(tmp), "%" PRIu32, v);
-  if ((n < 0) || ((size_t)n >= sizeof(tmp))) {
-    return -1;
-  }
-  return buf_append_bytes(buf, cap, pos, tmp, (size_t)n);
-}
-
-static int buf_append_i32(char *buf, size_t cap, size_t *pos, int32_t v) {
-  char tmp[16];
-  int n = snprintf(tmp, sizeof(tmp), "%" PRId32, v);
-  if ((n < 0) || ((size_t)n >= sizeof(tmp))) {
-    return -1;
-  }
-  return buf_append_bytes(buf, cap, pos, tmp, (size_t)n);
-}
 
 static int u64_mul_checked(uint64_t a, uint64_t b, uint64_t *out) {
   if (out == NULL) {
@@ -1085,311 +809,6 @@ static int get_cpu_temp_c(int32_t *out_c) {
 }
 
 /*===========================================================================*
- * JSON HELPERS
- *===========================================================================*/
-
-/**
- * @brief Append a JSON-escaped string to buffer
- *
- * Escapes: " \ / \b \f \n \r \t and control chars
- */
-static int json_escape_append(char *buf, size_t cap, size_t *pos,
-                              const char *str) {
-  size_t p = *pos;
-
-  for (const char *s = str; *s != '\0'; s++) {
-    unsigned char c = (unsigned char)*s;
-
-    if (p + 6 >= cap) {
-      return -1; /* would overflow */
-    }
-
-    switch (c) {
-    case '"':
-      buf[p++] = '\\';
-      buf[p++] = '"';
-      break;
-    case '\\':
-      buf[p++] = '\\';
-      buf[p++] = '\\';
-      break;
-    case '\b':
-      buf[p++] = '\\';
-      buf[p++] = 'b';
-      break;
-    case '\f':
-      buf[p++] = '\\';
-      buf[p++] = 'f';
-      break;
-    case '\n':
-      buf[p++] = '\\';
-      buf[p++] = 'n';
-      break;
-    case '\r':
-      buf[p++] = '\\';
-      buf[p++] = 'r';
-      break;
-    case '\t':
-      buf[p++] = '\\';
-      buf[p++] = 't';
-      break;
-    default:
-      if (c < 0x20) {
-        p += (size_t)snprintf(buf + p, cap - p, "\\u%04x", c);
-      } else {
-        buf[p++] = (char)c;
-      }
-      break;
-    }
-  }
-
-  *pos = p;
-  return 0;
-}
-
-/*===========================================================================*
- * QUERY STRING PARSER
- *===========================================================================*/
-
-/**
- * @brief Extract "path" parameter from query string
- *
- * Given "?path=/foo/bar&other=1", writes "/foo/bar" into out.
- */
-static int parse_path_param(const char *query, char *out, size_t out_size) {
-  if (query == NULL || out == NULL) {
-    return -1;
-  }
-  if (out_size < 2U) {
-    return -1;
-  }
-
-  const char *start = strstr(query, "path=");
-  if (start == NULL) {
-    return -1;
-  }
-  start += 5; /* skip "path=" */
-
-  size_t in_pos = 0U;
-  size_t out_pos = 0U;
-
-  while ((start[in_pos] != '\0') && (start[in_pos] != '&') &&
-         (out_pos < (out_size - 1U))) {
-    unsigned char ch = (unsigned char)start[in_pos];
-
-    if ((ch == '%') && (start[in_pos + 1] != '\0') &&
-        (start[in_pos + 2] != '\0')) {
-      unsigned char hi = (unsigned char)start[in_pos + 1];
-      unsigned char lo = (unsigned char)start[in_pos + 2];
-
-      unsigned int v_hi;
-      unsigned int v_lo;
-
-      if ((hi >= '0') && (hi <= '9')) {
-        v_hi = (unsigned int)(hi - '0');
-      } else if ((hi >= 'A') && (hi <= 'F')) {
-        v_hi = 10U + (unsigned int)(hi - 'A');
-      } else if ((hi >= 'a') && (hi <= 'f')) {
-        v_hi = 10U + (unsigned int)(hi - 'a');
-      } else {
-        v_hi = 0xFFFFFFFFU;
-      }
-
-      if ((lo >= '0') && (lo <= '9')) {
-        v_lo = (unsigned int)(lo - '0');
-      } else if ((lo >= 'A') && (lo <= 'F')) {
-        v_lo = 10U + (unsigned int)(lo - 'A');
-      } else if ((lo >= 'a') && (lo <= 'f')) {
-        v_lo = 10U + (unsigned int)(lo - 'a');
-      } else {
-        v_lo = 0xFFFFFFFFU;
-      }
-
-      if ((v_hi != 0xFFFFFFFFU) && (v_lo != 0xFFFFFFFFU)) {
-        unsigned char decoded = (unsigned char)((v_hi << 4U) | v_lo);
-        if (decoded == '\0') {
-          return -1;
-        }
-        out[out_pos++] = (char)decoded;
-        in_pos += 3U;
-        continue;
-      }
-    }
-
-    if (ch == '+') {
-      out[out_pos++] = ' ';
-    } else {
-      out[out_pos++] = (char)ch;
-    }
-    in_pos++;
-  }
-  out[out_pos] = '\0';
-
-  /* If empty, default to "/" */
-  if (out[0] == '\0') {
-    out[0] = '/';
-    out[1] = '\0';
-  }
-
-  return 0;
-}
-
-static int parse_query_param(const char *query, const char *key,
-                             char *out, size_t out_size) {
-  if ((query == NULL) || (key == NULL) || (out == NULL) || (out_size < 2U)) {
-    return -1;
-  }
-
-  size_t key_len = strlen(key);
-  const char *p = query;
-  while ((p = strstr(p, key)) != NULL) {
-    if ((p == query || p[-1] == '?' || p[-1] == '&') &&
-        (p[key_len] == '=')) {
-      const char *start = p + key_len + 1U;
-      size_t in_pos = 0U;
-      size_t out_pos = 0U;
-
-      while ((start[in_pos] != '\0') && (start[in_pos] != '&') &&
-             (out_pos < (out_size - 1U))) {
-        unsigned char ch = (unsigned char)start[in_pos];
-
-        if ((ch == '%') && (start[in_pos + 1] != '\0') &&
-            (start[in_pos + 2] != '\0')) {
-          unsigned char hi = (unsigned char)start[in_pos + 1];
-          unsigned char lo = (unsigned char)start[in_pos + 2];
-          unsigned int v_hi = 0xFFFFFFFFU;
-          unsigned int v_lo = 0xFFFFFFFFU;
-
-          if ((hi >= '0') && (hi <= '9'))
-            v_hi = (unsigned int)(hi - '0');
-          else if ((hi >= 'A') && (hi <= 'F'))
-            v_hi = 10U + (unsigned int)(hi - 'A');
-          else if ((hi >= 'a') && (hi <= 'f'))
-            v_hi = 10U + (unsigned int)(hi - 'a');
-
-          if ((lo >= '0') && (lo <= '9'))
-            v_lo = (unsigned int)(lo - '0');
-          else if ((lo >= 'A') && (lo <= 'F'))
-            v_lo = 10U + (unsigned int)(lo - 'A');
-          else if ((lo >= 'a') && (lo <= 'f'))
-            v_lo = 10U + (unsigned int)(lo - 'a');
-
-          if ((v_hi != 0xFFFFFFFFU) && (v_lo != 0xFFFFFFFFU)) {
-            unsigned char decoded = (unsigned char)((v_hi << 4U) | v_lo);
-            if (decoded == '\0') {
-              return -1;
-            }
-            out[out_pos++] = (char)decoded;
-            in_pos += 3U;
-            continue;
-          }
-        }
-
-        out[out_pos++] = (ch == '+') ? ' ' : (char)ch;
-        in_pos++;
-      }
-      out[out_pos] = '\0';
-      return (out_pos > 0U) ? 0 : -1;
-    }
-    p += key_len;
-  }
-
-  return -1;
-}
-
-#if ENABLE_WEB_UPLOAD
-static int parse_name_param(const char *query, char *out, size_t out_size) {
-  if (query == NULL || out == NULL) {
-    return -1;
-  }
-  if (out_size < 2U) {
-    return -1;
-  }
-
-  const char *start = strstr(query, "name=");
-  if (start == NULL) {
-    return -1;
-  }
-  start += 5; /* skip "name=" */
-
-  size_t in_pos = 0U;
-  size_t out_pos = 0U;
-
-  while ((start[in_pos] != '\0') && (start[in_pos] != '&') &&
-         (out_pos < (out_size - 1U))) {
-    unsigned char ch = (unsigned char)start[in_pos];
-
-    if ((ch == '%') && (start[in_pos + 1] != '\0') &&
-        (start[in_pos + 2] != '\0')) {
-      unsigned char hi = (unsigned char)start[in_pos + 1];
-      unsigned char lo = (unsigned char)start[in_pos + 2];
-
-      unsigned int v_hi;
-      unsigned int v_lo;
-
-      if ((hi >= '0') && (hi <= '9')) {
-        v_hi = (unsigned int)(hi - '0');
-      } else if ((hi >= 'A') && (hi <= 'F')) {
-        v_hi = 10U + (unsigned int)(hi - 'A');
-      } else if ((hi >= 'a') && (hi <= 'f')) {
-        v_hi = 10U + (unsigned int)(hi - 'a');
-      } else {
-        v_hi = 0xFFFFFFFFU;
-      }
-
-      if ((lo >= '0') && (lo <= '9')) {
-        v_lo = (unsigned int)(lo - '0');
-      } else if ((lo >= 'A') && (lo <= 'F')) {
-        v_lo = 10U + (unsigned int)(lo - 'A');
-      } else if ((lo >= 'a') && (lo <= 'f')) {
-        v_lo = 10U + (unsigned int)(lo - 'a');
-      } else {
-        v_lo = 0xFFFFFFFFU;
-      }
-
-      if ((v_hi != 0xFFFFFFFFU) && (v_lo != 0xFFFFFFFFU)) {
-        unsigned char decoded = (unsigned char)((v_hi << 4U) | v_lo);
-        if (decoded == '\0') {
-          return -1;
-        }
-        out[out_pos++] = (char)decoded;
-        in_pos += 3U;
-        continue;
-      }
-    }
-
-    if (ch == '+') {
-      out[out_pos++] = ' ';
-    } else {
-      out[out_pos++] = (char)ch;
-    }
-    in_pos++;
-  }
-  out[out_pos] = '\0';
-  if (out[0] == '\0') {
-    return -1;
-  }
-
-  return 0;
-}
-
-static int is_safe_filename(const char *name) {
-  if ((name == NULL) || (name[0] == '\0')) {
-    return 0;
-  }
-  if (strstr(name, "..") != NULL) {
-    return 0;
-  }
-  for (const char *p = name; *p != '\0'; p++) {
-    if ((*p == '/') || (*p == '\\')) {
-      return 0;
-    }
-  }
-  return 1;
-}
-#endif
-
-/*===========================================================================*
  * REQUEST ROUTER
  *===========================================================================*/
 
@@ -1404,7 +823,7 @@ http_response_t *http_api_handle(const http_request_t *request) {
   /* CSRF Protection for mutating requests */
   if (request->method == HTTP_METHOD_POST) {
     if (http_csrf_validate(request) != 0) {
-      return error_json(HTTP_STATUS_403_FORBIDDEN,
+      return http_api_error_json(HTTP_STATUS_403_FORBIDDEN,
                         "Invalid or missing CSRF token");
     }
   }
@@ -1609,21 +1028,21 @@ http_response_t *http_api_handle(const http_request_t *request) {
 
   /* Legacy frontend compatibility (old embedded UIs) */
   if (strncmp(request->uri, "/api/stream/status", 18) == 0) {
-    return api_legacy_disabled_json(
+    return http_api_legacy_disabled_json(
         "{\"ok\":true,\"enabled\":false,\"status\":\"offline\"}");
   }
   if (strncmp(request->uri, "/api/stream/start", 17) == 0 ||
       strncmp(request->uri, "/api/stream/stop", 16) == 0 ||
       strncmp(request->uri, "/api/stream", 11) == 0) {
-    return api_legacy_disabled_json(
+    return http_api_legacy_disabled_json(
         "{\"ok\":false,\"message\":\"Stream disabled\"}");
   }
   if (strncmp(request->uri, "/api/admin/installed", 20) == 0) {
-    return api_legacy_disabled_json(
+    return http_api_legacy_disabled_json(
         "{\"ok\":true,\"installed\":false}");
   }
   if (strncmp(request->uri, "/api/admin/install", 18) == 0) {
-    return api_legacy_disabled_json(
+    return http_api_legacy_disabled_json(
         "{\"ok\":false,\"message\":\"Install API not available\"}");
   }
 
@@ -1650,18 +1069,18 @@ static http_response_t *api_list(const http_request_t *request) {
   char path[1024] = "/";
 
   if (query != NULL) {
-    (void)parse_path_param(query, path, sizeof(path));
+    (void)http_api_parse_path_param(query, path, sizeof(path));
   }
 
   char safe[FTP_PATH_MAX];
-  if (!validate_path(path, safe, sizeof(safe))) {
-    return error_json(HTTP_STATUS_403_FORBIDDEN,
+  if (!http_api_validate_path(path, safe, sizeof(safe))) {
+    return http_api_error_json(HTTP_STATUS_403_FORBIDDEN,
                       "Path traversal attempt detected");
   }
 
   DIR *dir = opendir(safe);
   if (dir == NULL) {
-    return error_json(HTTP_STATUS_404_NOT_FOUND, "Directory not found");
+    return http_api_error_json(HTTP_STATUS_404_NOT_FOUND, "Directory not found");
   }
 
   /*
@@ -1683,7 +1102,7 @@ static http_response_t *api_list(const http_request_t *request) {
   size_t cap = sizeof(prefix);
 
   pos += (size_t)snprintf(prefix + pos, cap - pos, "{\"path\":\"");
-  (void)json_escape_append(prefix, cap, &pos, path);
+  (void)http_api_json_escape_append(prefix, cap, &pos, path);
   pos += (size_t)snprintf(prefix + pos, cap - pos, "\",\"entries\":[");
 
   /* Finalize headers now (adds \r\n after headers) */
@@ -1698,7 +1117,7 @@ static http_response_t *api_list(const http_request_t *request) {
       http_response_append_raw(resp, "\r\n", 2) < 0) {
     http_response_destroy(resp);
     closedir(dir);
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
   }
 
   /* Set up streaming state */
@@ -1724,18 +1143,18 @@ static http_response_t *api_dirsize(const http_request_t *request) {
   char path[1024] = "/";
 
   if (query != NULL) {
-    (void)parse_path_param(query, path, sizeof(path));
+    (void)http_api_parse_path_param(query, path, sizeof(path));
   }
 
   char safe[FTP_PATH_MAX];
-  if (!validate_path(path, safe, sizeof(safe))) {
-    return error_json(HTTP_STATUS_403_FORBIDDEN,
+  if (!http_api_validate_path(path, safe, sizeof(safe))) {
+    return http_api_error_json(HTTP_STATUS_403_FORBIDDEN,
                       "Path traversal attempt detected");
   }
 
   struct stat st;
   if (stat(safe, &st) != 0 || !S_ISDIR(st.st_mode)) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Not a directory");
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Not a directory");
   }
 
   int partial = 0;
@@ -1745,14 +1164,14 @@ static http_response_t *api_dirsize(const http_request_t *request) {
   size_t pos = 0;
   size_t cap = sizeof(body);
 
-  if (buf_append_cstr(body, cap, &pos, "{\"path\":\"") != 0 ||
-      json_escape_append(body, cap, &pos, path) != 0 ||
-      buf_append_cstr(body, cap, &pos, "\",\"size\":") != 0 ||
-      buf_append_u64(body, cap, &pos, sz) != 0 ||
-      buf_append_cstr(body, cap, &pos,
+  if (http_api_buf_append_cstr(body, cap, &pos, "{\"path\":\"") != 0 ||
+      http_api_json_escape_append(body, cap, &pos, path) != 0 ||
+      http_api_buf_append_cstr(body, cap, &pos, "\",\"size\":") != 0 ||
+      http_api_buf_append_u64(body, cap, &pos, sz) != 0 ||
+      http_api_buf_append_cstr(body, cap, &pos,
                       partial ? ",\"partial\":true}"
                               : ",\"partial\":false}") != 0) {
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
   }
 
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
@@ -1776,29 +1195,29 @@ static http_response_t *api_download(const http_request_t *request) {
   char path[1024] = "";
 
   if (query != NULL) {
-    (void)parse_path_param(query, path, sizeof(path));
+    (void)http_api_parse_path_param(query, path, sizeof(path));
   }
 
   if (path[0] == '\0') {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing path parameter");
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing path parameter");
   }
 
   char safe[FTP_PATH_MAX];
-  if (!validate_path(path, safe, sizeof(safe))) {
-    return error_json(HTTP_STATUS_403_FORBIDDEN,
+  if (!http_api_validate_path(path, safe, sizeof(safe))) {
+    return http_api_error_json(HTTP_STATUS_403_FORBIDDEN,
                       "Path traversal attempt detected");
   }
 
   /* Open file */
   int fd = open(safe, O_RDONLY);
   if (fd < 0) {
-    return error_json(HTTP_STATUS_404_NOT_FOUND, "File not found");
+    return http_api_error_json(HTTP_STATUS_404_NOT_FOUND, "File not found");
   }
 
   struct stat st;
   if (fstat(fd, &st) < 0 || S_ISDIR(st.st_mode)) {
     close(fd);
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Not a regular file");
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Not a regular file");
   }
 
   /* Extract basename for Content-Disposition */
@@ -1906,12 +1325,12 @@ static http_response_t *api_stats(const http_request_t *request) {
   char path[1024] = "/";
 
   if (query != NULL) {
-    (void)parse_path_param(query, path, sizeof(path));
+    (void)http_api_parse_path_param(query, path, sizeof(path));
   }
 
   char safe[FTP_PATH_MAX];
-  if (!validate_path(path, safe, sizeof(safe))) {
-    return error_json(HTTP_STATUS_403_FORBIDDEN, "Forbidden path");
+  if (!http_api_validate_path(path, safe, sizeof(safe))) {
+    return http_api_error_json(HTTP_STATUS_403_FORBIDDEN, "Forbidden path");
   }
 
   uint64_t disk_total = 0U;
@@ -1934,72 +1353,72 @@ static http_response_t *api_stats(const http_request_t *request) {
   size_t pos = 0U;
   size_t cap = sizeof(body);
 
-  if (buf_append_cstr(body, cap, &pos, "{\"path\":\"") != 0) {
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+  if (http_api_buf_append_cstr(body, cap, &pos, "{\"path\":\"") != 0) {
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
   }
-  if (json_escape_append(body, cap, &pos, path) != 0) {
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+  if (http_api_json_escape_append(body, cap, &pos, path) != 0) {
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
   }
-  if (buf_append_cstr(body, cap, &pos, "\"") != 0) {
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+  if (http_api_buf_append_cstr(body, cap, &pos, "\"") != 0) {
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
   }
 
   if (disk_ok == 0) {
-    if (buf_append_cstr(body, cap, &pos, ",\"disk_used\":") != 0 ||
-        buf_append_u64(body, cap, &pos, disk_used) != 0 ||
-        buf_append_cstr(body, cap, &pos, ",\"disk_total\":") != 0 ||
-        buf_append_u64(body, cap, &pos, disk_total) != 0 ||
-        buf_append_cstr(body, cap, &pos, ",\"disk_free\":") != 0 ||
-        buf_append_u64(body, cap, &pos, disk_free) != 0 ||
-        buf_append_cstr(body, cap, &pos, ",\"disk_path\":\"") != 0 ||
-        json_escape_append(body, cap, &pos,
+    if (http_api_buf_append_cstr(body, cap, &pos, ",\"disk_used\":") != 0 ||
+        http_api_buf_append_u64(body, cap, &pos, disk_used) != 0 ||
+        http_api_buf_append_cstr(body, cap, &pos, ",\"disk_total\":") != 0 ||
+        http_api_buf_append_u64(body, cap, &pos, disk_total) != 0 ||
+        http_api_buf_append_cstr(body, cap, &pos, ",\"disk_free\":") != 0 ||
+        http_api_buf_append_u64(body, cap, &pos, disk_free) != 0 ||
+        http_api_buf_append_cstr(body, cap, &pos, ",\"disk_path\":\"") != 0 ||
+        http_api_json_escape_append(body, cap, &pos,
                            (disk_path != NULL) ? disk_path : "") != 0 ||
-        buf_append_cstr(body, cap, &pos, "\"") != 0) {
-      return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+        http_api_buf_append_cstr(body, cap, &pos, "\"") != 0) {
+      return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
     }
   } else {
-    if (buf_append_cstr(body, cap, &pos,
+    if (http_api_buf_append_cstr(body, cap, &pos,
                         ",\"disk_used\":null,\"disk_total\":null,"
                         "\"disk_free\":null,\"disk_path\":null") != 0) {
-      return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+      return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
     }
   }
 
   if (temp_ok == 0) {
-    if (buf_append_cstr(body, cap, &pos, ",\"cpu_temp\":") != 0 ||
-        buf_append_i32(body, cap, &pos, temp_c) != 0) {
-      return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+    if (http_api_buf_append_cstr(body, cap, &pos, ",\"cpu_temp\":") != 0 ||
+        http_api_buf_append_i32(body, cap, &pos, temp_c) != 0) {
+      return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
     }
   } else {
-    if (buf_append_cstr(body, cap, &pos, ",\"cpu_temp\":null") != 0) {
-      return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+    if (http_api_buf_append_cstr(body, cap, &pos, ",\"cpu_temp\":null") != 0) {
+      return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
     }
   }
 
   if (boot_ok == 0) {
-    if (buf_append_cstr(body, cap, &pos, ",\"uptime\":") != 0 ||
-        buf_append_u64(body, cap, &pos, boot_epoch) != 0) {
-      return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+    if (http_api_buf_append_cstr(body, cap, &pos, ",\"uptime\":") != 0 ||
+        http_api_buf_append_u64(body, cap, &pos, boot_epoch) != 0) {
+      return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
     }
   } else {
-    if (buf_append_cstr(body, cap, &pos, ",\"uptime\":null") != 0) {
-      return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+    if (http_api_buf_append_cstr(body, cap, &pos, ",\"uptime\":null") != 0) {
+      return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
     }
   }
 
   if (items_ok == 0) {
-    if (buf_append_cstr(body, cap, &pos, ",\"items_in_dir\":") != 0 ||
-        buf_append_u32(body, cap, &pos, items) != 0) {
-      return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+    if (http_api_buf_append_cstr(body, cap, &pos, ",\"items_in_dir\":") != 0 ||
+        http_api_buf_append_u32(body, cap, &pos, items) != 0) {
+      return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
     }
   } else {
-    if (buf_append_cstr(body, cap, &pos, ",\"items_in_dir\":null") != 0) {
-      return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+    if (http_api_buf_append_cstr(body, cap, &pos, ",\"items_in_dir\":null") != 0) {
+      return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
     }
   }
 
-  if (buf_append_cstr(body, cap, &pos, "}") != 0) {
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+  if (http_api_buf_append_cstr(body, cap, &pos, "}") != 0) {
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
   }
 
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
@@ -2012,30 +1431,30 @@ static http_response_t *api_stats(const http_request_t *request) {
 #if ENABLE_WEB_UPLOAD
 static http_response_t *api_create_file(const http_request_t *request) {
   if (request->method != HTTP_METHOD_POST) {
-    return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED,
+    return http_api_error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED,
                       "Use POST for this endpoint");
   }
 
   const char *query = strchr(request->uri, '?');
   if (query == NULL) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing query string");
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing query string");
   }
 
   char dir_path[1024] = "/";
   char name[256];
 
-  if (parse_path_param(query, dir_path, sizeof(dir_path)) != 0) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing or invalid path");
+  if (http_api_parse_path_param(query, dir_path, sizeof(dir_path)) != 0) {
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing or invalid path");
   }
-  if (parse_name_param(query, name, sizeof(name)) != 0) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing or invalid name");
+  if (http_api_parse_name_param(query, name, sizeof(name)) != 0) {
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing or invalid name");
   }
-  if (!is_safe_filename(name)) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Invalid file name");
+  if (!http_api_is_safe_filename(name)) {
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Invalid file name");
   }
   char safe_dir[FTP_PATH_MAX];
-  if (!validate_path(dir_path, safe_dir, sizeof(safe_dir))) {
-    return error_json(HTTP_STATUS_403_FORBIDDEN, "Forbidden path");
+  if (!http_api_validate_path(dir_path, safe_dir, sizeof(safe_dir))) {
+    return http_api_error_json(HTTP_STATUS_403_FORBIDDEN, "Forbidden path");
   }
 
   char full[FTP_PATH_MAX];
@@ -2050,19 +1469,19 @@ static http_response_t *api_create_file(const http_request_t *request) {
   }
 
   char safe_full[FTP_PATH_MAX];
-  if (!validate_path(full, safe_full, sizeof(safe_full))) {
-    return error_json(HTTP_STATUS_403_FORBIDDEN, "Forbidden path");
+  if (!http_api_validate_path(full, safe_full, sizeof(safe_full))) {
+    return http_api_error_json(HTTP_STATUS_403_FORBIDDEN, "Forbidden path");
   }
 
   int fd = pal_file_open(safe_full, O_WRONLY | O_CREAT | O_TRUNC, 0666);
   if (fd < 0) {
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Failed to create file");
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Failed to create file");
   }
 
   if ((request->body != NULL) && (request->body_length > 0U)) {
     if (pal_file_write_all(fd, request->body, request->body_length) < 0) {
       (void)pal_file_close(fd);
-      return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Failed to write file");
+      return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Failed to write file");
     }
   }
 
@@ -2089,30 +1508,30 @@ static http_response_t *api_create_file(const http_request_t *request) {
 
 static http_response_t *api_mkdir(const http_request_t *request) {
   if (request->method != HTTP_METHOD_POST) {
-    return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED,
+    return http_api_error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED,
                       "Use POST for this endpoint");
   }
 
   const char *query = strchr(request->uri, '?');
   if (query == NULL) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing query string");
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing query string");
   }
 
   char dir_path[1024] = "/";
   char name[256];
 
-  if (parse_path_param(query, dir_path, sizeof(dir_path)) != 0) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing or invalid path");
+  if (http_api_parse_path_param(query, dir_path, sizeof(dir_path)) != 0) {
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing or invalid path");
   }
-  if (parse_name_param(query, name, sizeof(name)) != 0) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing or invalid name");
+  if (http_api_parse_name_param(query, name, sizeof(name)) != 0) {
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing or invalid name");
   }
-  if (!is_safe_filename(name)) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Invalid folder name");
+  if (!http_api_is_safe_filename(name)) {
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Invalid folder name");
   }
   char safe_dir[FTP_PATH_MAX];
-  if (!validate_path(dir_path, safe_dir, sizeof(safe_dir))) {
-    return error_json(HTTP_STATUS_403_FORBIDDEN, "Forbidden path");
+  if (!http_api_validate_path(dir_path, safe_dir, sizeof(safe_dir))) {
+    return http_api_error_json(HTTP_STATUS_403_FORBIDDEN, "Forbidden path");
   }
 
   char full[FTP_PATH_MAX];
@@ -2127,14 +1546,14 @@ static http_response_t *api_mkdir(const http_request_t *request) {
   }
 
   char safe_full[FTP_PATH_MAX];
-  if (!validate_path(full, safe_full, sizeof(safe_full))) {
-    return error_json(HTTP_STATUS_403_FORBIDDEN, "Forbidden path");
+  if (!http_api_validate_path(full, safe_full, sizeof(safe_full))) {
+    return http_api_error_json(HTTP_STATUS_403_FORBIDDEN, "Forbidden path");
   }
 
   if (mkdir(safe_full, 0777) != 0 && errno != EEXIST) {
     char msg[128];
     snprintf(msg, sizeof(msg), "mkdir failed: %s", strerror(errno));
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, msg);
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, msg);
   }
 
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
@@ -2163,33 +1582,33 @@ static http_response_t *api_mkdir(const http_request_t *request) {
 
 static http_response_t *api_delete(const http_request_t *request) {
   if (request->method != HTTP_METHOD_POST) {
-    return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED,
+    return http_api_error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED,
                       "Use POST for this endpoint");
   }
 
   const char *query = strchr(request->uri, '?');
   if (query == NULL) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing query string");
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing query string");
   }
 
   char path[1024] = "";
-  if (parse_path_param(query, path, sizeof(path)) != 0) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing or invalid path");
+  if (http_api_parse_path_param(query, path, sizeof(path)) != 0) {
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing or invalid path");
   }
 
   char safe[FTP_PATH_MAX];
-  if (!validate_path(path, safe, sizeof(safe))) {
-    return error_json(HTTP_STATUS_403_FORBIDDEN, "Forbidden path");
+  if (!http_api_validate_path(path, safe, sizeof(safe))) {
+    return http_api_error_json(HTTP_STATUS_403_FORBIDDEN, "Forbidden path");
   }
 
   /* Refuse to delete the root itself */
-  if (strcmp(safe, g_http_root) == 0) {
-    return error_json(HTTP_STATUS_403_FORBIDDEN, "Cannot delete root");
+  if (strcmp(safe, http_api_get_root()) == 0) {
+    return http_api_error_json(HTTP_STATUS_403_FORBIDDEN, "Cannot delete root");
   }
 
   struct stat st;
   if (stat(safe, &st) != 0) {
-    return error_json(HTTP_STATUS_404_NOT_FOUND, "Path not found");
+    return http_api_error_json(HTTP_STATUS_404_NOT_FOUND, "Path not found");
   }
 
   ftp_error_t rc;
@@ -2230,7 +1649,7 @@ static http_response_t *api_delete(const http_request_t *request) {
         /* Caller explicitly requested recursive delete — proceed */
         rc = pal_dir_remove_recursive_pub(safe);
         if (rc != FTP_OK) {
-          return error_json(
+          return http_api_error_json(
               HTTP_STATUS_500_INTERNAL_ERROR,
               "Recursive delete failed (permission denied or I/O error)");
         }
@@ -2244,14 +1663,14 @@ static http_response_t *api_delete(const http_request_t *request) {
          *       retry with ?recursive=1, or
          *   (b) Tell the user to empty the folder first.
          */
-        return error_json(HTTP_STATUS_409_CONFLICT,
+        return http_api_error_json(HTTP_STATUS_409_CONFLICT,
                           "Directory is not empty. Use recursive=1 to force.");
       }
     }
   } else {
     rc = pal_file_delete(safe);
     if (rc != FTP_OK) {
-      return error_json(HTTP_STATUS_500_INTERNAL_ERROR,
+      return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR,
                         "Failed to delete file");
     }
   }
@@ -2260,7 +1679,7 @@ static http_response_t *api_delete(const http_request_t *request) {
   struct stat verify_st;
   if (stat(safe, &verify_st) == 0) {
     /* Path still exists — delete operation failed silently */
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR,
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR,
                       "Delete operation failed: path still exists (permission "
                       "denied or I/O error)");
   }
@@ -2279,7 +1698,7 @@ static http_response_t *api_delete(const http_request_t *request) {
  *   ┌─────────────────────────────────────────────────┐
  *   │  POST /api/rename?path=/dir/old.txt&name=new    │
  *   │                                                 │
- *   │  old  = validate_path(path)                     │
+ *   │  old  = http_api_validate_path(path)                     │
  *   │  new  = parent(old) + '/' + name                │
  *   │  pal_file_rename(old, new)                      │
  *   │  result -> {"ok":true,"path":"/dir/new"}        │
@@ -2288,36 +1707,36 @@ static http_response_t *api_delete(const http_request_t *request) {
 
 static http_response_t *api_rename(const http_request_t *request) {
   if (request->method != HTTP_METHOD_POST) {
-    return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED,
+    return http_api_error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED,
                       "Use POST for this endpoint");
   }
 
   const char *query = strchr(request->uri, '?');
   if (query == NULL) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing query string");
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing query string");
   }
 
   char path[1024] = "";
   char name[256];
-  if (parse_path_param(query, path, sizeof(path)) != 0) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing or invalid path");
+  if (http_api_parse_path_param(query, path, sizeof(path)) != 0) {
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing or invalid path");
   }
-  if (parse_name_param(query, name, sizeof(name)) != 0) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing or invalid name");
+  if (http_api_parse_name_param(query, name, sizeof(name)) != 0) {
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing or invalid name");
   }
-  if (!is_safe_filename(name)) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Invalid file name");
+  if (!http_api_is_safe_filename(name)) {
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Invalid file name");
   }
 
   /* Validate old path */
   char safe_old[FTP_PATH_MAX];
-  if (!validate_path(path, safe_old, sizeof(safe_old))) {
-    return error_json(HTTP_STATUS_403_FORBIDDEN, "Forbidden path");
+  if (!http_api_validate_path(path, safe_old, sizeof(safe_old))) {
+    return http_api_error_json(HTTP_STATUS_403_FORBIDDEN, "Forbidden path");
   }
 
   /* Check old exists */
   if (pal_path_exists(safe_old) != 1) {
-    return error_json(HTTP_STATUS_404_NOT_FOUND, "Path not found");
+    return http_api_error_json(HTTP_STATUS_404_NOT_FOUND, "Path not found");
   }
 
   /*
@@ -2329,7 +1748,7 @@ static http_response_t *api_rename(const http_request_t *request) {
   char new_path[FTP_PATH_MAX];
   const char *last_slash = strrchr(safe_old, '/');
   if (last_slash == NULL) {
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Internal path error");
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Internal path error");
   }
   size_t parent_len = (size_t)(last_slash - safe_old);
   if (parent_len == 0U) {
@@ -2348,13 +1767,13 @@ static http_response_t *api_rename(const http_request_t *request) {
 
   /* Validate new path stays within root */
   char safe_new[FTP_PATH_MAX];
-  if (!validate_path(new_path, safe_new, sizeof(safe_new))) {
-    return error_json(HTTP_STATUS_403_FORBIDDEN, "Destination forbidden");
+  if (!http_api_validate_path(new_path, safe_new, sizeof(safe_new))) {
+    return http_api_error_json(HTTP_STATUS_403_FORBIDDEN, "Destination forbidden");
   }
 
   ftp_error_t rc = pal_file_rename(safe_old, safe_new);
   if (rc != FTP_OK) {
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Rename failed");
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Rename failed");
   }
 
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
@@ -2511,8 +1930,8 @@ static http_response_t *api_copy_pause(const http_request_t *request) {
  *   ┌──────────────────────────────────────────────────────┐
  *   │  POST /api/copy?path=/src/file&dst=/dest/folder      │
  *   │                                                      │
- *   │  src  = validate_path(path)                          │
- *   │  dst  = validate_path(dst) + '/' + basename(src)     │
+ *   │  src  = http_api_validate_path(path)                          │
+ *   │  dst  = http_api_validate_path(dst) + '/' + basename(src)     │
  *   │  pal_file_copy_recursive_ex(src, dst, keep_src=1)    │
  *   │  result -> {"ok":true}                               │
  *   └──────────────────────────────────────────────────────┘
@@ -2597,47 +2016,47 @@ static int parse_dst_param(const char *query, char *out, size_t out_size) {
 
 static http_response_t *api_copy(const http_request_t *request) {
   if (request->method != HTTP_METHOD_POST) {
-    return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED,
+    return http_api_error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED,
                       "Use POST for this endpoint");
   }
 
   /* Reject if a copy is already in progress */
   if (atomic_load(&g_copy_progress.active) != 0) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST,
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST,
                       "A copy operation is already in progress");
   }
 
   const char *query = strchr(request->uri, '?');
   if (query == NULL) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing query string");
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing query string");
   }
 
   char src_path[1024] = "";
   char dst_dir[1024] = "";
-  if (parse_path_param(query, src_path, sizeof(src_path)) != 0) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing or invalid path");
+  if (http_api_parse_path_param(query, src_path, sizeof(src_path)) != 0) {
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing or invalid path");
   }
   if (parse_dst_param(query, dst_dir, sizeof(dst_dir)) != 0) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST,
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST,
                       "Missing or invalid dst parameter");
   }
 
   /* Validate source */
   char safe_src[FTP_PATH_MAX];
-  if (!validate_path(src_path, safe_src, sizeof(safe_src))) {
-    return error_json(HTTP_STATUS_403_FORBIDDEN, "Source path forbidden");
+  if (!http_api_validate_path(src_path, safe_src, sizeof(safe_src))) {
+    return http_api_error_json(HTTP_STATUS_403_FORBIDDEN, "Source path forbidden");
   }
   if (pal_path_exists(safe_src) != 1) {
-    return error_json(HTTP_STATUS_404_NOT_FOUND, "Source not found");
+    return http_api_error_json(HTTP_STATUS_404_NOT_FOUND, "Source not found");
   }
 
   /* Validate destination directory */
   char safe_dst_dir[FTP_PATH_MAX];
-  if (!validate_path(dst_dir, safe_dst_dir, sizeof(safe_dst_dir))) {
-    return error_json(HTTP_STATUS_403_FORBIDDEN, "Destination path forbidden");
+  if (!http_api_validate_path(dst_dir, safe_dst_dir, sizeof(safe_dst_dir))) {
+    return http_api_error_json(HTTP_STATUS_403_FORBIDDEN, "Destination path forbidden");
   }
   if (pal_path_is_directory(safe_dst_dir) != 1) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST,
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST,
                       "Destination is not a directory");
   }
 
@@ -2670,8 +2089,8 @@ static http_response_t *api_copy(const http_request_t *request) {
 
   /* Re-validate the composed destination */
   char safe_final[FTP_PATH_MAX];
-  if (!validate_path(full_dst, safe_final, sizeof(safe_final))) {
-    return error_json(HTTP_STATUS_403_FORBIDDEN, "Final destination forbidden");
+  if (!http_api_validate_path(full_dst, safe_final, sizeof(safe_final))) {
+    return http_api_error_json(HTTP_STATUS_403_FORBIDDEN, "Final destination forbidden");
   }
 
   /*
@@ -2706,7 +2125,7 @@ static http_response_t *api_copy(const http_request_t *request) {
       (copy_thread_args_t *)malloc(sizeof(copy_thread_args_t));
   if (args == NULL) {
     atomic_store(&g_copy_progress.active, 0);
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
   }
   (void)strncpy(args->src, safe_src, sizeof(args->src) - 1U);
   args->src[sizeof(args->src) - 1U] = '\0';
@@ -2717,7 +2136,7 @@ static http_response_t *api_copy(const http_request_t *request) {
   if (pthread_create(&tid, NULL, copy_thread_fn, args) != 0) {
     free(args);
     atomic_store(&g_copy_progress.active, 0);
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR,
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR,
                       "Failed to start copy thread");
   }
   (void)pthread_detach(tid);
@@ -2980,19 +2399,19 @@ static int notify_icon_is_safe(const char *icon) {
 static http_response_t *api_notify(const http_request_t *request) {
   if ((request->method != HTTP_METHOD_GET) &&
       (request->method != HTTP_METHOD_POST)) {
-    return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED,
+    return http_api_error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED,
                       "Use GET or POST");
   }
 
   const char *query = strchr(request->uri, '?');
   if (query == NULL) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST,
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST,
                       "Missing query string (text=...)");
   }
 
   char text[NOTIFY_TEXT_MAX];
-  if (parse_query_param(query, "text", text, sizeof(text)) != 0) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST,
+  if (http_api_parse_query_param(query, "text", text, sizeof(text)) != 0) {
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST,
                       "Missing or empty 'text' parameter");
   }
 
@@ -3000,16 +2419,16 @@ static http_response_t *api_notify(const http_request_t *request) {
   for (const char *p = text; *p != '\0'; p++) {
     unsigned char c = (unsigned char)*p;
     if ((c < 0x20U) || (c == 0x7FU)) {
-      return error_json(HTTP_STATUS_400_BAD_REQUEST,
+      return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST,
                         "Notification text contains control characters");
     }
   }
 
   char icon[NOTIFY_ICON_MAX];
   icon[0] = '\0';
-  if (parse_query_param(query, "icon", icon, sizeof(icon)) == 0) {
+  if (http_api_parse_query_param(query, "icon", icon, sizeof(icon)) == 0) {
     if (!notify_icon_is_safe(icon)) {
-      return error_json(HTTP_STATUS_400_BAD_REQUEST,
+      return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST,
                         "Invalid 'icon' parameter (use [A-Za-z0-9_])");
     }
   } else {
@@ -3022,12 +2441,12 @@ static http_response_t *api_notify(const http_request_t *request) {
   size_t pos = 0;
   size_t cap = sizeof(body);
 
-  if (buf_append_cstr(body, cap, &pos, "{\"ok\":true,\"text\":\"") != 0 ||
-      json_escape_append(body, cap, &pos, text) != 0 ||
-      buf_append_cstr(body, cap, &pos, "\",\"icon\":\"") != 0 ||
-      json_escape_append(body, cap, &pos, icon) != 0 ||
-      buf_append_cstr(body, cap, &pos, "\"}") != 0) {
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+  if (http_api_buf_append_cstr(body, cap, &pos, "{\"ok\":true,\"text\":\"") != 0 ||
+      http_api_json_escape_append(body, cap, &pos, text) != 0 ||
+      http_api_buf_append_cstr(body, cap, &pos, "\",\"icon\":\"") != 0 ||
+      http_api_json_escape_append(body, cap, &pos, icon) != 0 ||
+      http_api_buf_append_cstr(body, cap, &pos, "\"}") != 0) {
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
   }
 
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
@@ -3049,7 +2468,7 @@ static http_response_t *api_disk_info(const http_request_t *request) {
 
   uint64_t total = 0, used = 0, free_b = 0;
   const char *disk_path = NULL;
-  get_best_disk_stats(g_http_root, &disk_path, &total, &used, &free_b);
+  get_best_disk_stats(http_api_get_root(), &disk_path, &total, &used, &free_b);
 
   char body[256];
   size_t pos = 0;
@@ -3058,7 +2477,7 @@ static http_response_t *api_disk_info(const http_request_t *request) {
                           "{\"used\":%" PRIu64 ",\"free\":%" PRIu64
                           ",\"total\":%" PRIu64 ",\"path\":\"",
                           used, free_b, total);
-  (void)json_escape_append(body, cap, &pos, disk_path ? disk_path : "/");
+  (void)http_api_json_escape_append(body, cap, &pos, disk_path ? disk_path : "/");
   pos += (size_t)snprintf(body + pos, cap - pos, "\"}");
 
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
@@ -3082,17 +2501,17 @@ static http_response_t *api_disk_tree(const http_request_t *request) {
   const char *query = strchr(request->uri, '?');
   char path[1024] = "/";
   if (query != NULL) {
-    (void)parse_path_param(query, path, sizeof(path));
+    (void)http_api_parse_path_param(query, path, sizeof(path));
   }
 
   char safe[FTP_PATH_MAX];
-  if (!validate_path(path, safe, sizeof(safe))) {
-    return error_json(HTTP_STATUS_403_FORBIDDEN, "Forbidden path");
+  if (!http_api_validate_path(path, safe, sizeof(safe))) {
+    return http_api_error_json(HTTP_STATUS_403_FORBIDDEN, "Forbidden path");
   }
 
   DIR *dir = opendir(safe);
   if (dir == NULL) {
-    return error_json(HTTP_STATUS_404_NOT_FOUND, "Directory not found");
+    return http_api_error_json(HTTP_STATUS_404_NOT_FOUND, "Directory not found");
   }
 
   /* Allocate a generous output buffer — tree JSON can be large */
@@ -3100,7 +2519,7 @@ static http_response_t *api_disk_tree(const http_request_t *request) {
   char *body = (char *)malloc(cap);
   if (body == NULL) {
     closedir(dir);
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
   }
 
   size_t pos = 0;
@@ -3110,7 +2529,7 @@ static http_response_t *api_disk_tree(const http_request_t *request) {
   dirname = (dirname && dirname[1] != '\0') ? dirname + 1 : safe;
 
   pos += (size_t)snprintf(body + pos, cap - pos, "{\"name\":\"");
-  (void)json_escape_append(body, cap, &pos, dirname);
+  (void)http_api_json_escape_append(body, cap, &pos, dirname);
   pos += (size_t)snprintf(body + pos, cap - pos,
                           "\",\"type\":\"directory\",\"children\":[");
 
@@ -3170,7 +2589,7 @@ static http_response_t *api_disk_tree(const http_request_t *request) {
     /* Append child entry */
     size_t name_start = pos;
     pos += (size_t)snprintf(body + pos, cap - pos, "{\"name\":\"");
-    (void)json_escape_append(body, cap, &pos, ent->d_name);
+    (void)http_api_json_escape_append(body, cap, &pos, ent->d_name);
     pos +=
         (size_t)snprintf(body + pos, cap - pos,
                          "\",\"type\":\"%s\",\"size\":%" PRIu64 "}", type, sz);
@@ -3221,7 +2640,7 @@ static http_response_t *api_processes(const http_request_t *request) {
   size_t cap = 256 * 1024; /* 256 KB */
   char *body = (char *)malloc(cap);
   if (body == NULL) {
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
   }
 
   size_t pos = 0;
@@ -3271,7 +2690,7 @@ static http_response_t *api_processes(const http_request_t *request) {
 
           pos += (size_t)snprintf(body + pos, cap - pos,
                                   "{\"pid\":%d,\"name\":\"", (int)pid);
-          (void)json_escape_append(body, cap, &pos, name);
+          (void)http_api_json_escape_append(body, cap, &pos, name);
           pos += (size_t)snprintf(
               body + pos, cap - pos,
               "\",\"user\":\"%u\",\"cpu\":0.0,\"mem_mb\":%" PRIu64
@@ -3371,7 +2790,7 @@ static http_response_t *api_processes(const http_request_t *request) {
 
       pos += (size_t)snprintf(body + pos, cap - pos, "{\"pid\":%d,\"name\":\"",
                               pid);
-      (void)json_escape_append(body, cap, &pos, comm);
+      (void)http_api_json_escape_append(body, cap, &pos, comm);
       pos += (size_t)snprintf(
           body + pos, cap - pos,
           "\",\"user\":\"%u\",\"cpu\":%.1f,\"mem_mb\":%" PRIu64
@@ -3433,28 +2852,28 @@ static int parse_pid_from_body(const char *body, size_t len, int *out_pid) {
 static http_response_t *api_process_kill(const http_request_t *request) {
 #if ENABLE_WEB_UPLOAD
   if (http_csrf_validate(request) != 0) {
-    return error_json(HTTP_STATUS_403_FORBIDDEN,
+    return http_api_error_json(HTTP_STATUS_403_FORBIDDEN,
                       "Invalid or missing CSRF token");
   }
 #endif
   if (request->method != HTTP_METHOD_POST) {
-    return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED, "Use POST");
+    return http_api_error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED, "Use POST");
   }
 
   int pid = 0;
   if (parse_pid_from_body(request->body, request->body_length, &pid) != 0) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing or invalid pid");
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing or invalid pid");
   }
 
   /* Safety: never kill PID 1 or negative PIDs */
   if (pid <= 1) {
-    return error_json(HTTP_STATUS_403_FORBIDDEN, "Cannot kill system process");
+    return http_api_error_json(HTTP_STATUS_403_FORBIDDEN, "Cannot kill system process");
   }
 
   if (kill((pid_t)pid, SIGTERM) != 0) {
     char msg[64];
     snprintf(msg, sizeof(msg), "kill failed: %s", strerror(errno));
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, msg);
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, msg);
   }
 
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
@@ -4686,7 +4105,7 @@ static int append_installed_entries_from_base(const char *base,
                                                 sizeof(icon_path)) == 0);
 
     if (!*first) {
-      if (buf_append_cstr(body, cap, pos, ",") != 0) {
+      if (http_api_buf_append_cstr(body, cap, pos, ",") != 0) {
         closedir(dir);
         return -1;
       }
@@ -4694,17 +4113,17 @@ static int append_installed_entries_from_base(const char *base,
     *first = 0;
     (*count_added)++;
 
-    if (buf_append_cstr(body, cap, pos, "{\"id\":\"") != 0 ||
-        json_escape_append(body, cap, pos, title_id) != 0 ||
-        buf_append_cstr(body, cap, pos, "\",\"name\":\"") != 0 ||
-        json_escape_append(body, cap, pos, title_name) != 0 ||
-        buf_append_cstr(body, cap, pos, "\",\"path\":\"") != 0 ||
-        json_escape_append(body, cap, pos, app_dir) != 0 ||
-        buf_append_cstr(body, cap, pos, "\",\"source\":\"") != 0 ||
-        json_escape_append(body, cap, pos, base) != 0 ||
-        buf_append_cstr(body, cap, pos, "\",\"has_icon\":") != 0 ||
-        buf_append_cstr(body, cap, pos, has_icon ? "true" : "false") != 0 ||
-        buf_append_cstr(body, cap, pos, "}") != 0) {
+    if (http_api_buf_append_cstr(body, cap, pos, "{\"id\":\"") != 0 ||
+        http_api_json_escape_append(body, cap, pos, title_id) != 0 ||
+        http_api_buf_append_cstr(body, cap, pos, "\",\"name\":\"") != 0 ||
+        http_api_json_escape_append(body, cap, pos, title_name) != 0 ||
+        http_api_buf_append_cstr(body, cap, pos, "\",\"path\":\"") != 0 ||
+        http_api_json_escape_append(body, cap, pos, app_dir) != 0 ||
+        http_api_buf_append_cstr(body, cap, pos, "\",\"source\":\"") != 0 ||
+        http_api_json_escape_append(body, cap, pos, base) != 0 ||
+        http_api_buf_append_cstr(body, cap, pos, "\",\"has_icon\":") != 0 ||
+        http_api_buf_append_cstr(body, cap, pos, has_icon ? "true" : "false") != 0 ||
+        http_api_buf_append_cstr(body, cap, pos, "}") != 0) {
       closedir(dir);
       return -1;
     }
@@ -4857,11 +4276,11 @@ static int extract_title_id_from_game_image(const char *safe_path,
 static http_response_t *api_game_meta(const http_request_t *request) {
   const char *query = strchr(request->uri, '?');
   char path[1024] = "/";
-  if (query) (void)parse_path_param(query, path, sizeof(path));
+  if (query) (void)http_api_parse_path_param(query, path, sizeof(path));
 
   char safe[FTP_PATH_MAX];
-  if (!validate_path(path, safe, sizeof(safe))) {
-    return error_json(HTTP_STATUS_403_FORBIDDEN, "Path traversal blocked");
+  if (!http_api_validate_path(path, safe, sizeof(safe))) {
+    return http_api_error_json(HTTP_STATUS_403_FORBIDDEN, "Path traversal blocked");
   }
 
   char title_id[64]    = "";
@@ -4942,7 +4361,7 @@ static http_response_t *api_game_meta(const http_request_t *request) {
     /* 2. Fall back to exFAT image */
     exfat_context_t ctx;
     if (exfat_init(&ctx, safe) != 0) {
-      return error_json(HTTP_STATUS_400_BAD_REQUEST, "Not a valid PKG or exFAT image");
+      return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Not a valid PKG or exFAT image");
     }
 
     /* Scan root directory for sce_sys */
@@ -5052,7 +4471,7 @@ static http_response_t *api_game_meta(const http_request_t *request) {
   char *body = (char *)malloc(body_cap);
   if (!body) {
     if (icon_data) free(icon_data);
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
   }
 
   int blen = snprintf(body, body_cap,
@@ -5071,11 +4490,11 @@ static http_response_t *api_game_meta(const http_request_t *request) {
 static http_response_t *api_game_icon(const http_request_t *request) {
   const char *query = strchr(request->uri, '?');
   char path[1024] = "/";
-  if (query) (void)parse_path_param(query, path, sizeof(path));
+  if (query) (void)http_api_parse_path_param(query, path, sizeof(path));
 
   char safe[FTP_PATH_MAX];
-  if (!validate_path(path, safe, sizeof(safe))) {
-    return error_json(HTTP_STATUS_403_FORBIDDEN, "Path traversal blocked");
+  if (!http_api_validate_path(path, safe, sizeof(safe))) {
+    return http_api_error_json(HTTP_STATUS_403_FORBIDDEN, "Path traversal blocked");
   }
 
   uint8_t *icon_data = NULL;
@@ -5110,7 +4529,7 @@ static http_response_t *api_game_icon(const http_request_t *request) {
     /* 2. Fall back to exFAT image */
     exfat_context_t ctx;
     if (exfat_init(&ctx, safe) != 0) {
-      return error_json(HTTP_STATUS_400_BAD_REQUEST, "Not a valid PKG or exFAT image");
+      return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Not a valid PKG or exFAT image");
     }
 
     exfat_file_info_t root_entries[GAME_META_MAX_ENTRIES];
@@ -5150,7 +4569,7 @@ static http_response_t *api_game_icon(const http_request_t *request) {
   }
 
   if (!icon_data || icon_size == 0) {
-    return error_json(HTTP_STATUS_404_NOT_FOUND, "Icon not found in image");
+    return http_api_error_json(HTTP_STATUS_404_NOT_FOUND, "Icon not found in image");
   }
 
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
@@ -5160,7 +4579,7 @@ static http_response_t *api_game_icon(const http_request_t *request) {
   if (http_response_set_body_owned(resp, icon_data, icon_size) != 0) {
     free(icon_data);
     http_response_destroy(resp);
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Failed to send icon");
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Failed to send icon");
   }
   return resp;
 }
@@ -5314,18 +4733,18 @@ static void *extract_thread(void *arg) {
 
 static http_response_t *api_extract(const http_request_t *request) {
   if (request->method != HTTP_METHOD_POST) {
-    return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED, "Use POST");
+    return http_api_error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED, "Use POST");
   }
 
   if (g_extract.active) {
-    return error_json(HTTP_STATUS_409_CONFLICT, "Extraction already in progress");
+    return http_api_error_json(HTTP_STATUS_409_CONFLICT, "Extraction already in progress");
   }
 
   const char *query = strchr(request->uri, '?');
   char path[1024] = "";
   char dst[1024] = "/";
   if (query) {
-    (void)parse_path_param(query, path, sizeof(path));
+    (void)http_api_parse_path_param(query, path, sizeof(path));
     /* Parse dst param with URL decoding (%XX → byte) */
     const char *dp = strstr(query, "dst=");
     if (dp) {
@@ -5354,19 +4773,19 @@ static http_response_t *api_extract(const http_request_t *request) {
   }
 
   if (!path[0]) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing path parameter");
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing path parameter");
   }
 
   char safe_path[FTP_PATH_MAX];
   char safe_dst[FTP_PATH_MAX];
-  if (!validate_path(path, safe_path, sizeof(safe_path)) ||
-      !validate_path(dst, safe_dst, sizeof(safe_dst))) {
-    return error_json(HTTP_STATUS_403_FORBIDDEN, "Path traversal blocked");
+  if (!http_api_validate_path(path, safe_path, sizeof(safe_path)) ||
+      !http_api_validate_path(dst, safe_dst, sizeof(safe_dst))) {
+    return http_api_error_json(HTTP_STATUS_403_FORBIDDEN, "Path traversal blocked");
   }
 
 #if !defined(ENABLE_LIBARCHIVE) || !ENABLE_LIBARCHIVE
   if (!path_has_extension(safe_path, ".zip")) {
-    return error_json(HTTP_STATUS_415_UNSUPPORTED_MEDIA_TYPE,
+    return http_api_error_json(HTTP_STATUS_415_UNSUPPORTED_MEDIA_TYPE,
                       "This build can extract .zip files only; enable libarchive for .7z/.rar/.tar/.gz");
   }
 #endif
@@ -5395,7 +4814,7 @@ static http_response_t *api_extract(const http_request_t *request) {
   if (pthread_create(&tid, &attr, extract_thread, NULL) != 0) {
     g_extract.active = 0;
     pthread_attr_destroy(&attr);
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Failed to start extraction thread");
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Failed to start extraction thread");
   }
   pthread_attr_destroy(&attr);
 
@@ -5415,7 +4834,7 @@ static http_response_t *api_extract(const http_request_t *request) {
     if (pthread_create(&tid, &attr, extract_thread_builtin, NULL) != 0) {
       g_extract.active = 0;
       pthread_attr_destroy(&attr);
-      return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Failed to start extraction thread");
+      return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Failed to start extraction thread");
     }
     pthread_attr_destroy(&attr);
   }
@@ -5452,7 +4871,7 @@ static http_response_t *api_extract_progress(const http_request_t *request) {
 
 static http_response_t *api_extract_cancel(const http_request_t *request) {
   if (request->method != HTTP_METHOD_POST) {
-    return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED, "Use POST");
+    return http_api_error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED, "Use POST");
   }
   g_extract.cancelled = 1;
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
@@ -5477,7 +4896,7 @@ static int dl_is_directory_path(const char *path) {
 static int dl_try_destination(const char *candidate, char *safe,
                               size_t safe_size) {
   if (candidate == NULL || candidate[0] == '\0') return 0;
-  if (!validate_path(candidate, safe, safe_size)) return 0;
+  if (!http_api_validate_path(candidate, safe, safe_size)) return 0;
   return dl_is_directory_path(safe);
 }
 
@@ -5493,8 +4912,8 @@ static int dl_normalize_destination(const char *requested, char *safe,
   }
 #endif
   if (dl_try_destination(requested, safe, safe_size)) return 1;
-  if (g_http_root[0] != '\0' && strcmp(g_http_root, "/") != 0 &&
-      dl_try_destination(g_http_root, safe, safe_size)) return 1;
+  if (http_api_get_root()[0] != '\0' && strcmp(http_api_get_root(), "/") != 0 &&
+      dl_try_destination(http_api_get_root(), safe, safe_size)) return 1;
   return 0;
 }
 
@@ -5550,21 +4969,21 @@ static int json_body_int(const http_request_t *request, const char *key,
 
 static http_response_t *api_dl_start(const http_request_t *request) {
   if (request->method != HTTP_METHOD_POST)
-    return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED, "Use POST");
+    return http_api_error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED, "Use POST");
 
   char url[TRANSFER_URL_MAX];
   char dst[TRANSFER_PATH_MAX];
   if (!json_body_string(request, "url", url, sizeof(url)) || url[0] == '\0')
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing url parameter");
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing url parameter");
   if (!json_body_string(request, "dst", dst, sizeof(dst))) dst[0] = '\0';
 
   char reason[TRANSFER_ERROR_MAX];
   if (!transfer_url_supported(url, reason, sizeof(reason)))
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, reason);
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, reason);
 
   char safe_dst[FTP_PATH_MAX];
   if (!dl_normalize_destination(dst, safe_dst, sizeof(safe_dst)))
-    return error_json(HTTP_STATUS_403_FORBIDDEN,
+    return http_api_error_json(HTTP_STATUS_403_FORBIDDEN,
                       "Invalid or read-only destination path");
 
   int id = 0;
@@ -5572,7 +4991,7 @@ static http_response_t *api_dl_start(const http_request_t *request) {
   char error[TRANSFER_ERROR_MAX];
   if (transfer_start(url, safe_dst, &id, name, sizeof(name), error,
                      sizeof(error)) != 0)
-    return error_json(HTTP_STATUS_409_CONFLICT,
+    return http_api_error_json(HTTP_STATUS_409_CONFLICT,
                       error[0] != '\0' ? error : "Failed to start transfer");
 
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
@@ -5580,7 +4999,7 @@ static http_response_t *api_dl_start(const http_request_t *request) {
   char esc_name[TRANSFER_NAME_MAX * 2U];
   size_t esc_pos = 0U;
   esc_name[0] = '\0';
-  (void)json_escape_append(esc_name, sizeof(esc_name), &esc_pos, name);
+  (void)http_api_json_escape_append(esc_name, sizeof(esc_name), &esc_pos, name);
   esc_name[(esc_pos < sizeof(esc_name)) ? esc_pos : sizeof(esc_name) - 1U] = '\0';
   char body[768];
   int len = snprintf(body, sizeof(body),
@@ -5607,11 +5026,11 @@ static http_response_t *api_dl_status(const http_request_t *request) {
     char esc_name[512], esc_url[4096], esc_error[512];
     size_t ep = 0U;
     esc_name[0] = esc_url[0] = esc_error[0] = '\0';
-    (void)json_escape_append(esc_name, sizeof(esc_name), &ep, s->filename);
+    (void)http_api_json_escape_append(esc_name, sizeof(esc_name), &ep, s->filename);
     esc_name[ep < sizeof(esc_name) ? ep : sizeof(esc_name) - 1U] = '\0';
-    ep = 0U; (void)json_escape_append(esc_url, sizeof(esc_url), &ep, s->url);
+    ep = 0U; (void)http_api_json_escape_append(esc_url, sizeof(esc_url), &ep, s->url);
     esc_url[ep < sizeof(esc_url) ? ep : sizeof(esc_url) - 1U] = '\0';
-    ep = 0U; (void)json_escape_append(esc_error, sizeof(esc_error), &ep,
+    ep = 0U; (void)http_api_json_escape_append(esc_error, sizeof(esc_error), &ep,
                                       s->error ? s->error_msg : "");
     esc_error[ep < sizeof(esc_error) ? ep : sizeof(esc_error) - 1U] = '\0';
     unsigned progress = s->total_size > 0U
@@ -5626,14 +5045,14 @@ static http_response_t *api_dl_status(const http_request_t *request) {
         s->downloaded, s->total_size, s->speed, s->done ? "true" : "false",
         esc_error, s->paused ? "true" : "false");
     if (n < 0 || (size_t)n >= sizeof(body) - pos) {
-      return error_json(HTTP_STATUS_500_INTERNAL_ERROR,
+      return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR,
                         "Transfer status response too large");
     }
     pos += (size_t)n;
   }
   n = snprintf(body + pos, sizeof(body) - pos, "]}");
   if (n < 0 || (size_t)n >= sizeof(body) - pos)
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR,
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR,
                       "Transfer status response too large");
   pos += (size_t)n;
   http_response_set_body(resp, body, pos);
@@ -5642,12 +5061,12 @@ static http_response_t *api_dl_status(const http_request_t *request) {
 
 static http_response_t *api_dl_pause(const http_request_t *request) {
   if (request->method != HTTP_METHOD_POST)
-    return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED, "Use POST");
+    return http_api_error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED, "Use POST");
   int id = 0, paused = 0;
   if (!json_body_int(request, "id", &id))
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing download id");
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing download id");
   if (transfer_toggle_pause(id, &paused) != 0)
-    return error_json(HTTP_STATUS_404_NOT_FOUND, "Transfer not found");
+    return http_api_error_json(HTTP_STATUS_404_NOT_FOUND, "Transfer not found");
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
   http_response_add_header(resp, "Content-Type", "application/json");
   char body[64];
@@ -5659,13 +5078,13 @@ static http_response_t *api_dl_pause(const http_request_t *request) {
 
 static http_response_t *api_dl_cancel(const http_request_t *request) {
   if (request->method != HTTP_METHOD_POST)
-    return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED, "Use POST");
+    return http_api_error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED, "Use POST");
   int id = 0;
   if (!json_body_int(request, "id", &id))
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing download id");
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing download id");
   if (transfer_cancel(id) != 0)
-    return error_json(HTTP_STATUS_404_NOT_FOUND, "Transfer not found");
-  return status_json_200(1, "Transfer cancellation requested", id);
+    return http_api_error_json(HTTP_STATUS_404_NOT_FOUND, "Transfer not found");
+  return http_api_status_json_200(1, "Transfer cancellation requested", id);
 }
 
 /*===========================================================================*
@@ -5727,7 +5146,7 @@ static http_response_t *serve_static(const http_request_t *request) {
 
   /* Block path traversal */
   if (strstr(path, "..") != NULL) {
-    return error_json(HTTP_STATUS_403_FORBIDDEN, "Path traversal blocked");
+    return http_api_error_json(HTTP_STATUS_403_FORBIDDEN, "Path traversal blocked");
   }
 
   /* Look up embedded resource */
@@ -5761,7 +5180,7 @@ static http_response_t *serve_static(const http_request_t *request) {
     char *buf = (char *)malloc(buf_size);
     if (buf == NULL) {
       http_response_destroy(resp);
-      return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+      return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
     }
 
     memcpy(buf, (const char *)raw_data, raw_size);
@@ -5808,7 +5227,7 @@ static http_response_t *serve_static(const http_request_t *request) {
             if (tmp == NULL) {
               free(buf);
               http_response_destroy(resp);
-              return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+              return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
             }
             buf = tmp;
             buf_size = new_size;
@@ -5827,70 +5246,8 @@ static http_response_t *serve_static(const http_request_t *request) {
     }
     free(buf);
     http_response_destroy(resp);
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Body allocation failed");
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Body allocation failed");
   }
-}
-
-/*===========================================================================*
- * ERROR HELPERS
- *===========================================================================*/
-
-static http_response_t *error_json(http_status_t code, const char *message) {
-  http_response_t *resp = http_response_create(code);
-  http_response_add_header(resp, "Content-Type", "application/json");
-  http_response_add_header(resp, "Access-Control-Allow-Origin", "*");
-
-  char body[512];
-  int len = snprintf(body, sizeof(body), "{\"error\":\"%s\"}", message);
-
-  http_response_set_body(resp, body, (size_t)len);
-  return resp;
-}
-
-static http_response_t *status_json_200(int ok, const char *message,
-                                        int code) {
-  if (message == NULL) {
-    message = ok ? "ok" : "error";
-  }
-  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
-  http_response_add_header(resp, "Content-Type", "application/json");
-  http_response_add_header(resp, "Cache-Control", "no-store");
-
-  char body[512];
-  int n = snprintf(body, sizeof(body),
-                   "{\"ok\":%s,\"status\":\"%s\",\"message\":\"%s\",\"code\":%d}",
-                   ok ? "true" : "false", ok ? "ok" : "error", message,
-                   code);
-  http_response_set_body(resp, body, (size_t)n);
-  return resp;
-}
-
-static http_response_t *png_fallback_response(void) {
-  static const uint8_t k_png_1x1[] = {
-      0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00,
-      0x0D, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
-      0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89,
-      0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63,
-      0x60, 0x60, 0x60, 0xF8, 0x0F, 0x00, 0x01, 0x04, 0x01, 0x00, 0x5F,
-      0xE2, 0x26, 0x05, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44,
-      0xAE, 0x42, 0x60, 0x82};
-
-  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
-  http_response_add_header(resp, "Content-Type", "image/png");
-  http_response_add_header(resp, "Cache-Control", "public, max-age=3600");
-  http_response_set_body(resp, k_png_1x1, sizeof(k_png_1x1));
-  return resp;
-}
-
-static http_response_t *api_legacy_disabled_json(const char *json_body) {
-  if (json_body == NULL) {
-    json_body = "{\"ok\":false}";
-  }
-  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
-  http_response_add_header(resp, "Content-Type", "application/json");
-  http_response_add_header(resp, "Cache-Control", "no-store");
-  http_response_set_body(resp, json_body, strlen(json_body));
-  return resp;
 }
 
 /*===========================================================================*
@@ -5925,24 +5282,24 @@ static http_response_t *api_legacy_disabled_json(const char *json_body) {
  */
 static http_response_t *api_network_reset(const http_request_t *request) {
   if (request == NULL) {
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Null request");
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Null request");
   }
 
   /* Only POST is accepted */
   if (request->method != HTTP_METHOD_POST) {
-    return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED,
+    return http_api_error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED,
                       "Use POST /api/network/reset");
   }
 
   char body[128];
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
   if (resp == NULL) {
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "OOM");
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "OOM");
   }
   http_response_add_header(resp, "Content-Type", "application/json");
   http_response_add_header(resp, "Cache-Control", "no-store");
 
-  if (g_ftp_server_ctx == NULL) {
+  if (http_api_server_ctx() == NULL) {
     /*
      * HTTP server running without an attached FTP context (unlikely in
      * production, but handle it gracefully).  Send a PAL notification so
@@ -5956,7 +5313,7 @@ static http_response_t *api_network_reset(const http_request_t *request) {
   }
 
   int rc =
-      pal_network_reset_ftp_stack(g_ftp_server_ctx->sessions, FTP_MAX_SESSIONS);
+      pal_network_reset_ftp_stack(http_api_server_ctx()->sessions, FTP_MAX_SESSIONS);
 
   if (rc == 0) {
     pal_notification_send("zftpd: network stack reset OK");
@@ -5985,12 +5342,12 @@ static http_response_t *api_network_reset(const http_request_t *request) {
 static http_response_t *api_admin_fan(const http_request_t *request) {
   const char *query = strchr(request->uri, '?');
   if (!query) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing threshold parameter");
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing threshold parameter");
   }
 
   int threshold = 0;
   if (sscanf(query, "?threshold=%d", &threshold) != 1) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Invalid threshold parameter format");
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Invalid threshold parameter format");
   }
 
   /* Clamp to safe operating values */
@@ -6000,7 +5357,7 @@ static http_response_t *api_admin_fan(const http_request_t *request) {
 #ifndef _WIN32
   int fd = open("/dev/icc_fan", O_RDONLY, 0);
   if (fd < 0) {
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Failed to open /dev/icc_fan (Unsupported OS)");
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Failed to open /dev/icc_fan (Unsupported OS)");
   }
 
   char data[10] = {0x00, 0x00, 0x00, 0x00, 0x00, (char)threshold, 0x00, 0x00, 0x00, 0x00};
@@ -6008,7 +5365,7 @@ static http_response_t *api_admin_fan(const http_request_t *request) {
   close(fd);
 
   if (ret < 0) {
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Fan control ioctl failed");
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Fan control ioctl failed");
   }
 #else
   /* Mock for development environments */
@@ -6033,7 +5390,7 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
 
   const char *query = strchr(request->uri, '?');
   if (query == NULL) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing query string");
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing query string");
   }
 
   const char *id_param = strstr(query, "id=");
@@ -6042,7 +5399,7 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
     size_t id_len = 0U;
     while ((id_param[id_len] != '\0') && (id_param[id_len] != '&')) {
       if (id_len >= (sizeof(title_id) - 1U)) {
-        return error_json(HTTP_STATUS_400_BAD_REQUEST,
+        return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST,
                           "'id' parameter too long");
       }
       title_id[id_len] = id_param[id_len];
@@ -6051,19 +5408,19 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
     title_id[id_len] = '\0';
   } else {
     char path[1024] = "";
-    if (parse_path_param(query, path, sizeof(path)) != 0) {
-      return error_json(HTTP_STATUS_400_BAD_REQUEST,
+    if (http_api_parse_path_param(query, path, sizeof(path)) != 0) {
+      return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST,
                         "Missing 'id' or valid 'path' parameter");
     }
 
     char safe[FTP_PATH_MAX];
-    if (!validate_path(path, safe, sizeof(safe))) {
-      return error_json(HTTP_STATUS_403_FORBIDDEN, "Path traversal blocked");
+    if (!http_api_validate_path(path, safe, sizeof(safe))) {
+      return http_api_error_json(HTTP_STATUS_403_FORBIDDEN, "Path traversal blocked");
     }
 
     if (extract_title_id_from_game_image(safe, title_id, sizeof(title_id)) != 0) {
       if (extract_title_id_from_app_dir(safe, title_id, sizeof(title_id)) != 0) {
-        return error_json(HTTP_STATUS_400_BAD_REQUEST,
+        return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST,
                           "Unable to resolve TITLE_ID from image/app path");
       }
     }
@@ -6071,7 +5428,7 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
 
   if (title_id[0] == '\0') {
     launch_diag_log("input", title_id, -1, "missing launch target");
-    return error_json(HTTP_STATUS_400_BAD_REQUEST,
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST,
                       "Missing or invalid launch target");
   }
 
@@ -6080,7 +5437,7 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
     unsigned char c = (unsigned char)title_id[i];
     if (!(isalnum(c) || c == '_' || c == '-')) {
       launch_diag_log("input", title_id, -2, "invalid title id format");
-      return error_json(HTTP_STATUS_400_BAD_REQUEST, "Invalid title id format");
+      return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Invalid title id format");
     }
     title_id[i] = (char)toupper(c);
   }
@@ -6091,7 +5448,7 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
                                          sizeof(installed_app_dir)) != 0) {
     launch_diag_log("preflight_fs", title_id, -30,
                     "title id not found in installed app directories");
-    return status_json_200(0,
+    return http_api_status_json_200(0,
                            "Launch blocked: title not installed on this console",
                            -30);
   }
@@ -6440,7 +5797,7 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
         dlclose(lncUtil);
       if (sysService != NULL)
         dlclose(sysService);
-      return status_json_200(
+      return http_api_status_json_200(
           0,
           "Launch API unavailable (sceLncUtilLaunchApp/sceSystemServiceLaunchApp)",
           -3);
@@ -6456,7 +5813,7 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
         dlclose(lncUtil);
       if (sysService != NULL)
         dlclose(sysService);
-      return status_json_200(
+      return http_api_status_json_200(
           0,
           "Launch blocked: PS4 LncUtil unavailable (SystemService fallback can crash ShellUI)",
           -4);
@@ -6473,7 +5830,7 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
           dlclose(userService);
         if (lncUtil != NULL)
           dlclose(lncUtil);
-        return status_json_200(0, "Failed to initialize Launch API", init_rc);
+        return http_api_status_json_200(0, "Failed to initialize Launch API", init_rc);
       }
     }
 
@@ -6552,7 +5909,7 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
         dlclose(lncUtil);
       if (sysService != NULL)
         dlclose(sysService);
-      return status_json_200(
+      return http_api_status_json_200(
           0,
           "Launch blocked: no logged-in user context (prevents ShellUI crash)",
           -21);
@@ -6819,7 +6176,7 @@ static http_response_t *api_admin_launch(const http_request_t *request) {
 
     (void)snprintf(msg, sizeof(msg), "Launch failed: 0x%08X", res);
   launch_diag_log("done", title_id, (int)res, msg);
-    return status_json_200(0, msg, (int)res);
+    return http_api_status_json_200(0, msg, (int)res);
 #else
     /* Mock fallback for local tests */
     char debug_msg[128];
@@ -6837,14 +6194,14 @@ static http_response_t *api_games_installed(const http_request_t *request) {
   enum { GAMES_BODY_CAP = 512U * 1024U };
   char *body = (char *)malloc(GAMES_BODY_CAP);
   if (body == NULL) {
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
   }
 
   size_t pos = 0U;
-  if (buf_append_cstr(body, GAMES_BODY_CAP, &pos,
+  if (http_api_buf_append_cstr(body, GAMES_BODY_CAP, &pos,
                       "{\"ok\":true,\"entries\":[") != 0) {
     free(body);
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
   }
 
   int first = 1;
@@ -6856,26 +6213,26 @@ static http_response_t *api_games_installed(const http_request_t *request) {
                                            &pos, &first,
                                            &count_added) != 0) {
       free(body);
-      return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Response too large");
+      return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Response too large");
     }
   }
 
-  if (buf_append_cstr(body, GAMES_BODY_CAP, &pos, "]}") != 0) {
+  if (http_api_buf_append_cstr(body, GAMES_BODY_CAP, &pos, "]}") != 0) {
     free(body);
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Response too large");
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Response too large");
   }
 
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
   if (resp == NULL) {
     free(body);
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
   }
   http_response_add_header(resp, "Content-Type", "application/json");
   http_response_add_header(resp, "Cache-Control", "no-store");
   if (http_response_set_body_owned(resp, body, pos) != 0) {
     free(body);
     http_response_destroy(resp);
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Body allocation failed");
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Body allocation failed");
   }
   return resp;
 }
@@ -6883,11 +6240,11 @@ static http_response_t *api_games_installed(const http_request_t *request) {
 static http_response_t *api_games_icon(const http_request_t *request) {
   const char *query = strchr(request->uri, '?');
   if (query == NULL) {
-    return png_fallback_response();
+    return http_api_png_fallback_response();
   }
 
   char title_id[64] = {0};
-  if (parse_query_param(query, "id", title_id, sizeof(title_id)) != 0) {
+  if (http_api_parse_query_param(query, "id", title_id, sizeof(title_id)) != 0) {
     title_id[0] = '\0';
   }
   if (title_id[0] != '\0') {
@@ -6902,43 +6259,43 @@ static http_response_t *api_games_icon(const http_request_t *request) {
   }
 
   char path_hint[FTP_PATH_MAX] = {0};
-  (void)parse_query_param(query, "path", path_hint, sizeof(path_hint));
+  (void)http_api_parse_query_param(query, "path", path_hint, sizeof(path_hint));
 
   char icon_path[FTP_PATH_MAX] = {0};
   if (resolve_installed_icon_path((title_id[0] != '\0') ? title_id : NULL,
                                   (path_hint[0] != '\0') ? path_hint : NULL,
                                   icon_path, sizeof(icon_path)) != 0) {
-    return png_fallback_response();
+    return http_api_png_fallback_response();
   }
 
   FILE *fp = fopen(icon_path, "rb");
   if (fp == NULL) {
-    return png_fallback_response();
+    return http_api_png_fallback_response();
   }
   if (fseek(fp, 0, SEEK_END) != 0) {
     fclose(fp);
-    return png_fallback_response();
+    return http_api_png_fallback_response();
   }
   long flen = ftell(fp);
   if (flen <= 0 || flen > (8 * 1024 * 1024)) {
     fclose(fp);
-    return png_fallback_response();
+    return http_api_png_fallback_response();
   }
   if (fseek(fp, 0, SEEK_SET) != 0) {
     fclose(fp);
-    return png_fallback_response();
+    return http_api_png_fallback_response();
   }
 
   uint8_t *buf = (uint8_t *)malloc((size_t)flen);
   if (buf == NULL) {
     fclose(fp);
-    return png_fallback_response();
+    return http_api_png_fallback_response();
   }
   size_t got = fread(buf, 1, (size_t)flen, fp);
   fclose(fp);
   if (got != (size_t)flen) {
     free(buf);
-    return png_fallback_response();
+    return http_api_png_fallback_response();
   }
 
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
@@ -6947,7 +6304,7 @@ static http_response_t *api_games_icon(const http_request_t *request) {
   if (http_response_set_body_owned(resp, buf, got) != 0) {
     free(buf);
     http_response_destroy(resp);
-    return png_fallback_response();
+    return http_api_png_fallback_response();
   }
   return resp;
 }
@@ -6965,16 +6322,16 @@ static http_response_t *api_games_repair_visibility(const http_request_t *reques
   char requested_id[32] = {0};
   const char *query = strchr(request->uri, '?');
   if (query != NULL) {
-    (void)parse_query_param(query, "id", requested_id, sizeof(requested_id));
+    (void)http_api_parse_query_param(query, "id", requested_id, sizeof(requested_id));
     for (size_t i = 0; requested_id[i] != '\0'; i++) {
       requested_id[i] = (char)toupper((unsigned char)requested_id[i]);
     }
   }
 
-  if (buf_append_cstr(body, sizeof(body), &pos,
+  if (http_api_buf_append_cstr(body, sizeof(body), &pos,
                       "{\"ok\":true,\"message\":\"Visibility reindex completed\",\"scanned\":[") !=
       0) {
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Out of memory");
   }
 
   const char *bases[] = {"/user/app", "/system_ex/app", "/mnt/ext0/user/app",
@@ -7059,12 +6416,12 @@ static http_response_t *api_games_repair_visibility(const http_request_t *reques
 
   for (size_t i = 0; bases[i] != NULL; i++) {
     if (!first) {
-      (void)buf_append_cstr(body, sizeof(body), &pos, ",");
+      (void)http_api_buf_append_cstr(body, sizeof(body), &pos, ",");
     }
     first = 0;
-    (void)buf_append_cstr(body, sizeof(body), &pos, "\"");
-    (void)json_escape_append(body, sizeof(body), &pos, bases[i]);
-    (void)buf_append_cstr(body, sizeof(body), &pos, "\"");
+    (void)http_api_buf_append_cstr(body, sizeof(body), &pos, "\"");
+    (void)http_api_json_escape_append(body, sizeof(body), &pos, bases[i]);
+    (void)http_api_buf_append_cstr(body, sizeof(body), &pos, "\"");
 
     DIR *d = opendir(bases[i]);
     if (d != NULL) {
@@ -7079,48 +6436,48 @@ static http_response_t *api_games_repair_visibility(const http_request_t *reques
     }
   }
 
-  (void)buf_append_cstr(body, sizeof(body), &pos, "],\"items_seen\":");
+  (void)http_api_buf_append_cstr(body, sizeof(body), &pos, "],\"items_seen\":");
   {
     char num[32];
     int n = snprintf(num, sizeof(num), "%zu", count_added);
     if (n > 0 && (size_t)n < sizeof(num)) {
-      (void)buf_append_bytes(body, sizeof(body), &pos, num, (size_t)n);
+      (void)http_api_buf_append_bytes(body, sizeof(body), &pos, num, (size_t)n);
     }
   }
-  (void)buf_append_cstr(body, sizeof(body), &pos, ",\"hints\":[");
-  (void)buf_append_cstr(body, sizeof(body), &pos,
+  (void)http_api_buf_append_cstr(body, sizeof(body), &pos, ",\"hints\":[");
+  (void)http_api_buf_append_cstr(body, sizeof(body), &pos,
                         "\"Use Refresh Installed in Games tab\",");
-  (void)buf_append_cstr(body, sizeof(body), &pos,
+  (void)http_api_buf_append_cstr(body, sizeof(body), &pos,
                         "\"If titles still missing, restart shell/console\"");
-  (void)buf_append_cstr(body, sizeof(body), &pos, "],\"sqlite_repair\":{");
-  (void)buf_append_cstr(body, sizeof(body), &pos, "\"available\":");
-  (void)buf_append_cstr(body, sizeof(body), &pos,
+  (void)http_api_buf_append_cstr(body, sizeof(body), &pos, "],\"sqlite_repair\":{");
+  (void)http_api_buf_append_cstr(body, sizeof(body), &pos, "\"available\":");
+  (void)http_api_buf_append_cstr(body, sizeof(body), &pos,
                         sqlite_available ? "true" : "false");
-  (void)buf_append_cstr(body, sizeof(body), &pos, ",\"titles\":");
+  (void)http_api_buf_append_cstr(body, sizeof(body), &pos, ",\"titles\":");
   {
     char num[32];
     int n = snprintf(num, sizeof(num), "%d", repaired_titles);
     if (n > 0 && (size_t)n < sizeof(num)) {
-      (void)buf_append_bytes(body, sizeof(body), &pos, num, (size_t)n);
+      (void)http_api_buf_append_bytes(body, sizeof(body), &pos, num, (size_t)n);
     }
   }
-  (void)buf_append_cstr(body, sizeof(body), &pos, ",\"tables\":");
+  (void)http_api_buf_append_cstr(body, sizeof(body), &pos, ",\"tables\":");
   {
     char num[32];
     int n = snprintf(num, sizeof(num), "%d", repaired_tables);
     if (n > 0 && (size_t)n < sizeof(num)) {
-      (void)buf_append_bytes(body, sizeof(body), &pos, num, (size_t)n);
+      (void)http_api_buf_append_bytes(body, sizeof(body), &pos, num, (size_t)n);
     }
   }
-  (void)buf_append_cstr(body, sizeof(body), &pos, ",\"rows\":");
+  (void)http_api_buf_append_cstr(body, sizeof(body), &pos, ",\"rows\":");
   {
     char num[32];
     int n = snprintf(num, sizeof(num), "%d", repaired_rows);
     if (n > 0 && (size_t)n < sizeof(num)) {
-      (void)buf_append_bytes(body, sizeof(body), &pos, num, (size_t)n);
+      (void)http_api_buf_append_bytes(body, sizeof(body), &pos, num, (size_t)n);
     }
   }
-  (void)buf_append_cstr(body, sizeof(body), &pos, "}}");
+  (void)http_api_buf_append_cstr(body, sizeof(body), &pos, "}}");
 
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
   http_response_add_header(resp, "Content-Type", "application/json");
@@ -7189,29 +6546,29 @@ static http_response_t *api_games_install_status(const http_request_t *request) 
 static http_response_t *api_games_uninstall(const http_request_t *request) {
   if ((request->method != HTTP_METHOD_POST) &&
       (request->method != HTTP_METHOD_GET)) {
-    return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED, "Use POST or GET");
+    return http_api_error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED, "Use POST or GET");
   }
 
   const char *query = strchr(request->uri, '?');
   if (query == NULL) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing query string");
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing query string");
   }
 
   char title_id[64] = {0};
-  if (parse_query_param(query, "id", title_id, sizeof(title_id)) != 0 ||
+  if (http_api_parse_query_param(query, "id", title_id, sizeof(title_id)) != 0 ||
       !is_valid_title_id_for_uninstall(title_id)) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing or invalid title id");
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing or invalid title id");
   }
 
 #if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
   int rc = -1;
   if (psx_uninstall_title_id(title_id, &rc) != 0) {
-    return status_json_200(0, "Uninstall API unavailable", -1);
+    return http_api_status_json_200(0, "Uninstall API unavailable", -1);
   }
   if (rc < 0) {
     char msg[96];
     (void)snprintf(msg, sizeof(msg), "Uninstall failed: 0x%08X", (unsigned)rc);
-    return status_json_200(0, msg, rc);
+    return http_api_status_json_200(0, msg, rc);
   }
 
   char body[192];
@@ -7224,38 +6581,38 @@ static http_response_t *api_games_uninstall(const http_request_t *request) {
   return resp;
 #else
   (void)title_id;
-  return status_json_200(0, "Uninstall only available on PS4/PS5", -1);
+  return http_api_status_json_200(0, "Uninstall only available on PS4/PS5", -1);
 #endif
 }
 
 static http_response_t *api_games_install(const http_request_t *request) {
 #if !ENABLE_PKG_INSTALL
   (void)request;
-  return error_json(HTTP_STATUS_409_CONFLICT,
+  return http_api_error_json(HTTP_STATUS_409_CONFLICT,
                     "PKG installation is disabled for this build");
 #else
   if ((request->method != HTTP_METHOD_POST) &&
       (request->method != HTTP_METHOD_GET)) {
-    return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED, "Use POST or GET");
+    return http_api_error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED, "Use POST or GET");
   }
 
   const char *query = strchr(request->uri, '?');
   if (query == NULL) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing query string");
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing query string");
   }
 
   char path[FTP_PATH_MAX] = {0};
-  if (parse_path_param(query, path, sizeof(path)) != 0) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing path parameter");
+  if (http_api_parse_path_param(query, path, sizeof(path)) != 0) {
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing path parameter");
   }
 
   char safe[FTP_PATH_MAX];
-  if (!validate_path(path, safe, sizeof(safe))) {
-    return error_json(HTTP_STATUS_403_FORBIDDEN, "Path traversal blocked");
+  if (!http_api_validate_path(path, safe, sizeof(safe))) {
+    return http_api_error_json(HTTP_STATUS_403_FORBIDDEN, "Path traversal blocked");
   }
 
   if (!has_pkg_extension(safe)) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST,
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST,
                       "Install supports only PKG/FPKG files");
   }
 
@@ -7281,13 +6638,13 @@ static http_response_t *api_games_install(const http_request_t *request) {
     }
   } else if (psx_install_pkg_path(safe, title_id, sizeof(title_id),
                                   &install_rc) != 0) {
-    return status_json_200(0, "Install API unavailable", -1);
+    return http_api_status_json_200(0, "Install API unavailable", -1);
   }
   if (install_rc < 0) {
     char msg[96];
     (void)snprintf(msg, sizeof(msg), "Install failed: 0x%08X",
                    (unsigned)install_rc);
-    return status_json_200(0, msg, install_rc);
+    return http_api_status_json_200(0, msg, install_rc);
   }
 
     char body[512];
@@ -7302,7 +6659,7 @@ static http_response_t *api_games_install(const http_request_t *request) {
   return resp;
 #else
   (void)safe;
-  return status_json_200(0, "Install only available on PS4/PS5", -1);
+  return http_api_status_json_200(0, "Install only available on PS4/PS5", -1);
 #endif
 #endif
 }
@@ -7310,31 +6667,31 @@ static http_response_t *api_games_install(const http_request_t *request) {
 static http_response_t *api_games_reinstall(const http_request_t *request) {
 #if !ENABLE_PKG_INSTALL
   (void)request;
-  return error_json(HTTP_STATUS_409_CONFLICT,
+  return http_api_error_json(HTTP_STATUS_409_CONFLICT,
                     "PKG installation is disabled for this build");
 #else
   if ((request->method != HTTP_METHOD_POST) &&
       (request->method != HTTP_METHOD_GET)) {
-    return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED, "Use POST or GET");
+    return http_api_error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED, "Use POST or GET");
   }
 
   const char *query = strchr(request->uri, '?');
   if (query == NULL) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing query string");
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing query string");
   }
 
   char path[FTP_PATH_MAX] = {0};
-  if (parse_path_param(query, path, sizeof(path)) != 0) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing path parameter");
+  if (http_api_parse_path_param(query, path, sizeof(path)) != 0) {
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing path parameter");
   }
 
   char safe[FTP_PATH_MAX];
-  if (!validate_path(path, safe, sizeof(safe))) {
-    return error_json(HTTP_STATUS_403_FORBIDDEN, "Path traversal blocked");
+  if (!http_api_validate_path(path, safe, sizeof(safe))) {
+    return http_api_error_json(HTTP_STATUS_403_FORBIDDEN, "Path traversal blocked");
   }
 
   if (!has_pkg_extension(safe)) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST,
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST,
                       "Reinstall supports only PKG/FPKG files");
   }
 
@@ -7370,13 +6727,13 @@ static http_response_t *api_games_reinstall(const http_request_t *request) {
     }
   } else if (psx_install_pkg_path(safe, install_title, sizeof(install_title),
                                   &install_rc) != 0) {
-    return status_json_200(0, "Install API unavailable", -1);
+    return http_api_status_json_200(0, "Install API unavailable", -1);
   }
   if (install_rc < 0) {
     char msg[96];
     (void)snprintf(msg, sizeof(msg), "Reinstall failed: 0x%08X",
                    (unsigned)install_rc);
-    return status_json_200(0, msg, install_rc);
+    return http_api_status_json_200(0, msg, install_rc);
   }
 
     char body[576];
@@ -7390,7 +6747,7 @@ static http_response_t *api_games_reinstall(const http_request_t *request) {
   http_response_set_body(resp, body, (size_t)n);
   return resp;
 #else
-  return status_json_200(0, "Reinstall only available on PS4/PS5", -1);
+  return http_api_status_json_200(0, "Reinstall only available on PS4/PS5", -1);
 #endif
 #endif
 }

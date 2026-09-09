@@ -276,6 +276,7 @@ ifeq ($(ENABLE_ZHTTPD),1)
     SOURCES += src/http/http_parser.c
     SOURCES += src/http/http_response.c
     SOURCES += src/http/http_api.c
+    SOURCES += src/http/http_api_common.c
     SOURCES += src/http/http_csrf.c
     WEB_RESOURCE_FILES := $(shell find web -type f -print | sort)
     HTTP_RESOURCES_C := $(BUILD_DIR)/generated/http/http_resources.c
@@ -802,6 +803,7 @@ TEST_BINS += $(BUILD_DIR)/tests/test_chmod
 TEST_BINS += $(BUILD_DIR)/tests/test_copy_atomic
 ifeq ($(ENABLE_ZHTTPD),1)
 TEST_BINS += $(BUILD_DIR)/tests/test_transfer
+TEST_BINS += $(BUILD_DIR)/tests/test_http_api_common
 endif
 
 ifeq ($(filter $(TARGET),linux macos),)
