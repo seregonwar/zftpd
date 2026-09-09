@@ -116,17 +116,27 @@ jobs:
           test -x "$sdk_dst/bin/orbis-clang"
           echo "PS4_PAYLOAD_SDK=$sdk_dst" >> "$GITHUB_ENV"
 
-      - name: Clone and build PS5 Payload SDK
+      - name: Install PS5 PacBrew SDK bundle
         if: matrix.platform == 'ps5'
         run: |
           set -euo pipefail
-          sdk_src="$RUNNER_TEMP/ps5-payload-sdk"
-          sdk_dst="$GITHUB_WORKSPACE/ps5-payload-sdk-install"
-          git clone --recursive https://github.com/ps5-payload-dev/sdk.git "$sdk_src"
-          make -C "$sdk_src" -j"$(nproc)"
-          make -C "$sdk_src" DESTDIR="$sdk_dst" install
+          pacbrew_version="v0.40.2"
+          pacbrew_sha256="a85f65de418a8e6a898c6c3e3c870d50fff7618a200e4dd59ea9692af6ecec4d"
+          archive="$RUNNER_TEMP/ps5-payload-dev-${pacbrew_version}.tar.gz"
+          root="$RUNNER_TEMP/ps5-pacbrew"
+          curl -fL --retry 3 \
+            -o "$archive" \
+            "https://github.com/ps5-payload-dev/pacbrew-repo/releases/download/${pacbrew_version}/ps5-payload-dev.tar.gz"
+          echo "${pacbrew_sha256}  ${archive}" | sha256sum -c -
+          mkdir -p "$root"
+          tar -xzf "$archive" -C "$root"
+          sdk_dst="$root/opt/ps5-payload-sdk"
           test -f "$sdk_dst/toolchain/prospero.mk"
           test -x "$sdk_dst/bin/prospero-clang"
+          test -x "$sdk_dst/bin/prospero-pkg-config"
+          "$sdk_dst/bin/prospero-pkg-config" --exists libcurl
+          "$sdk_dst/bin/prospero-pkg-config" --exists libnfs
+          test -f "$sdk_dst/target/user/homebrew/etc/ca-bundle.crt"
           echo "PS5_PAYLOAD_SDK=$sdk_dst" >> "$GITHUB_ENV"
 
       - name: Build release variant

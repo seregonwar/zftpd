@@ -48,6 +48,7 @@ SOFTWARE.
 #include "exfat_unpacker.h"  /* exFAT image parsing for game metadata */
 #include "pkg_unpacker.h"    /* PKG archive parsing for game metadata */
 #include "builtin_unzip.h"   /* built-in ZIP extractor (PS5 fallback) */
+#include "transfer/transfer_manager.h"
 #include <dirent.h>
 #include <errno.h>
 #include <ctype.h>
@@ -5462,144 +5463,11 @@ static http_response_t *api_extract_cancel(const http_request_t *request) {
 }
 
 /*===========================================================================*
- * DOWNLOAD MANAGER (Phase 6)
+ * DOWNLOAD / TRANSFER API
  *
- *   POST /api/download/start   { "url": "...", "dst": "/path/" }
- *     Starts a background HTTP download to the console filesystem.
- *
- *   GET  /api/download/status
- *     Returns all active downloads with progress.
- *
- *   POST /api/download/pause   { "id": N }
- *   POST /api/download/cancel  { "id": N }
- *
- * NOTE: Requires a socket-based HTTP client. On PS5 this uses the
- *       kernel's socket API directly. On desktop, libcurl can be used.
- *       When neither is available, returns stub responses.
+ * Transport logic lives in src/transfer/.  The HTTP API is intentionally
+ * limited to request validation, destination confinement and JSON mapping.
  *===========================================================================*/
-
-#define DL_MAX_ACTIVE 4
-#define DL_URL_MAX    2048
-#define DL_READ_BUF   (256 * 1024)
-
-/* Download entry state */
-typedef struct {
-  int         active;
-  int         done;
-  int         paused;
-  int         error;
-  int         id;
-  char        url[DL_URL_MAX];
-  char        dst_path[1024];
-  char        filename[256];
-  char        error_msg[256];
-  uint64_t    total_size;
-  uint64_t    downloaded;
-  double      speed;         /* bytes/sec */
-  time_t      start_time;
-} dl_entry_t;
-
-static dl_entry_t g_downloads[DL_MAX_ACTIVE];
-static int g_dl_next_id = 1;
-
-#if (defined(ENABLE_LIBCURL) && ENABLE_LIBCURL) || \
-    defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
-#define DL_HAS_BACKEND 1
-#else
-#define DL_HAS_BACKEND 0
-#endif
-
-static dl_entry_t *dl_find_slot(void) {
-  for (int i = 0; i < DL_MAX_ACTIVE; i++) {
-    if (!g_downloads[i].active && g_downloads[i].done == 0) return &g_downloads[i];
-  }
-  /* Reuse a completed slot */
-  for (int i = 0; i < DL_MAX_ACTIVE; i++) {
-    if (g_downloads[i].done) {
-      memset(&g_downloads[i], 0, sizeof(dl_entry_t));
-      return &g_downloads[i];
-    }
-  }
-  return NULL;
-}
-
-static dl_entry_t *dl_find_by_id(int id) {
-  for (int i = 0; i < DL_MAX_ACTIVE; i++) {
-    if (g_downloads[i].id == id) return &g_downloads[i];
-  }
-  return NULL;
-}
-
-static int dl_has_scheme(const char *url, const char *scheme) {
-  size_t n = scheme ? strlen(scheme) : 0U;
-  return url != NULL && scheme != NULL && strncasecmp(url, scheme, n) == 0;
-}
-
-static int dl_url_is_supported(const char *url, char *reason,
-                               size_t reason_size) {
-  if (reason && reason_size > 0U) {
-    reason[0] = '\0';
-  }
-  if (url == NULL || url[0] == '\0') {
-    if (reason && reason_size > 0U) {
-      snprintf(reason, reason_size, "Missing url parameter");
-    }
-    return 0;
-  }
-  if (dl_has_scheme(url, "magnet:")) {
-    if (reason && reason_size > 0U) {
-      snprintf(reason, reason_size,
-               "Magnet links need a BitTorrent/DHT engine; this build supports direct HTTP/HTTPS URLs only");
-    }
-    return 0;
-  }
-  if (dl_has_scheme(url, "https://")) {
-    return 1;
-  }
-  if (dl_has_scheme(url, "http://")) {
-    return 1;
-  }
-  if (reason && reason_size > 0U) {
-    snprintf(reason, reason_size,
-             "Unsupported URL scheme; use a direct http:// or https:// URL");
-  }
-  return 0;
-}
-
-static void dl_sanitize_filename(char *name) {
-  if (name == NULL || name[0] == '\0') {
-    return;
-  }
-  for (size_t i = 0; name[i] != '\0'; i++) {
-    unsigned char c = (unsigned char)name[i];
-    if (c < 32U || name[i] == '/' || name[i] == '\\' || name[i] == ':' ||
-        name[i] == '*' || name[i] == '?' || name[i] == '"' ||
-        name[i] == '<' || name[i] == '>' || name[i] == '|') {
-      name[i] = '_';
-    }
-  }
-  if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
-    name[0] = '_';
-    name[1] = '\0';
-  }
-}
-
-/* Extract filename from URL (last path component) */
-static void dl_extract_filename(const char *url, char *out, size_t out_size) {
-  if (!url || !out || out_size == 0) return;
-  const char *last_slash = strrchr(url, '/');
-  const char *name = last_slash ? last_slash + 1 : url;
-  /* Strip query string */
-  const char *qmark = strchr(name, '?');
-  size_t len = qmark ? (size_t)(qmark - name) : strlen(name);
-  if (len == 0 || len >= out_size) {
-    snprintf(out, out_size, "download_%d", g_dl_next_id);
-    return;
-  }
-  memcpy(out, name, len);
-  out[len] = '\0';
-  dl_sanitize_filename(out);
-}
 
 static int dl_is_directory_path(const char *path) {
   struct stat st;
@@ -5608,862 +5476,196 @@ static int dl_is_directory_path(const char *path) {
 
 static int dl_try_destination(const char *candidate, char *safe,
                               size_t safe_size) {
-  if (candidate == NULL || candidate[0] == '\0') {
-    return 0;
-  }
-  if (!validate_path(candidate, safe, safe_size)) {
-    return 0;
-  }
+  if (candidate == NULL || candidate[0] == '\0') return 0;
+  if (!validate_path(candidate, safe, safe_size)) return 0;
   return dl_is_directory_path(safe);
 }
 
 static int dl_normalize_destination(const char *requested, char *safe,
                                     size_t safe_size) {
 #if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
-  int wants_ps_default = (requested == NULL || requested[0] == '\0' ||
-                          strcmp(requested, "/") == 0);
-  if (wants_ps_default) {
-    static const char *const ps_defaults[] = {
-        "/data",
-        "/mnt/usb0",
-        "/mnt/usb1",
-        NULL
-    };
-    for (size_t i = 0U; ps_defaults[i] != NULL; i++) {
-      if (dl_try_destination(ps_defaults[i], safe, safe_size)) {
-        return 1;
-      }
+  if (requested == NULL || requested[0] == '\0' || strcmp(requested, "/") == 0) {
+    static const char *const defaults[] = {"/data", "/mnt/ext1", "/mnt/usb0",
+                                            "/mnt/usb1", NULL};
+    for (size_t i = 0U; defaults[i] != NULL; i++) {
+      if (dl_try_destination(defaults[i], safe, safe_size)) return 1;
     }
   }
 #endif
-
-  if (dl_try_destination(requested, safe, safe_size)) {
-    return 1;
-  }
-
-#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
-  if (requested != NULL && strcmp(requested, "/data") == 0) {
-    static const char *const ps_defaults[] = {
-        "/mnt/usb0",
-        "/mnt/usb1",
-        NULL
-    };
-    for (size_t i = 0U; ps_defaults[i] != NULL; i++) {
-      if (dl_try_destination(ps_defaults[i], safe, safe_size)) {
-        return 1;
-      }
-    }
-  }
-#endif
-
+  if (dl_try_destination(requested, safe, safe_size)) return 1;
   if (g_http_root[0] != '\0' && strcmp(g_http_root, "/") != 0 &&
-      dl_try_destination(g_http_root, safe, safe_size)) {
-    return 1;
-  }
-
+      dl_try_destination(g_http_root, safe, safe_size)) return 1;
   return 0;
 }
 
-#if DL_HAS_BACKEND
-
-#if !defined(PLATFORM_PS4) && !defined(PLATFORM_PS5)
-#include <curl/curl.h>
-#elif defined(ENABLE_LIBCURL) && ENABLE_LIBCURL
-#include "pal_curl.h"
-#endif
-
-struct dl_write_ctx {
-  dl_entry_t *dl;
-  int fd;
-};
-
-static int dl_write_all(int fd, const void *data, size_t len) {
-  const uint8_t *p = (const uint8_t *)data;
-  while (len > 0U) {
-    ssize_t n = write(fd, p, len);
-    if (n < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      return -1;
+static int json_body_string(const http_request_t *request, const char *key,
+                            char *out, size_t out_size) {
+  if (request == NULL || key == NULL || out == NULL || out_size == 0U ||
+      request->body == NULL || request->body_length == 0U) return 0;
+  out[0] = '\0';
+  char needle[64];
+  int nn = snprintf(needle, sizeof(needle), "\"%s\"", key);
+  if (nn <= 0 || (size_t)nn >= sizeof(needle)) return 0;
+  const char *p = strstr(request->body, needle);
+  if (p == NULL) return 0;
+  p = strchr(p + (size_t)nn, ':');
+  if (p == NULL) return 0;
+  p++;
+  while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+  if (*p++ != '"') return 0;
+  size_t pos = 0U;
+  while (*p != '\0' && *p != '"' && pos + 1U < out_size) {
+    if (*p == '\\' && p[1] != '\0') {
+      p++;
+      if (*p == 'n') out[pos++] = '\n';
+      else if (*p == 'r') out[pos++] = '\r';
+      else if (*p == 't') out[pos++] = '\t';
+      else out[pos++] = *p;
+      p++;
+      continue;
     }
-    if (n == 0) {
-      return -1;
-    }
-    p += (size_t)n;
-    len -= (size_t)n;
+    out[pos++] = *p++;
   }
-  return 0;
+  out[pos] = '\0';
+  return *p == '"';
 }
 
-#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
-
-typedef int (*psx_sceNetInit_fn)(void);
-typedef int (*psx_sceNetPoolCreate_fn)(const char *name, int size, int flags);
-typedef int (*psx_sceSslInit_fn)(size_t pool_size);
-typedef int (*psx_sceHttpInit_fn)(int libnet_mem_id, int libssl_ctx_id,
-                                  size_t pool_size);
-typedef int (*psx_sceHttpCreateTemplate_fn)(int libhttp_ctx_id,
-                                            const char *user_agent,
-                                            int http_ver,
-                                            int is_auto_proxy_conf);
-typedef int (*psx_sceHttpDeleteTemplate_fn)(int tmpl_id);
-typedef int (*psx_sceHttpCreateConnectionWithURL_fn)(int tmpl_id,
-                                                     const char *url,
-                                                     int keepalive);
-typedef int (*psx_sceHttpDeleteConnection_fn)(int conn_id);
-typedef int (*psx_sceHttpCreateRequestWithURL2_fn)(int conn_id,
-                                                   const char *method,
-                                                   const char *url,
-                                                   uint64_t content_length);
-typedef int (*psx_sceHttpDeleteRequest_fn)(int req_id);
-typedef int (*psx_sceHttpSetAutoRedirect_fn)(int id, int enable);
-typedef int (*psx_sceHttpSetConnectTimeOut_fn)(int id, uint32_t usec);
-typedef int (*psx_sceHttpSetRecvTimeOut_fn)(int id, uint32_t usec);
-typedef int (*psx_sceHttpSetSendTimeOut_fn)(int id, uint32_t usec);
-typedef int (*psx_sceHttpSetResolveTimeOut_fn)(int id, uint32_t usec);
-typedef int (*psx_sceHttpSetResolveRetry_fn)(int id, int retry);
-typedef int (*psx_sceHttpSetResponseHeaderMaxSize_fn)(int id, size_t size);
-typedef int (*psx_sceHttpSetInflateGZIPEnabled_fn)(int id, int enable);
-typedef int (*psx_sceHttpAddRequestHeader_fn)(int id, const char *name,
-                                              const char *value,
-                                              uint32_t mode);
-typedef int (*psx_sceHttpSendRequest_fn)(int req_id, const void *post_data,
-                                         size_t size);
-typedef int (*psx_sceHttpReadData_fn)(int req_id, void *data, size_t size);
-typedef int (*psx_sceHttpGetStatusCode_fn)(int req_id, int *status_code);
-typedef int (*psx_sceHttpGetResponseContentLength_fn)(int req_id, int *result,
-                                                      uint64_t *content_len);
-typedef int (*psx_sceHttpGetLastErrno_fn)(int req_id, int *err_num);
-typedef int (*psx_https_callback_t)(int libssl_ctx_id, unsigned int verify_err,
-                                    void *const ssl_cert[], int cert_num,
-                                    void *user_arg);
-typedef int (*psx_sceHttpsSetSslCallback_fn)(int id,
-                                             psx_https_callback_t cb,
-                                             void *user_arg);
-
-typedef struct {
-  int loaded;
-  void *net_mod;
-  void *ssl_mod;
-  void *http_mod;
-  psx_sceNetInit_fn sceNetInit;
-  psx_sceNetPoolCreate_fn sceNetPoolCreate;
-  psx_sceSslInit_fn sceSslInit;
-  psx_sceHttpInit_fn sceHttpInit;
-  psx_sceHttpCreateTemplate_fn sceHttpCreateTemplate;
-  psx_sceHttpDeleteTemplate_fn sceHttpDeleteTemplate;
-  psx_sceHttpCreateConnectionWithURL_fn sceHttpCreateConnectionWithURL;
-  psx_sceHttpDeleteConnection_fn sceHttpDeleteConnection;
-  psx_sceHttpCreateRequestWithURL2_fn sceHttpCreateRequestWithURL2;
-  psx_sceHttpDeleteRequest_fn sceHttpDeleteRequest;
-  psx_sceHttpSetAutoRedirect_fn sceHttpSetAutoRedirect;
-  psx_sceHttpSetConnectTimeOut_fn sceHttpSetConnectTimeOut;
-  psx_sceHttpSetRecvTimeOut_fn sceHttpSetRecvTimeOut;
-  psx_sceHttpSetSendTimeOut_fn sceHttpSetSendTimeOut;
-  psx_sceHttpSetResolveTimeOut_fn sceHttpSetResolveTimeOut;
-  psx_sceHttpSetResolveRetry_fn sceHttpSetResolveRetry;
-  psx_sceHttpSetResponseHeaderMaxSize_fn sceHttpSetResponseHeaderMaxSize;
-  psx_sceHttpSetInflateGZIPEnabled_fn sceHttpSetInflateGZIPEnabled;
-  psx_sceHttpAddRequestHeader_fn sceHttpAddRequestHeader;
-  psx_sceHttpSendRequest_fn sceHttpSendRequest;
-  psx_sceHttpReadData_fn sceHttpReadData;
-  psx_sceHttpGetStatusCode_fn sceHttpGetStatusCode;
-  psx_sceHttpGetResponseContentLength_fn sceHttpGetResponseContentLength;
-  psx_sceHttpGetLastErrno_fn sceHttpGetLastErrno;
-  psx_sceHttpsSetSslCallback_fn sceHttpsSetSslCallback;
-} psx_http_symbols_t;
-
-static psx_http_symbols_t g_psx_http;
-static pthread_mutex_t g_psx_http_lock = PTHREAD_MUTEX_INITIALIZER;
-static int g_psx_net_pool = -1;
-static int g_psx_ssl_ctx = -1;
-static int g_psx_http_ctx = -1;
-
-static void *psx_open_sce_module(const char *name) {
-  char path[128];
-  int n = snprintf(path, sizeof(path), "/system/common/lib/%s.sprx", name);
-  if (n <= 0 || (size_t)n >= sizeof(path)) {
-    return NULL;
-  }
-  return dlopen(path, RTLD_NOW | RTLD_GLOBAL);
-}
-
-static int psx_http_load_symbols(char *err, size_t err_size) {
-  if (g_psx_http.loaded) {
+static int json_body_int(const http_request_t *request, const char *key,
+                         int *out) {
+  if (request == NULL || key == NULL || out == NULL || request->body == NULL)
     return 0;
-  }
-
-  int module_rc = 0;
-  (void)psx_sysmodule_load_internal(SCE_SYSMODULE_INTERNAL_NET, &module_rc);
-  (void)psx_sysmodule_load_internal(SCE_SYSMODULE_INTERNAL_SSL, &module_rc);
-  (void)psx_sysmodule_load_internal(SCE_SYSMODULE_INTERNAL_HTTP, &module_rc);
-
-  g_psx_http.net_mod = psx_open_sce_module("libSceNet");
-  g_psx_http.ssl_mod = psx_open_sce_module("libSceSsl");
-  g_psx_http.http_mod = psx_open_sce_module("libSceHttp");
-
-  if (g_psx_http.net_mod == NULL || g_psx_http.ssl_mod == NULL ||
-      g_psx_http.http_mod == NULL) {
-    if (err && err_size > 0U) {
-      snprintf(err, err_size, "Failed to load SceNet/SceSsl/SceHttp modules");
-    }
-    return -1;
-  }
-
-  g_psx_http.sceNetInit =
-      (psx_sceNetInit_fn)dlsym(g_psx_http.net_mod, "sceNetInit");
-  g_psx_http.sceNetPoolCreate =
-      (psx_sceNetPoolCreate_fn)dlsym(g_psx_http.net_mod, "sceNetPoolCreate");
-  g_psx_http.sceSslInit =
-      (psx_sceSslInit_fn)dlsym(g_psx_http.ssl_mod, "sceSslInit");
-  g_psx_http.sceHttpInit =
-      (psx_sceHttpInit_fn)dlsym(g_psx_http.http_mod, "sceHttpInit");
-  g_psx_http.sceHttpCreateTemplate =
-      (psx_sceHttpCreateTemplate_fn)dlsym(g_psx_http.http_mod,
-                                          "sceHttpCreateTemplate");
-  g_psx_http.sceHttpDeleteTemplate =
-      (psx_sceHttpDeleteTemplate_fn)dlsym(g_psx_http.http_mod,
-                                          "sceHttpDeleteTemplate");
-  g_psx_http.sceHttpCreateConnectionWithURL =
-      (psx_sceHttpCreateConnectionWithURL_fn)dlsym(
-          g_psx_http.http_mod, "sceHttpCreateConnectionWithURL");
-  g_psx_http.sceHttpDeleteConnection =
-      (psx_sceHttpDeleteConnection_fn)dlsym(g_psx_http.http_mod,
-                                            "sceHttpDeleteConnection");
-  g_psx_http.sceHttpCreateRequestWithURL2 =
-      (psx_sceHttpCreateRequestWithURL2_fn)dlsym(
-          g_psx_http.http_mod, "sceHttpCreateRequestWithURL2");
-  g_psx_http.sceHttpDeleteRequest =
-      (psx_sceHttpDeleteRequest_fn)dlsym(g_psx_http.http_mod,
-                                         "sceHttpDeleteRequest");
-  g_psx_http.sceHttpSetAutoRedirect =
-      (psx_sceHttpSetAutoRedirect_fn)dlsym(g_psx_http.http_mod,
-                                           "sceHttpSetAutoRedirect");
-  g_psx_http.sceHttpSetConnectTimeOut =
-      (psx_sceHttpSetConnectTimeOut_fn)dlsym(g_psx_http.http_mod,
-                                             "sceHttpSetConnectTimeOut");
-  g_psx_http.sceHttpSetRecvTimeOut =
-      (psx_sceHttpSetRecvTimeOut_fn)dlsym(g_psx_http.http_mod,
-                                          "sceHttpSetRecvTimeOut");
-  g_psx_http.sceHttpSetSendTimeOut =
-      (psx_sceHttpSetSendTimeOut_fn)dlsym(g_psx_http.http_mod,
-                                          "sceHttpSetSendTimeOut");
-  g_psx_http.sceHttpSetResolveTimeOut =
-      (psx_sceHttpSetResolveTimeOut_fn)dlsym(g_psx_http.http_mod,
-                                             "sceHttpSetResolveTimeOut");
-  g_psx_http.sceHttpSetResolveRetry =
-      (psx_sceHttpSetResolveRetry_fn)dlsym(g_psx_http.http_mod,
-                                           "sceHttpSetResolveRetry");
-  g_psx_http.sceHttpSetResponseHeaderMaxSize =
-      (psx_sceHttpSetResponseHeaderMaxSize_fn)dlsym(
-          g_psx_http.http_mod, "sceHttpSetResponseHeaderMaxSize");
-  g_psx_http.sceHttpSetInflateGZIPEnabled =
-      (psx_sceHttpSetInflateGZIPEnabled_fn)dlsym(
-          g_psx_http.http_mod, "sceHttpSetInflateGZIPEnabled");
-  g_psx_http.sceHttpAddRequestHeader =
-      (psx_sceHttpAddRequestHeader_fn)dlsym(g_psx_http.http_mod,
-                                            "sceHttpAddRequestHeader");
-  g_psx_http.sceHttpSendRequest =
-      (psx_sceHttpSendRequest_fn)dlsym(g_psx_http.http_mod,
-                                       "sceHttpSendRequest");
-  g_psx_http.sceHttpReadData =
-      (psx_sceHttpReadData_fn)dlsym(g_psx_http.http_mod, "sceHttpReadData");
-  g_psx_http.sceHttpGetStatusCode =
-      (psx_sceHttpGetStatusCode_fn)dlsym(g_psx_http.http_mod,
-                                         "sceHttpGetStatusCode");
-  g_psx_http.sceHttpGetResponseContentLength =
-      (psx_sceHttpGetResponseContentLength_fn)dlsym(
-          g_psx_http.http_mod, "sceHttpGetResponseContentLength");
-  g_psx_http.sceHttpGetLastErrno =
-      (psx_sceHttpGetLastErrno_fn)dlsym(g_psx_http.http_mod,
-                                        "sceHttpGetLastErrno");
-  g_psx_http.sceHttpsSetSslCallback =
-      (psx_sceHttpsSetSslCallback_fn)dlsym(g_psx_http.http_mod,
-                                           "sceHttpsSetSslCallback");
-
-  if (g_psx_http.sceNetInit == NULL ||
-      g_psx_http.sceNetPoolCreate == NULL ||
-      g_psx_http.sceSslInit == NULL ||
-      g_psx_http.sceHttpInit == NULL ||
-      g_psx_http.sceHttpCreateTemplate == NULL ||
-      g_psx_http.sceHttpDeleteTemplate == NULL ||
-      g_psx_http.sceHttpCreateConnectionWithURL == NULL ||
-      g_psx_http.sceHttpDeleteConnection == NULL ||
-      g_psx_http.sceHttpCreateRequestWithURL2 == NULL ||
-      g_psx_http.sceHttpDeleteRequest == NULL ||
-      g_psx_http.sceHttpSendRequest == NULL ||
-      g_psx_http.sceHttpReadData == NULL ||
-      g_psx_http.sceHttpGetStatusCode == NULL) {
-    if (err && err_size > 0U) {
-      snprintf(err, err_size, "SceHttp symbol resolution failed");
-    }
-    return -1;
-  }
-
-  g_psx_http.loaded = 1;
-  return 0;
+  char needle[64];
+  int nn = snprintf(needle, sizeof(needle), "\"%s\"", key);
+  if (nn <= 0 || (size_t)nn >= sizeof(needle)) return 0;
+  const char *p = strstr(request->body, needle);
+  if (p == NULL || (p = strchr(p + (size_t)nn, ':')) == NULL) return 0;
+  p++;
+  while (*p == ' ' || *p == '\t') p++;
+  char *endptr = NULL;
+  long value = strtol(p, &endptr, 10);
+  if (endptr == p || value <= 0L || value > INT_MAX) return 0;
+  *out = (int)value;
+  return 1;
 }
-
-static int psx_https_accept_any(int libssl_ctx_id, unsigned int verify_err,
-                                void *const ssl_cert[], int cert_num,
-                                void *user_arg) {
-  (void)libssl_ctx_id;
-  (void)verify_err;
-  (void)ssl_cert;
-  (void)cert_num;
-  (void)user_arg;
-  return 0;
-}
-
-static int psx_http_global_init(char *err, size_t err_size) {
-  int result = 0;
-  pthread_mutex_lock(&g_psx_http_lock);
-
-  if (g_psx_http_ctx >= 0) {
-    pthread_mutex_unlock(&g_psx_http_lock);
-    return 0;
-  }
-
-  if (psx_http_load_symbols(err, err_size) != 0) {
-    pthread_mutex_unlock(&g_psx_http_lock);
-    return -1;
-  }
-
-  (void)g_psx_http.sceNetInit();
-
-  g_psx_net_pool = g_psx_http.sceNetPoolCreate("zftpd_http", 262144, 0);
-  if (g_psx_net_pool < 0) {
-    if (err && err_size > 0U) {
-      snprintf(err, err_size, "sceNetPoolCreate failed: 0x%08x",
-               (unsigned)g_psx_net_pool);
-    }
-    result = -1;
-  }
-
-  if (result == 0) {
-    g_psx_ssl_ctx = g_psx_http.sceSslInit(524288U);
-    if (g_psx_ssl_ctx < 0) {
-      if (err && err_size > 0U) {
-        snprintf(err, err_size, "sceSslInit failed: 0x%08x",
-                 (unsigned)g_psx_ssl_ctx);
-      }
-      result = -1;
-    }
-  }
-
-  if (result == 0) {
-    g_psx_http_ctx = g_psx_http.sceHttpInit(g_psx_net_pool, g_psx_ssl_ctx,
-                                            524288U);
-    if (g_psx_http_ctx < 0) {
-      if (err && err_size > 0U) {
-        snprintf(err, err_size, "sceHttpInit failed: 0x%08x",
-                 (unsigned)g_psx_http_ctx);
-      }
-      result = -1;
-    }
-  }
-
-  pthread_mutex_unlock(&g_psx_http_lock);
-  return result;
-}
-
-static int dl_psx_http_download_to_fd(dl_entry_t *dl, int fd) {
-  char init_err[128];
-  if (psx_http_global_init(init_err, sizeof(init_err)) != 0) {
-    snprintf(dl->error_msg, sizeof(dl->error_msg), "%s", init_err);
-    return -1;
-  }
-
-  int tmpl = -1;
-  int conn = -1;
-  int req = -1;
-  int rc = -1;
-  uint8_t *buf = (uint8_t *)malloc(DL_READ_BUF);
-  if (buf == NULL) {
-    snprintf(dl->error_msg, sizeof(dl->error_msg), "Out of memory");
-    return -1;
-  }
-
-  tmpl = g_psx_http.sceHttpCreateTemplate(g_psx_http_ctx, "zftpd-ps/2.0",
-                                          2, 1);
-  if (tmpl < 0) {
-    snprintf(dl->error_msg, sizeof(dl->error_msg),
-             "sceHttpCreateTemplate failed: 0x%08x", (unsigned)tmpl);
-    goto done;
-  }
-
-  if (g_psx_http.sceHttpSetAutoRedirect != NULL) {
-    (void)g_psx_http.sceHttpSetAutoRedirect(tmpl, 1);
-  }
-  if (g_psx_http.sceHttpSetConnectTimeOut != NULL) {
-    (void)g_psx_http.sceHttpSetConnectTimeOut(tmpl, 30000000U);
-  }
-  if (g_psx_http.sceHttpSetRecvTimeOut != NULL) {
-    (void)g_psx_http.sceHttpSetRecvTimeOut(tmpl, 60000000U);
-  }
-  if (g_psx_http.sceHttpSetSendTimeOut != NULL) {
-    (void)g_psx_http.sceHttpSetSendTimeOut(tmpl, 30000000U);
-  }
-  if (g_psx_http.sceHttpSetResolveTimeOut != NULL) {
-    (void)g_psx_http.sceHttpSetResolveTimeOut(tmpl, 30000000U);
-  }
-  if (g_psx_http.sceHttpSetResolveRetry != NULL) {
-    (void)g_psx_http.sceHttpSetResolveRetry(tmpl, 2);
-  }
-  if (g_psx_http.sceHttpSetResponseHeaderMaxSize != NULL) {
-    (void)g_psx_http.sceHttpSetResponseHeaderMaxSize(tmpl, 65536U);
-  }
-  if (g_psx_http.sceHttpsSetSslCallback != NULL &&
-      dl_has_scheme(dl->url, "https://")) {
-    (void)g_psx_http.sceHttpsSetSslCallback(tmpl, psx_https_accept_any, NULL);
-  }
-
-  conn = g_psx_http.sceHttpCreateConnectionWithURL(tmpl, dl->url, 0);
-  if (conn < 0) {
-    snprintf(dl->error_msg, sizeof(dl->error_msg),
-             "sceHttpCreateConnectionWithURL failed: 0x%08x", (unsigned)conn);
-    goto done;
-  }
-  if (g_psx_http.sceHttpsSetSslCallback != NULL &&
-      dl_has_scheme(dl->url, "https://")) {
-    (void)g_psx_http.sceHttpsSetSslCallback(conn, psx_https_accept_any, NULL);
-  }
-
-  req = g_psx_http.sceHttpCreateRequestWithURL2(conn, "GET", dl->url, 0U);
-  if (req < 0) {
-    snprintf(dl->error_msg, sizeof(dl->error_msg),
-             "sceHttpCreateRequestWithURL2 failed: 0x%08x", (unsigned)req);
-    goto done;
-  }
-
-  if (g_psx_http.sceHttpSetAutoRedirect != NULL) {
-    (void)g_psx_http.sceHttpSetAutoRedirect(req, 1);
-  }
-  if (g_psx_http.sceHttpSetInflateGZIPEnabled != NULL) {
-    (void)g_psx_http.sceHttpSetInflateGZIPEnabled(req, 0);
-  }
-  if (g_psx_http.sceHttpSetResponseHeaderMaxSize != NULL) {
-    (void)g_psx_http.sceHttpSetResponseHeaderMaxSize(req, 65536U);
-  }
-  if (g_psx_http.sceHttpsSetSslCallback != NULL &&
-      dl_has_scheme(dl->url, "https://")) {
-    (void)g_psx_http.sceHttpsSetSslCallback(req, psx_https_accept_any, NULL);
-  }
-  if (g_psx_http.sceHttpAddRequestHeader != NULL) {
-    (void)g_psx_http.sceHttpAddRequestHeader(req, "Accept", "*/*", 0U);
-    (void)g_psx_http.sceHttpAddRequestHeader(req, "Connection", "close", 0U);
-  }
-
-  rc = g_psx_http.sceHttpSendRequest(req, NULL, 0U);
-  if (rc < 0) {
-    int last_errno = 0;
-    if (g_psx_http.sceHttpGetLastErrno != NULL &&
-        g_psx_http.sceHttpGetLastErrno(req, &last_errno) == 0 &&
-        last_errno != 0) {
-      snprintf(dl->error_msg, sizeof(dl->error_msg),
-               "sceHttpSendRequest failed: 0x%08x (last errno: 0x%08x)",
-               (unsigned)rc, (unsigned)last_errno);
-    } else {
-      snprintf(dl->error_msg, sizeof(dl->error_msg),
-               "sceHttpSendRequest failed: 0x%08x", (unsigned)rc);
-    }
-    goto done;
-  }
-
-  int status_code = 0;
-  rc = g_psx_http.sceHttpGetStatusCode(req, &status_code);
-  if (rc < 0) {
-    snprintf(dl->error_msg, sizeof(dl->error_msg),
-             "sceHttpGetStatusCode failed: 0x%08x", (unsigned)rc);
-    goto done;
-  }
-  if (status_code >= 400) {
-    snprintf(dl->error_msg, sizeof(dl->error_msg),
-             "HTTP error status: %d", status_code);
-    rc = -1;
-    goto done;
-  }
-
-  if (g_psx_http.sceHttpGetResponseContentLength != NULL) {
-    int length_type = 0;
-    uint64_t content_len = 0U;
-    if (g_psx_http.sceHttpGetResponseContentLength(req, &length_type,
-                                                   &content_len) == 0 &&
-        content_len > 0U) {
-      dl->total_size = content_len;
-    }
-  }
-
-  for (;;) {
-    while (dl->paused && dl->active && !dl->done) {
-      usleep(100000U);
-    }
-    if (!dl->active || (dl->done && dl->error)) {
-      snprintf(dl->error_msg, sizeof(dl->error_msg), "Cancelled by user");
-      rc = -1;
-      goto done;
-    }
-
-    int got = g_psx_http.sceHttpReadData(req, buf, (size_t)DL_READ_BUF);
-    if (got < 0) {
-      snprintf(dl->error_msg, sizeof(dl->error_msg),
-               "sceHttpReadData failed: 0x%08x", (unsigned)got);
-      rc = -1;
-      goto done;
-    }
-    if (got == 0) {
-      break;
-    }
-    if (dl_write_all(fd, buf, (size_t)got) != 0) {
-      snprintf(dl->error_msg, sizeof(dl->error_msg),
-               "Write error: %s", strerror(errno));
-      rc = -1;
-      goto done;
-    }
-    dl->downloaded += (uint64_t)got;
-  }
-
-  rc = 0;
-
-done:
-  if (req >= 0) {
-    (void)g_psx_http.sceHttpDeleteRequest(req);
-  }
-  if (conn >= 0) {
-    (void)g_psx_http.sceHttpDeleteConnection(conn);
-  }
-  if (tmpl >= 0) {
-    (void)g_psx_http.sceHttpDeleteTemplate(tmpl);
-  }
-  free(buf);
-  return rc;
-}
-
-#endif /* PLATFORM_PS4 || PLATFORM_PS5 */
-
-#if !defined(PLATFORM_PS4) && !defined(PLATFORM_PS5)
-static size_t dl_curl_write(void *ptr, size_t size, size_t nmemb, void *userdata) {
-  struct dl_write_ctx *ctx = (struct dl_write_ctx *)userdata;
-  size_t total = size * nmemb;
-  while (ctx->dl->paused && ctx->dl->active && !ctx->dl->done) {
-    usleep(100000U);
-  }
-  if (!ctx->dl->active || (ctx->dl->done && ctx->dl->error)) {
-    return 0;
-  }
-  if (dl_write_all(ctx->fd, ptr, total) != 0) {
-    return 0;
-  }
-  ctx->dl->downloaded += (uint64_t)total;
-  return total;
-}
-#endif
-
-static void *dl_thread(void *arg) {
-  dl_entry_t *dl = (dl_entry_t *)arg;
-  char filepath[2048];
-  if (strcmp(dl->dst_path, "/") == 0) {
-    snprintf(filepath, sizeof(filepath), "/%s", dl->filename);
-  } else {
-    snprintf(filepath, sizeof(filepath), "%s/%s", dl->dst_path, dl->filename);
-  }
-
-  int fd = open(filepath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-  if (fd < 0) {
-    snprintf(dl->error_msg, sizeof(dl->error_msg), "Cannot create %s: %s",
-             filepath, strerror(errno));
-    dl->error = 1;
-    dl->done = 1;
-    dl->active = 0;
-    return NULL;
-  }
-
-#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
-  if (dl_psx_http_download_to_fd(dl, fd) != 0) {
-    dl->error = 1;
-  }
-  {
-    double elapsed = difftime(time(NULL), dl->start_time);
-    if (elapsed > 0.0) {
-      dl->speed = (double)dl->downloaded / elapsed;
-    }
-  }
-  close(fd);
-  if (dl->error) {
-    (void)unlink(filepath);
-  }
-  dl->done = 1;
-  dl->active = 0;
-  return NULL;
-#else
-  CURL *curl = curl_easy_init();
-  if (!curl) {
-    close(fd);
-    snprintf(dl->error_msg, sizeof(dl->error_msg), "curl_easy_init failed");
-    dl->error = 1;
-    dl->done = 1;
-    dl->active = 0;
-    return NULL;
-  }
-
-  struct dl_write_ctx wctx = { dl, fd };
-  curl_easy_setopt(curl, CURLOPT_URL, dl->url);
-  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, dl_curl_write);
-  curl_easy_setopt(curl, CURLOPT_WRITEDATA, &wctx);
-  curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-  curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 10L);
-  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
-  curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
-  curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);
-
-  CURLcode res = curl_easy_perform(curl);
-  if (res != CURLE_OK) {
-    snprintf(dl->error_msg, sizeof(dl->error_msg), "curl: %s", curl_easy_strerror(res));
-    dl->error = 1;
-  }
-
-  double total_size = 0;
-  curl_easy_getinfo(curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD, &total_size);
-  if (total_size > 0) dl->total_size = (uint64_t)total_size;
-
-  double speed = 0;
-  curl_easy_getinfo(curl, CURLINFO_SPEED_DOWNLOAD, &speed);
-  dl->speed = speed;
-
-  curl_easy_cleanup(curl);
-  close(fd);
-  if (dl->error) {
-    (void)unlink(filepath);
-  }
-  dl->done = 1;
-  dl->active = 0;
-  return NULL;
-#endif
-}
-#endif /* DL_HAS_BACKEND */
 
 static http_response_t *api_dl_start(const http_request_t *request) {
-  if (request->method != HTTP_METHOD_POST) {
+  if (request->method != HTTP_METHOD_POST)
     return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED, "Use POST");
-  }
 
-  /* Parse JSON body: {"url":"...","dst":"..."} — simple extraction */
-  const char *body_data = request->body;
-  size_t body_len = request->body_length;
-  char url[DL_URL_MAX] = "";
-  char dst[1024] = "";
-
-  if (body_data && body_len > 0) {
-    /* Simple JSON extraction for "url" and "dst" */
-    const char *u = strstr(body_data, "\"url\"");
-    if (u) {
-      u = strchr(u + 5, '"');
-      if (u) {
-        u++;
-        size_t i = 0;
-        while (*u && *u != '"' && i < sizeof(url) - 1) {
-          if (*u == '\\' && *(u + 1)) { u++; }
-          url[i++] = *u++;
-        }
-        url[i] = '\0';
-      }
-    }
-    const char *d = strstr(body_data, "\"dst\"");
-    if (d) {
-      d = strchr(d + 5, '"');
-      if (d) {
-        d++;
-        size_t i = 0;
-        while (*d && *d != '"' && i < sizeof(dst) - 1) {
-          if (*d == '\\' && *(d + 1)) { d++; }
-          dst[i++] = *d++;
-        }
-        dst[i] = '\0';
-      }
-    }
-  }
-
-  if (!url[0]) {
+  char url[TRANSFER_URL_MAX];
+  char dst[TRANSFER_PATH_MAX];
+  if (!json_body_string(request, "url", url, sizeof(url)) || url[0] == '\0')
     return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing url parameter");
-  }
+  if (!json_body_string(request, "dst", dst, sizeof(dst))) dst[0] = '\0';
 
-  char unsupported_reason[256];
-  if (!dl_url_is_supported(url, unsupported_reason, sizeof(unsupported_reason))) {
-    return error_json(HTTP_STATUS_400_BAD_REQUEST, unsupported_reason);
-  }
+  char reason[TRANSFER_ERROR_MAX];
+  if (!transfer_url_supported(url, reason, sizeof(reason)))
+    return error_json(HTTP_STATUS_400_BAD_REQUEST, reason);
 
   char safe_dst[FTP_PATH_MAX];
-  if (!dl_normalize_destination(dst, safe_dst, sizeof(safe_dst))) {
+  if (!dl_normalize_destination(dst, safe_dst, sizeof(safe_dst)))
     return error_json(HTTP_STATUS_403_FORBIDDEN,
                       "Invalid or read-only destination path");
-  }
 
-  dl_entry_t *dl = dl_find_slot();
-  if (!dl) {
-    return error_json(HTTP_STATUS_409_CONFLICT, "Max concurrent downloads reached");
-  }
-
-  memset(dl, 0, sizeof(dl_entry_t));
-  dl->id = g_dl_next_id++;
-  strncpy(dl->url, url, sizeof(dl->url) - 1);
-  dl->url[sizeof(dl->url) - 1] = '\0';
-  strncpy(dl->dst_path, safe_dst, sizeof(dl->dst_path) - 1);
-  dl->dst_path[sizeof(dl->dst_path) - 1] = '\0';
-  dl_extract_filename(url, dl->filename, sizeof(dl->filename));
-  dl->start_time = time(NULL);
-  dl->active = 1;
-
-#if DL_HAS_BACKEND
-  pthread_t tid;
-  pthread_attr_t attr;
-  pthread_attr_init(&attr);
-  pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-  if (pthread_create(&tid, &attr, dl_thread, dl) != 0) {
-    dl->active = 0;
-    pthread_attr_destroy(&attr);
-    return error_json(HTTP_STATUS_500_INTERNAL_ERROR, "Failed to start download thread");
-  }
-  pthread_attr_destroy(&attr);
-#else
-  /* Without a download backend, mark as error immediately */
-  snprintf(dl->error_msg, sizeof(dl->error_msg),
-           "Download not available in this build");
-  dl->error = 1;
-  dl->done = 1;
-  dl->active = 0;
-#endif
+  int id = 0;
+  char name[TRANSFER_NAME_MAX];
+  char error[TRANSFER_ERROR_MAX];
+  if (transfer_start(url, safe_dst, &id, name, sizeof(name), error,
+                     sizeof(error)) != 0)
+    return error_json(HTTP_STATUS_409_CONFLICT,
+                      error[0] != '\0' ? error : "Failed to start transfer");
 
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
   http_response_add_header(resp, "Content-Type", "application/json");
-  char rbody[256];
-  int rlen = snprintf(rbody, sizeof(rbody),
-      "{\"ok\":true,\"id\":%d,\"name\":\"%s\",\"size\":0}",
-      dl->id, dl->filename);
-  http_response_set_body(resp, rbody, (size_t)rlen);
+  char esc_name[TRANSFER_NAME_MAX * 2U];
+  size_t esc_pos = 0U;
+  esc_name[0] = '\0';
+  (void)json_escape_append(esc_name, sizeof(esc_name), &esc_pos, name);
+  esc_name[(esc_pos < sizeof(esc_name)) ? esc_pos : sizeof(esc_name) - 1U] = '\0';
+  char body[768];
+  int len = snprintf(body, sizeof(body),
+                     "{\"ok\":true,\"id\":%d,\"name\":\"%s\",\"size\":0}",
+                     id, esc_name);
+  http_response_set_body(resp, body, (size_t)len);
   return resp;
 }
 
 static http_response_t *api_dl_status(const http_request_t *request) {
   (void)request;
+  transfer_snapshot_t snaps[TRANSFER_MAX_ACTIVE];
+  size_t count = transfer_snapshot_all(snaps, TRANSFER_MAX_ACTIVE);
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
   http_response_add_header(resp, "Content-Type", "application/json");
   http_response_add_header(resp, "Cache-Control", "no-store");
-
-  /* Build JSON array of all download entries */
-  char body[4096];
-  int pos = 0;
-  pos += snprintf(body + pos, sizeof(body) - (size_t)pos, "{\"downloads\":[");
-
-  int first = 1;
-  for (int i = 0; i < DL_MAX_ACTIVE; i++) {
-    dl_entry_t *dl = &g_downloads[i];
-    if (dl->id == 0) continue;
-    if (!first) pos += snprintf(body + pos, sizeof(body) - (size_t)pos, ",");
-    first = 0;
-
-    int progress = 0;
-    if (dl->total_size > 0) {
-      progress = (int)(dl->downloaded * 100 / dl->total_size);
-      if (progress > 100) progress = 100;
-    } else if (dl->done && !dl->error) {
-      progress = 100;
+  char body[8192];
+  size_t pos = 0U;
+  int n = snprintf(body, sizeof(body), "{\"downloads\":[");
+  if (n < 0) return resp;
+  pos = (size_t)n;
+  for (size_t i = 0U; i < count && pos < sizeof(body); i++) {
+    transfer_snapshot_t *s = &snaps[i];
+    char esc_name[512], esc_url[4096], esc_error[512];
+    size_t ep = 0U;
+    esc_name[0] = esc_url[0] = esc_error[0] = '\0';
+    (void)json_escape_append(esc_name, sizeof(esc_name), &ep, s->filename);
+    esc_name[ep < sizeof(esc_name) ? ep : sizeof(esc_name) - 1U] = '\0';
+    ep = 0U; (void)json_escape_append(esc_url, sizeof(esc_url), &ep, s->url);
+    esc_url[ep < sizeof(esc_url) ? ep : sizeof(esc_url) - 1U] = '\0';
+    ep = 0U; (void)json_escape_append(esc_error, sizeof(esc_error), &ep,
+                                      s->error ? s->error_msg : "");
+    esc_error[ep < sizeof(esc_error) ? ep : sizeof(esc_error) - 1U] = '\0';
+    unsigned progress = s->total_size > 0U
+        ? (unsigned)((s->downloaded * 100U) / s->total_size)
+        : (s->done && !s->error ? 100U : 0U);
+    if (progress > 100U) progress = 100U;
+    n = snprintf(body + pos, sizeof(body) - pos,
+        "%s{\"id\":%d,\"name\":\"%s\",\"url\":\"%s\",\"progress\":%u,"
+        "\"downloaded\":%" PRIu64 ",\"total_size\":%" PRIu64 ",\"speed\":%.0f,"
+        "\"done\":%s,\"error\":\"%s\",\"paused\":%s}",
+        i == 0U ? "" : ",", s->id, esc_name, esc_url, progress,
+        s->downloaded, s->total_size, s->speed, s->done ? "true" : "false",
+        esc_error, s->paused ? "true" : "false");
+    if (n < 0 || (size_t)n >= sizeof(body) - pos) {
+      return error_json(HTTP_STATUS_500_INTERNAL_ERROR,
+                        "Transfer status response too large");
     }
-
-    char esc_name[512];
-    char esc_url[512];
-    char esc_error[512];
-    size_t esc_pos = 0U;
-    esc_name[0] = '\0';
-    esc_url[0] = '\0';
-    esc_error[0] = '\0';
-    (void)json_escape_append(esc_name, sizeof(esc_name), &esc_pos,
-                             dl->filename);
-    esc_name[(esc_pos < sizeof(esc_name)) ? esc_pos : sizeof(esc_name) - 1U] =
-        '\0';
-    esc_pos = 0U;
-    (void)json_escape_append(esc_url, sizeof(esc_url), &esc_pos, dl->url);
-    esc_url[(esc_pos < sizeof(esc_url)) ? esc_pos : sizeof(esc_url) - 1U] =
-        '\0';
-    esc_pos = 0U;
-    (void)json_escape_append(esc_error, sizeof(esc_error), &esc_pos,
-                             dl->error ? dl->error_msg : "");
-    esc_error[(esc_pos < sizeof(esc_error)) ? esc_pos
-                                            : sizeof(esc_error) - 1U] = '\0';
-
-    pos += snprintf(body + pos, sizeof(body) - (size_t)pos,
-        "{\"id\":%d,\"name\":\"%s\",\"url\":\"%s\","
-        "\"progress\":%d,\"downloaded\":%" PRIu64 ",\"total_size\":%" PRIu64 ","
-        "\"speed\":%.0f,\"done\":%s,\"error\":\"%s\",\"paused\":%s}",
-        dl->id, esc_name, esc_url,
-        progress, (uint64_t)dl->downloaded, (uint64_t)dl->total_size,
-        dl->speed, dl->done ? "true" : "false",
-        esc_error,
-        dl->paused ? "true" : "false");
+    pos += (size_t)n;
   }
-  pos += snprintf(body + pos, sizeof(body) - (size_t)pos, "]}");
-
-  http_response_set_body(resp, body, (size_t)pos);
+  n = snprintf(body + pos, sizeof(body) - pos, "]}");
+  if (n < 0 || (size_t)n >= sizeof(body) - pos)
+    return error_json(HTTP_STATUS_500_INTERNAL_ERROR,
+                      "Transfer status response too large");
+  pos += (size_t)n;
+  http_response_set_body(resp, body, pos);
   return resp;
 }
 
 static http_response_t *api_dl_pause(const http_request_t *request) {
-  if (request->method != HTTP_METHOD_POST) {
+  if (request->method != HTTP_METHOD_POST)
     return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED, "Use POST");
-  }
-  /* Parse {"id": N} from body */
-  int id = 0;
-  if (request->body && request->body_length > 0) {
-    const char *idp = strstr(request->body, "\"id\"");
-    if (idp) {
-      idp += 4;
-      while (*idp == ' ' || *idp == ':' || *idp == '\t') idp++;
-      id = atoi(idp);
-    }
-  }
-
-  dl_entry_t *dl = dl_find_by_id(id);
-  if (!dl) return error_json(HTTP_STATUS_404_NOT_FOUND, "Download not found");
-
-  dl->paused = !dl->paused;
-
+  int id = 0, paused = 0;
+  if (!json_body_int(request, "id", &id))
+    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing download id");
+  if (transfer_toggle_pause(id, &paused) != 0)
+    return error_json(HTTP_STATUS_404_NOT_FOUND, "Transfer not found");
   http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
   http_response_add_header(resp, "Content-Type", "application/json");
   char body[64];
   int len = snprintf(body, sizeof(body), "{\"ok\":true,\"paused\":%s}",
-                     dl->paused ? "true" : "false");
+                     paused ? "true" : "false");
   http_response_set_body(resp, body, (size_t)len);
   return resp;
 }
 
 static http_response_t *api_dl_cancel(const http_request_t *request) {
-  if (request->method != HTTP_METHOD_POST) {
+  if (request->method != HTTP_METHOD_POST)
     return error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED, "Use POST");
-  }
   int id = 0;
-  if (request->body && request->body_length > 0) {
-    const char *idp = strstr(request->body, "\"id\"");
-    if (idp) {
-      idp += 4;
-      while (*idp == ' ' || *idp == ':' || *idp == '\t') idp++;
-      id = atoi(idp);
-    }
-  }
-
-  dl_entry_t *dl = dl_find_by_id(id);
-  if (!dl) return error_json(HTTP_STATUS_404_NOT_FOUND, "Download not found");
-
-  dl->error = 1;
-  snprintf(dl->error_msg, sizeof(dl->error_msg), "Cancelled by user");
-  dl->done = 1;
-  dl->active = 0;
-
-  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
-  http_response_add_header(resp, "Content-Type", "application/json");
-  const char *body = "{\"ok\":true}";
-  http_response_set_body(resp, body, strlen(body));
-  return resp;
+  if (!json_body_int(request, "id", &id))
+    return error_json(HTTP_STATUS_400_BAD_REQUEST, "Missing download id");
+  if (transfer_cancel(id) != 0)
+    return error_json(HTTP_STATUS_404_NOT_FOUND, "Transfer not found");
+  return status_json_200(1, "Transfer cancellation requested", id);
 }
 
 /*===========================================================================*

@@ -295,7 +295,7 @@ Output artifacts are versioned and platform-tagged, placed in `build/<target>/<b
 | Build system | `make` |
 | `.bin` generation | `objcopy` (binutils or llvm-objcopy); PS4: `orbis-objcopy`; PS5: `prospero-objcopy` |
 | PS4 | `PS4_PAYLOAD_SDK` set in environment |
-| PS5 | `PS5_PAYLOAD_SDK` set in environment |
+| PS5 | `PS5_PAYLOAD_SDK` set in environment; zhttp builds require the PacBrew SDK bundle with libcurl + libnfs |
 
 ### Commands
 
@@ -315,6 +315,13 @@ make TARGET=ps5   ENABLE_ZHTTPD=0     # disable web UI (on by default on console
 make TARGET=linux test
 make TARGET=macos test
 ```
+
+### PS5 web downloads
+
+PS5 zhttp builds use the maintained PacBrew ports of **libcurl** and **libnfs**.
+The downloader supports HTTP/HTTPS/FTP/FTPS and `nfs://` NAS sources; HTTPS
+certificate verification stays enabled and the PacBrew Mozilla CA bundle is
+embedded into the payload at build time. See [`docs/dependencies.md`](docs/dependencies.md).
 
 ### Artifacts
 

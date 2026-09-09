@@ -279,6 +279,19 @@ ifeq ($(ENABLE_ZHTTPD),1)
     SOURCES += src/exfat_unpacker.c
     SOURCES += src/pkg_unpacker.c
     SOURCES += src/builtin_unzip.c
+    SOURCES += src/transfer/transfer_manager.c
+endif
+
+# NFS URL transfers are enabled by default for PS5 zhttp builds. Other targets
+# can opt in explicitly with ENABLE_LIBNFS=1 when libnfs is installed.
+ifeq ($(ENABLE_ZHTTPD),1)
+  ifeq ($(TARGET),ps5)
+    ENABLE_LIBNFS ?= 1
+  else
+    ENABLE_LIBNFS ?= 0
+  endif
+else
+  ENABLE_LIBNFS := 0
 endif
 
 #============================================================================
@@ -389,28 +402,69 @@ else
 endif
 
 # ── libcurl detection ─────────────────────────────────────────────────────
+# zftpd deliberately uses external libcurl instead of maintaining an HTTP/TLS
+# reimplementation. PS5 consumes the official PacBrew ps5-payload-curl port.
 ifeq ($(ENABLE_LIBCURL),1)
-  _BUNDLED_CURL_H := $(wildcard external/curl/include/curl/curl.h)
-  ifneq ($(filter $(TARGET),ps4 ps5),)
-    # Cross-compilation uses the local pal_curl shim, not external curl headers.
-    $(info [INFO] URL downloads: using pal_curl/SceHttp console backends)
+  ifeq ($(TARGET),ps5)
+    PS5_PKG_CONFIG ?= $(PS5_PAYLOAD_SDK)/bin/prospero-pkg-config
+    _HAS_PS5_CURL := $(shell test -x $(PS5_PKG_CONFIG) && $(PS5_PKG_CONFIG) --exists libcurl && echo 1 || echo 0)
+    ifneq ($(_HAS_PS5_CURL),1)
+      $(error PS5 zhttp requires PacBrew ps5-payload-curl)
+    endif
+    CFLAGS += -DENABLE_LIBCURL=1 $(shell $(PS5_PKG_CONFIG) --cflags libcurl)
+    LIBS += $(shell $(PS5_PKG_CONFIG) --libs libcurl)
+    PS5_CA_BUNDLE ?= $(PS5_PAYLOAD_SDK)/target/user/homebrew/etc/ca-bundle.crt
+    ifeq ($(wildcard $(PS5_CA_BUNDLE)),)
+      $(error PS5 libcurl CA bundle not found: $(PS5_CA_BUNDLE))
+    endif
+    GENERATED_CA_HEADER := $(BUILD_DIR)/generated/zftpd_ca_bundle.h
+    CFLAGS += -DZFTPD_EMBEDDED_CA_BUNDLE=1 -I$(BUILD_DIR)/generated
+    $(info [INFO] URL downloads: external PacBrew libcurl + embedded CA bundle)
+  else ifeq ($(TARGET),ps4)
+    PS4_CURL_CONFIG ?= $(shell command -v orbis-curl-config 2>/dev/null || true)
+    ifeq ($(strip $(PS4_CURL_CONFIG)),)
+      $(info [INFO] PS4 external libcurl not found — URL downloader disabled)
+      override ENABLE_LIBCURL := 0
+    else
+      CFLAGS += -DENABLE_LIBCURL=1 $(shell $(PS4_CURL_CONFIG) --cflags)
+      LIBS += $(shell $(PS4_CURL_CONFIG) --static-libs)
+      $(info [INFO] URL downloads: external PS4 libcurl)
+    endif
   else
-    # Desktop: compiler probe
     _HAS_CURL := $(shell echo '\#include <curl/curl.h>' | $(CC) -xc -fsyntax-only - 2>/dev/null && echo 1 || echo 0)
     ifneq ($(_HAS_CURL),1)
       $(info [INFO] libcurl headers not found — disabling ENABLE_LIBCURL)
       override ENABLE_LIBCURL := 0
+    else
+      CFLAGS += -DENABLE_LIBCURL=1
+      LIBS += -lcurl
     endif
   endif
 endif
 
 ifeq ($(ENABLE_LIBCURL),1)
-    CFLAGS += -DENABLE_LIBCURL=1
-    ifneq ($(filter $(TARGET),ps4 ps5),)
-        SOURCES += src/pal_curl.c
-    else
-        LIBS += -lcurl
+  SOURCES += src/transfer/backend_curl.c
+endif
+
+# ── libnfs detection ──────────────────────────────────────────────────────
+ifeq ($(ENABLE_LIBNFS),1)
+  ifeq ($(TARGET),ps5)
+    PS5_PKG_CONFIG ?= $(PS5_PAYLOAD_SDK)/bin/prospero-pkg-config
+    _HAS_LIBNFS := $(shell test -x $(PS5_PKG_CONFIG) && $(PS5_PKG_CONFIG) --exists libnfs && echo 1 || echo 0)
+    ifneq ($(_HAS_LIBNFS),1)
+      $(error PS5 NFS transfers require PacBrew ps5-payload-libnfs)
     endif
+    CFLAGS += -DENABLE_LIBNFS=1 $(shell $(PS5_PKG_CONFIG) --cflags libnfs)
+    LIBS += $(shell $(PS5_PKG_CONFIG) --libs libnfs)
+  else
+    _HAS_LIBNFS := $(shell pkg-config --exists libnfs 2>/dev/null && echo 1 || echo 0)
+    ifneq ($(_HAS_LIBNFS),1)
+      $(error ENABLE_LIBNFS=1 requires libnfs development files)
+    endif
+    CFLAGS += -DENABLE_LIBNFS=1 $(shell pkg-config --cflags libnfs)
+    LIBS += $(shell pkg-config --static --libs libnfs)
+  endif
+  SOURCES += src/transfer/backend_nfs.c
 endif
 
 # Object files (handle both src/ and mcp/src/ paths)
@@ -651,6 +705,17 @@ debug-all:
 		echo "==> Building $$t (debug)"; \
 		$(MAKE) TARGET=$$t BUILD_TYPE=debug clean all; \
 	done
+# Generate the PS5 trust store from PacBrew's Mozilla CA bundle.
+ifeq ($(TARGET),ps5)
+ifeq ($(ENABLE_LIBCURL),1)
+$(OBJ_DIR)/transfer/backend_curl.o: $(GENERATED_CA_HEADER)
+
+$(GENERATED_CA_HEADER): $(PS5_CA_BUNDLE) tools/embed_binary.py
+	@echo "  [GEN] $@"
+	@python3 tools/embed_binary.py $< $@ zftpd_ca_bundle
+endif
+endif
+
 # Compile C source files
 $(OBJ_DIR)/%.o: src/%.c | $(OBJ_DIR) $(DEP_DIR)
 	@echo "  [CC]  $<"
@@ -720,6 +785,9 @@ TEST_BINS += $(BUILD_DIR)/tests/test_list_flag
 TEST_BINS += $(BUILD_DIR)/tests/test_instance
 TEST_BINS += $(BUILD_DIR)/tests/test_chmod
 TEST_BINS += $(BUILD_DIR)/tests/test_copy_atomic
+ifeq ($(ENABLE_ZHTTPD),1)
+TEST_BINS += $(BUILD_DIR)/tests/test_transfer
+endif
 
 ifeq ($(filter $(TARGET),linux macos),)
 test: $(OUTPUT_BIN)
