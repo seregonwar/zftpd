@@ -179,14 +179,18 @@ var ZFTPD = ZFTPD || {};
       return;
     }
     var type = detectUrlType(url);
-    if (type === 'http') {
-      /* Basic URL check */
-      if (!/^https?:\/\//i.test(url) && !/^ftp:\/\//i.test(url)) {
-        valEl.textContent = 'Add https:// for direct links';
+    if (type === 'direct') {
+      if (!/^(https?|ftps?):\/\//i.test(url)) {
+        valEl.textContent = 'Use http://, https://, ftp:// or ftps://';
         valEl.className = 'dl-validation dl-val-wn';
         valEl.style.display = 'block';
         return;
       }
+    } else if (type === 'magnet') {
+      valEl.textContent = 'BitTorrent/magnet is not supported by this build';
+      valEl.className = 'dl-validation dl-val-wn';
+      valEl.style.display = 'block';
+      return;
     }
     valEl.textContent = 'Detected: ' + typeLabel(type);
     valEl.className = 'dl-validation dl-val-ok';
@@ -196,6 +200,8 @@ var ZFTPD = ZFTPD || {};
   function typeLabel(type) {
     switch (type) {
       case 'magnet':    return 'Magnet link';
+      case 'nfs':       return 'NFS share';
+      case 'ftp':       return 'FTP / FTPS';
       case 'gdrive':    return 'Google Drive';
       case 'mega':      return 'MEGA';
       case 'mediafire': return 'MediaFire';
@@ -220,7 +226,7 @@ var ZFTPD = ZFTPD || {};
       wrap.innerHTML = '<div class="dl-empty">' +
         '<div class="dl-empty-icon">' + ICO.cloudDown + '</div>' +
         '<div class="dl-empty-title">No active downloads</div>' +
-        '<div class="dl-empty-sub">Paste a URL or magnet link above</div>' +
+        '<div class="dl-empty-sub">Paste an HTTP, FTP or NFS URL above</div>' +
         '</div>';
       return;
     }
@@ -604,12 +610,14 @@ var ZFTPD = ZFTPD || {};
 
   /* ── URL type detection ── */
   function detectUrlType(url) {
+    if (/^nfs:\/\//i.test(url)) return 'nfs';
+    if (/^ftps?:\/\//i.test(url)) return 'ftp';
     if (/magnet:/i.test(url)) return 'magnet';
     if (/drive\.google\.com/i.test(url)) return 'gdrive';
     if (/mega\.(nz|co\.nz)/i.test(url)) return 'mega';
     if (/mediafire\.com/i.test(url)) return 'mediafire';
     if (/1fichier\.com/i.test(url)) return '1fichier';
-    return 'http';
+    return 'direct';
   }
 
   /* ── Extract filename from URL ── */
@@ -658,6 +666,8 @@ var ZFTPD = ZFTPD || {};
   function typeIcon(type) {
     switch (type) {
       case 'magnet':    return ICO.link;
+      case 'nfs':       return ICO.hdd;
+      case 'ftp':       return ICO.cloudDown;
       case 'gdrive':    return ICO.cloud;
       case 'mega':      return ICO.cloud;
       case 'mediafire': return ICO.cloud;
