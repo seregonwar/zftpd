@@ -218,10 +218,14 @@ SOURCES += src/ftp/ftp_path.c
 SOURCES += src/ftp/ftp_server.c
 SOURCES += src/ftp/ftp_session.c
 SOURCES += src/ftp/ftp_protocol.c
-SOURCES += src/ftp/ftp_commands.c
 SOURCES += src/ftp/commands/control.c
 SOURCES += src/ftp/commands/listing.c
 SOURCES += src/ftp/commands/transfer.c
+SOURCES += src/ftp/commands/filesystem.c
+SOURCES += src/ftp/commands/data_connection.c
+SOURCES += src/ftp/commands/extensions.c
+SOURCES += src/ftp/commands/information.c
+SOURCES += src/ftp/commands/transfer_params.c
 SOURCES += src/ftp/ftp_buffer_pool.c
 SOURCES += src/ftp/ftp_log.c
 SOURCES += src/ftp/ftp_crypto.c
@@ -247,6 +251,9 @@ endif
 
 # Artifact/build variants (e.g., zhttp)
 ifeq ($(ENABLE_ZHTTPD),1)
+TEST_BINS += $(BUILD_DIR)/tests/test_http_query
+TEST_BINS += $(BUILD_DIR)/tests/test_http_confinement
+TEST_BINS += $(BUILD_DIR)/tests/test_notify
     VARIANT_TAG := zhttp
 endif
 
@@ -803,13 +810,11 @@ TEST_BINS += $(BUILD_DIR)/tests/test_buffer_pool
 TEST_BINS += $(BUILD_DIR)/tests/test_scratch
 TEST_BINS += $(BUILD_DIR)/tests/test_alloc
 TEST_BINS += $(BUILD_DIR)/tests/test_mlst_ascii
-TEST_BINS += $(BUILD_DIR)/tests/test_http_query
-TEST_BINS += $(BUILD_DIR)/tests/test_http_confinement
-TEST_BINS += $(BUILD_DIR)/tests/test_notify
 TEST_BINS += $(BUILD_DIR)/tests/test_list_flag
 TEST_BINS += $(BUILD_DIR)/tests/test_instance
 TEST_BINS += $(BUILD_DIR)/tests/test_chmod
 TEST_BINS += $(BUILD_DIR)/tests/test_copy_atomic
+TEST_BINS += $(BUILD_DIR)/tests/test_ftp_commands
 ifeq ($(ENABLE_ZHTTPD),1)
 TEST_BINS += $(BUILD_DIR)/tests/test_transfer
 TEST_BINS += $(BUILD_DIR)/tests/test_http_api_common

@@ -162,13 +162,7 @@ static ftp_error_t mlsx_format_line(const vfs_stat_t *st,
   return FTP_OK;
 }
 
-/*===========================================================================*
- * DIRECTORY LISTING
- *===========================================================================*/
 
-/**
- * @brief Helper: Send directory listing via data connection
- */
 static ftp_error_t send_directory_listing(ftp_session_t *session,
                                           const char *path, int detailed) {
   DIR *dir = opendir(path);
@@ -287,9 +281,6 @@ static ftp_error_t send_directory_listing(ftp_session_t *session,
   return FTP_OK;
 }
 
-/**
- * @brief LIST command - Detailed directory listing
- */
 static ftp_error_t cmd_list_common(ftp_session_t *session, const char *args,
                                    int detailed) {
   if (session == NULL) {
@@ -348,24 +339,12 @@ ftp_error_t cmd_NLST(ftp_session_t *session, const char *args) {
   return cmd_list_common(session, args, 0);
 }
 
-/**
- * @brief MLSD command - Machine listing (RFC 3659)
- *
- *   Unlike LIST which outputs human-readable "ls -l" lines,
- *   MLSD outputs machine-readable facts per entry:
- *
- *     type=dir;size=0;modify=20250222120000; dirname
- *     type=file;size=1234;modify=20250222120000; filename
- *
- *   Android apps (File Manager+, SuperFTP) use MLSD exclusively
- *   and cannot parse LIST format.
- */
+/* RFC 3659 machine-readable directory listing. */
 ftp_error_t cmd_MLSD(ftp_session_t *session, const char *args) {
   if (session == NULL) {
     return FTP_ERR_INVALID_PARAM;
   }
 
-  /* Resolve path (use CWD if no args) */
   const char *path_arg = (args != NULL) ? args : session->cwd;
 
   char resolved[FTP_PATH_MAX];
@@ -377,7 +356,6 @@ ftp_error_t cmd_MLSD(ftp_session_t *session, const char *args) {
                                   "Invalid path.");
   }
 
-  /* Open data connection FIRST, then send 150 (same as LIST) */
   err = ftp_session_open_data_connection(session);
   if (err != FTP_OK) {
     return ftp_session_send_reply(session, FTP_REPLY_425_CANT_OPEN_DATA, NULL);
@@ -385,23 +363,20 @@ ftp_error_t cmd_MLSD(ftp_session_t *session, const char *args) {
 
   ftp_session_send_reply(session, FTP_REPLY_150_FILE_OK, NULL);
 
-  /* Protocol pacing: prevent 150 and 226 from merging */
-  usleep(50000); /* 50 ms */
+  /* Keep 150 and 226 in separate control-channel reads for fragile clients. */
+  usleep(50000);
 
-  /* Read directory and send machine-readable entries */
   DIR *dir = opendir(resolved);
   if (dir != NULL) {
     struct dirent *entry;
     char line_buffer[FTP_LIST_LINE_SIZE];
 
     while ((entry = readdir(dir)) != NULL) {
-      /* Skip . and .. */
       if ((strcmp(entry->d_name, ".") == 0) ||
           (strcmp(entry->d_name, "..") == 0)) {
         continue;
       }
 
-      /* Stat the entry */
       vfs_stat_t st;
       int have_stat = 0;
       char fullpath[FTP_PATH_MAX];
@@ -434,15 +409,11 @@ ftp_error_t cmd_MLSD(ftp_session_t *session, const char *args) {
     closedir(dir);
   }
 
-  /* Close data connection */
   ftp_session_close_data_connection(session);
 
   return ftp_session_send_reply(session, FTP_REPLY_226_TRANSFER_COMPLETE, NULL);
 }
 
-/**
- * @brief MLST command - Machine list single file (RFC 3659)
- */
 ftp_error_t cmd_MLST(ftp_session_t *session, const char *args) {
   if (session == NULL) {
     return FTP_ERR_INVALID_PARAM;

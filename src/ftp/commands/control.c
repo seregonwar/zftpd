@@ -32,13 +32,7 @@ SOFTWARE.
 #include <stdio.h>
 #include <string.h>
 
-/*===========================================================================*
- * AUTHENTICATION AND CONTROL
- *===========================================================================*/
 
-/**
- * @brief USER command - Specify user name
- */
 ftp_error_t cmd_USER(ftp_session_t *session, const char *args) {
   if ((session == NULL) || (args == NULL)) {
     return FTP_ERR_INVALID_PARAM;
@@ -62,9 +56,6 @@ ftp_error_t cmd_USER(ftp_session_t *session, const char *args) {
   return ftp_session_send_reply(session, FTP_REPLY_230_LOGGED_IN, NULL);
 }
 
-/**
- * @brief PASS command - Specify password
- */
 ftp_error_t cmd_PASS(ftp_session_t *session, const char *args) {
   (void)args;
 
@@ -79,9 +70,6 @@ ftp_error_t cmd_PASS(ftp_session_t *session, const char *args) {
   return ftp_session_send_reply(session, FTP_REPLY_230_LOGGED_IN, NULL);
 }
 
-/**
- * @brief QUIT command - Terminate session
- */
 ftp_error_t cmd_QUIT(ftp_session_t *session, const char *args) {
   (void)args; /* Unused */
 
@@ -92,9 +80,6 @@ ftp_error_t cmd_QUIT(ftp_session_t *session, const char *args) {
   return ftp_session_send_reply(session, FTP_REPLY_221_GOODBYE, NULL);
 }
 
-/**
- * @brief NOOP command - No operation
- */
 ftp_error_t cmd_NOOP(ftp_session_t *session, const char *args) {
   (void)args; /* Unused */
 
@@ -105,19 +90,12 @@ ftp_error_t cmd_NOOP(ftp_session_t *session, const char *args) {
   return ftp_session_send_reply(session, FTP_REPLY_200_OK, NULL);
 }
 
-/*===========================================================================*
- * NAVIGATION
- *===========================================================================*/
 
-/**
- * @brief CWD command - Change working directory
- */
 ftp_error_t cmd_CWD(ftp_session_t *session, const char *args) {
   if ((session == NULL) || (args == NULL)) {
     return FTP_ERR_INVALID_PARAM;
   }
 
-  /* Resolve path */
   char resolved[FTP_PATH_MAX];
   ftp_error_t err = ftp_path_resolve(session, args, resolved, sizeof(resolved));
 
@@ -126,7 +104,6 @@ ftp_error_t cmd_CWD(ftp_session_t *session, const char *args) {
                                   "Invalid path.");
   }
 
-  /* Check if directory exists */
   int is_dir = pal_path_is_directory(resolved);
 
   if (is_dir != 1) {
@@ -134,7 +111,6 @@ ftp_error_t cmd_CWD(ftp_session_t *session, const char *args) {
                                   "Not a directory.");
   }
 
-  /* Update CWD */
   size_t len = strlen(resolved);
   if (len >= sizeof(session->cwd)) {
     return ftp_session_send_reply(session, FTP_REPLY_550_FILE_ERROR,
@@ -147,9 +123,6 @@ ftp_error_t cmd_CWD(ftp_session_t *session, const char *args) {
                                 "Directory changed.");
 }
 
-/**
- * @brief CDUP command - Change to parent directory
- */
 ftp_error_t cmd_CDUP(ftp_session_t *session, const char *args) {
   (void)args; /* Unused */
 
@@ -157,13 +130,9 @@ ftp_error_t cmd_CDUP(ftp_session_t *session, const char *args) {
     return FTP_ERR_INVALID_PARAM;
   }
 
-  /* Navigate to parent: "../" */
   return cmd_CWD(session, "..");
 }
 
-/**
- * @brief PWD command - Print working directory
- */
 ftp_error_t cmd_PWD(ftp_session_t *session, const char *args) {
   (void)args; /* Unused */
 

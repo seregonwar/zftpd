@@ -60,23 +60,8 @@ extern int _fstatfs(int, struct statfs *);
 #  endif
 #endif
 
-/*===========================================================================*
- * PFS FILE-CREATION SERIALISER
- *
- * On PS4/PS5, pal_file_open(O_CREAT) on a PFS-encrypted partition acquires
- * an inode-allocation lock inside the kernel.  When two FTP sessions call it
- * simultaneously the second one is forced to spin-wait on that same lock,
- * turning a ~5 s open into a >20 s open — past FileZilla's command-response
- * timeout — with 0 bytes transferred.
- *
- * Serialising O_CREAT opens at the application level lets each session
- * proceed without journal contention.  The total elapsed time for two
- * parallel uploads is ~10 s instead of >20 s, comfortably within the
- * FileZilla command-response timeout.
- *
- * The lock is only held during the open() call itself (typically 3–8 s on
- * PFS); the actual data transfer runs fully in parallel.
- *===========================================================================*/
+/* PFS serializes inode creation on PS4/PS5. Serialize only O_CREAT opens
+ * in userspace to avoid multi-session journal contention and client timeouts. */
 #if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
 static pthread_mutex_t g_pfs_create_mtx = PTHREAD_MUTEX_INITIALIZER;
 
@@ -99,24 +84,8 @@ static int pfs_mutex_lock_timeout(pthread_mutex_t *mtx, int timeout_s) {
   return ETIMEDOUT;
 }
 
-/*
- * pfs_needs_serialisation — detect whether O_CREAT needs the PFS mutex.
- *
- *   On PS4/PS5, pal_file_open(O_CREAT) on a PFS-encrypted partition
- *   (/data/, /data/pkg/, etc.) takes 3–8 seconds per file because the
- *   kernel serialises inode allocation through the PFS journal.  The
- *   application-level mutex prevents two sessions from hitting the
- *   kernel lock simultaneously (which would inflate each open to >20 s).
- *
- *   Non-PFS filesystems (exFAT USB drives at /mnt/usb0/, FAT32, etc.)
- *   do NOT have this bottleneck: O_CREAT completes in microseconds.
- *   Holding the global mutex for them would only add unnecessary latency
- *   and block other sessions that DO target PFS.
- *
- *   This function statfs()'s the parent directory and checks the
- *   filesystem type.  Returns 1 for PFS (slow, needs mutex), 0 for
- *   fast filesystems (exFAT, msdosfs), and 1 on any error (safe fallback).
- */
+/* exFAT/msdosfs/ufs bypass the PFS creation lock; unknown filesystems
+ * use the conservative serialized path. */
 static int pfs_needs_serialisation(const char *file_path) {
   /* Extract parent directory */
   char dir[FTP_PATH_MAX];
@@ -128,13 +97,12 @@ static int pfs_needs_serialisation(const char *file_path) {
       dir[0] = '/';
       dir[1] = '\0';
     } else if (dlen >= sizeof(dir)) {
-      return 1; /* path too long — safe fallback */
+      return 1;
     } else {
       memcpy(dir, file_path, dlen);
       dir[dlen] = '\0';
     }
   } else {
-    /* No slash — relative path, assume slow (safe fallback) */
     return 1;
   }
 
@@ -142,7 +110,7 @@ static int pfs_needs_serialisation(const char *file_path) {
    * path-based statfs() on PS4/PS5 for certain mount types. */
   int dfd = open(dir, O_RDONLY);
   if (dfd < 0) {
-    return 1; /* cannot stat — safe fallback */
+    return 1;
   }
 
   struct statfs sfs;
@@ -151,20 +119,18 @@ static int pfs_needs_serialisation(const char *file_path) {
   close(dfd);
 
   if (sfs_ok == 0) {
-    return 1; /* stat failed — safe fallback */
+    return 1;
   }
 
-  /* Known fast filesystems: O_CREAT is microseconds, not seconds.
-   * Skip the mutex — no PFS journal contention possible here. */
   if (sfs.f_fstypename[0] != '\0') {
     if (strcmp(sfs.f_fstypename, "exfat") == 0 ||
         strcmp(sfs.f_fstypename, "msdosfs") == 0 ||
         strcmp(sfs.f_fstypename, "ufs") == 0) {
-      return 0; /* fast — no serialisation needed */
+      return 0;
     }
   }
 
-  return 1; /* PFS or unknown — serialise to be safe */
+  return 1;
 }
 #endif
 
@@ -261,19 +227,12 @@ static ftp_error_t upload_failure_reply(ftp_session_t *session,
                                 detail);
 }
 
-/*===========================================================================*
- * FILE TRANSFER
- *===========================================================================*/
 
-/**
- * @brief RETR command - Retrieve (download) file
- */
 ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
   if ((session == NULL) || (args == NULL)) {
     return FTP_ERR_INVALID_PARAM;
   }
 
-  /* Resolve path */
   char resolved[FTP_PATH_MAX];
   ftp_error_t err = ftp_path_resolve(session, args, resolved, sizeof(resolved));
 
@@ -305,7 +264,6 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
     }
   }
 
-  /* Handle REST (resume) offset */
   off_t offset = session->restart_offset;
   if ((offset < 0) || ((uint64_t)offset > file_size)) {
     vfs_close(&node);
@@ -315,7 +273,6 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
   }
   vfs_set_offset(&node, (uint64_t)offset);
 
-  /* Open data connection */
   ftp_session_send_reply(session, FTP_REPLY_150_FILE_OK, NULL);
 
   err = ftp_session_open_data_connection(session);
@@ -327,16 +284,10 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
   size_t remaining = (size_t)(file_size - (uint64_t)offset);
   uint64_t bytes_sent = 0U;
 
-  /*
-   * sendfile eligibility: kernel-to-kernel transfer
-   *
-   *   Disabled when encryption is active (XOR must happen in userspace)
-   *   or when rate limiting is on (sendfile can't be throttled).
-   */
+  /* Encryption and throttling require userspace, so this RETR path cannot use them. */
   int use_sendfile = ((vfs_get_caps(&node) & VFS_CAP_SENDFILE) != 0U) &&
                      (FTP_TRANSFER_RATE_LIMIT_BPS == 0U);
 
-  /* DIAGNOSTIC: log transfer configuration so bottlenecks are visible in klog */
   {
     char diag[320];
     /* Limit filename length to fit the fixed-size log buffer.
@@ -348,7 +299,6 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
     struct statfs sfs;
     const char *fstype = "unknown";
     if (_fstatfs(node.fd, &sfs) == 0) { fstype = sfs.f_fstypename; }
-    /* 140 = fixed text + numeric fields + fstype + NUL */
     int max_fn = (int)(sizeof(diag) - 140);
     if (max_fn < 0) { max_fn = 0; }
     snprintf(diag, sizeof(diag),
@@ -359,7 +309,6 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
       (unsigned)FTP_SENDFILE_EAGAIN_SLEEP_US,
       (unsigned)FTP_TCP_DATA_SNDBUF);
 #else
-    /* 80 = "[RETR] file=" + " size=%llu sendfile=%d chunk=%u" + NUL */
     int max_fn = (int)(sizeof(diag) - 80);
     if (max_fn < 0) { max_fn = 0; }
     snprintf(diag, sizeof(diag),
@@ -383,13 +332,7 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
                                   "sendfile unavailable (crypto/rate-limit active).");
   }
 
-  /*=========================================================================*
-   *  Transfer loop: sendfile only — no read() fallback.
-   *
-   *  If sendfile(2) cannot complete the transfer, the connection is
-   *  aborted with 426.  There is no userspace read()+send() path:
-   *  zero-copy DMA or failure.
-   *=========================================================================*/
+  /* RETR is intentionally sendfile-only: zero-copy succeeds or the transfer aborts. */
 
   pal_socket_cork(session->data_fd);
 
@@ -423,21 +366,14 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
       continue;
     }
 
-    /*
-     * Fatal storage error — EIO / ESTALE / EBADF / EFAULT.
-     * Do NOT retry sendfile on a bad vnode — PS5/PS4 can KP.
-     */
+    /* Retrying a bad vnode can panic PS4/PS5, so storage faults are terminal. */
     if ((sent < 0) && ((errno == EIO) || (errno == ESTALE) ||
                        (errno == EBADF) || (errno == EFAULT))) {
       remaining = 1U;
       break;
     }
 
-    /*
-     * sent == 0 or sent < 0 with EAGAIN:
-     * TCP back-pressure or platform driver stall.
-     * Retry up to FTP_SENDFILE_EAGAIN_RETRIES times.
-     */
+    /* Retry bounded TCP back-pressure/driver stalls. */
     {
       int recovered = 0;
       for (int r = 0; r < FTP_SENDFILE_EAGAIN_RETRIES; r++) {
@@ -467,7 +403,6 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
         if ((r_sent < 0) && (errno == EINTR)) {
           r--; /* don't count EINTR as a retry */
         }
-        /* On fatal error (EIO etc.), stop retrying immediately */
         if ((r_sent < 0) && ((errno == EIO) || (errno == ESTALE) ||
                              (errno == EBADF) || (errno == EFAULT))) {
           break;
@@ -475,18 +410,16 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
       }
 
       if (recovered) {
-        continue; /* back to sendfile loop */
+        continue;
       }
     }
 
-    /* Unrecoverable — abort transfer */
     remaining = 1U;
     break;
   }
 
   pal_socket_uncork(session->data_fd);
 
-  /* Cleanup */
   vfs_close(&node);
   ftp_session_close_data_connection(session);
   session->restart_offset = 0;
@@ -494,20 +427,6 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
   if (remaining == 0U) {
     atomic_fetch_add(&session->stats.files_sent, 1U);
     ftp_log_session_event(session, "RETR_OK", FTP_OK, bytes_sent);
-    /* Log throughput so we can see MB/s in klog without an external tool */
-    {
-      struct timespec ts_end;
-      clock_gettime(CLOCK_MONOTONIC, &ts_end);
-      /* reuse session->last_activity as a rough start proxy — already set
-         at transfer open. For a real elapsed we'd need a start timestamp.
-         Instead log raw bytes; the surrounding timestamps in klog give elapsed. */
-      char tput[128];
-      snprintf(tput, sizeof(tput),
-               "[RETR] complete: bytes=%llu (%.1f MB)",
-               (unsigned long long)bytes_sent,
-               (double)bytes_sent / (1024.0 * 1024.0));
-      ftp_log_line(FTP_LOG_INFO, tput);
-    }
     return ftp_session_send_reply(session, FTP_REPLY_226_TRANSFER_COMPLETE,
                                   NULL);
   }
@@ -517,31 +436,19 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
                                 "Transfer failed.");
 }
 
-/*===========================================================================*
- *  DOUBLE-BUFFERED WRITER — overlaps recv() and write()
- *
- *   ┌────────────┐  mutex+cond  ┌────────────┐
- *   │ FTP thread │ ──► swap ──► │ Writer thr │
- *   │  recv()    │              │  write()   │
- *   │  buf[0]    │              │  buf[1]    │
- *   └────────────┘              └────────────┘
- *
- *  The FTP thread fills the active buffer via recv(), then swaps
- *  buffers with the writer thread which drains the filled buffer
- *  to disk.  This overlaps network I/O with PFS crypto writes.
- *===========================================================================*/
+/* Non-console STOR overlaps network receive with disk writes using two buffers. */
 
 typedef struct {
-  void *buf[2];     /* two buffers (from pool or malloc)     */
-  size_t len[2];    /* bytes stored in each buffer           */
-  int active;       /* index currently being filled by recv  */
-  int fd;           /* destination file descriptor           */
-  int error;        /* writer error errno (0 = ok)           */
-  int done;         /* set by recv thread on EOF/error       */
-  uint64_t written; /* total bytes flushed to disk           */
+  void *buf[2];
+  size_t len[2];
+  int active;
+  int fd;
+  int error;
+  int done;
+  uint64_t written;
   pthread_mutex_t mtx;
-  pthread_cond_t cv_ready; /* writer waits: "data ready to write" */
-  pthread_cond_t cv_free;  /* recv waits:  "buffer free to fill"  */
+  pthread_cond_t cv_ready;
+  pthread_cond_t cv_free;
 } stor_pipe_t;
 
 static void *stor_writer_thread(void *arg) {
@@ -549,7 +456,6 @@ static void *stor_writer_thread(void *arg) {
 
   pthread_mutex_lock(&p->mtx);
   for (;;) {
-    /* Wait for data or done signal */
     while ((p->len[1 - p->active] == 0U) && (p->done == 0)) {
       pthread_cond_wait(&p->cv_ready, &p->mtx);
     }
@@ -558,10 +464,9 @@ static void *stor_writer_thread(void *arg) {
     size_t nbytes = p->len[drain];
 
     if ((nbytes == 0U) && (p->done != 0)) {
-      break; /* recv finished, nothing left to write */
+      break;
     }
 
-    /* Unlock while writing (slow PFS crypto path) */
     pthread_mutex_unlock(&p->mtx);
 
     ssize_t w = pal_file_write_all(p->fd, p->buf[drain], nbytes);
@@ -575,36 +480,21 @@ static void *stor_writer_thread(void *arg) {
     }
     p->len[drain] = 0U;
 
-    /* Signal recv thread that buffer is free */
     pthread_cond_signal(&p->cv_free);
 
     if (write_ok == 0) {
-      break; /* write error */
+      break;
     }
   }
   pthread_mutex_unlock(&p->mtx);
   return NULL;
 }
 
-/**
- * @brief STOR command - Store (upload) file
- *
- *  REST + STOR resume workflow
- *  ~~~~~~~~~~~~~~~~~~~~~~~~~~~
- *  Client:  REST 52428800        <- set offset = 50 MB
- *  Server:  350 Restart accepted
- *  Client:  STOR bigfile.pkg     <- resumes here
- *  Server:  opens file WITHOUT O_TRUNC, lseek(offset)
- *           receives remaining bytes and writes from offset
- *
- *  If restart_offset == 0 the file is truncated as usual.
- */
 ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
   if ((session == NULL) || (args == NULL)) {
     return FTP_ERR_INVALID_PARAM;
   }
 
-  /* Resolve path */
   char resolved[FTP_PATH_MAX];
   ftp_error_t err = ftp_path_resolve(session, args, resolved, sizeof(resolved));
 
@@ -614,51 +504,35 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
                                   "Invalid path.");
   }
 
-  /*
-   * Atomic write strategy
-   * ~~~~~~~~~~~~~~~~~~~~~
-   *   Fresh upload (offset == 0):
-   *     write to  /path/.zftpd.tmp.FILENAME
-   *     rename()  to final path on success
-   *     → external daemons (ShadowMount) never see a partial file
-   *
-   *   Resume upload (offset > 0):
-   *     write directly to the original file (need to lseek)
-   */
+  /* Fresh non-console uploads use a temporary sibling and atomic rename. */
   char tmp_path[FTP_PATH_MAX];
   int was_fresh_upload = (session->restart_offset == 0) ? 1 : 0;
 #if defined(PLATFORM_PS5) || defined(PLATFORM_PS4)
-  /* PS4/PS5 /data/: no ShadowMount watching, skip atomic temp→rename overhead.
-   * On PS4, PFS-encrypted writes through a temp file add ~40ms per 256 KB
-   * chunk; the double-buffer producer stalls waiting for the writer, the TCP
-   * recv buffer fills, and the FileZilla client times out after 20 s. */
+  /* Temp-file writes add significant PFS latency on consoles; write directly there. */
   int use_atomic = 0;
 #else
   int use_atomic = (session->restart_offset == 0) ? 1 : 0;
 #endif
 
   if (use_atomic != 0) {
-    /* Build temp name: /dir/.zftpd.tmp.basename */
     const char *slash = strrchr(resolved, '/');
     if (slash != NULL) {
       size_t dir_len = (size_t)(slash - resolved);
       size_t tail_len = strlen(slash + 1);
-      /* Truncate basename if the temp path would exceed FTP_PATH_MAX.
-       * Use overflow-safe comparison to avoid size_t wrap-around when
-       * dir_len is very large. */
-      size_t overhead = 14; /* "/.zftpd.tmp." + NUL */
+      /* Bound basename arithmetic before constructing the temporary path. */
+      const size_t overhead = sizeof("/.zftpd.tmp.");
       if (dir_len < sizeof(tmp_path) - overhead) {
         size_t max_tail = sizeof(tmp_path) - dir_len - overhead;
         if (tail_len > max_tail) { tail_len = max_tail; }
       } else {
-        tail_len = 0; /* dir too long — truncate basename entirely */
+        tail_len = 0;
       }
       int n = snprintf(tmp_path, sizeof(tmp_path), "%.*s/.zftpd.tmp.%.*s",
                        (int)dir_len, resolved, (int)tail_len, slash + 1);
       (void)n;
     } else {
       size_t name_len = strlen(resolved);
-      size_t max_name = sizeof(tmp_path) - 13; /* .zftpd.tmp. + NUL */
+      size_t max_name = sizeof(tmp_path) - sizeof(".zftpd.tmp.");
       if (name_len > max_name) { name_len = max_name; }
       int n = snprintf(tmp_path, sizeof(tmp_path), ".zftpd.tmp.%.*s",
                        (int)name_len, resolved);
@@ -673,28 +547,8 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
     open_flags |= O_TRUNC;
   }
 
-  /*
-   * Open the destination file BEFORE sending 150 or accepting the data
-   * connection.  This matches ftpsrv's proven ordering.
-   *
-   * On PS4/PS5, pal_file_open(O_CREAT|O_TRUNC) on a PFS-encrypted partition
-   * (/data/pkg/) can block for several seconds while the filesystem allocates
-   * and encrypts the inode.  The critical insight is WHERE that latency is
-   * hidden:
-   *
-   *   Wrong order (150 → accept → open):
-   *     The client receives 150 and immediately connects / starts sending.
-   *     The server is still blocked in open().  The TCP receive buffer fills
-   *     in milliseconds (LAN speed >> PFS throughput), the window drops to 0,
-   *     the sender stalls, and FileZilla's 20-second DATA INACTIVITY timer
-   *     fires — even though 0 bytes were transferred.
-   *
-   *   Correct order (open → 150 → accept):
-   *     The latency is absorbed while the client is waiting for the STOR
-   *     command response (FileZilla's COMMAND-RESPONSE timeout, 20 s).
-   *     When 150 finally arrives the server is already ready to call recv();
-   *     data starts flowing immediately and the inactivity timer never fires.
-   */
+  /* Open before 150/accept: PFS O_CREAT can block long enough to fill the
+   * client-facing TCP receive window if data transfer has already started. */
   int fd = -1;
   err = upload_open_file(session, write_path, open_flags,
                          "Cannot create file.", &fd);
@@ -703,7 +557,6 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
     return err;
   }
 
-  /* Seek to restart offset for resume uploads */
   if (session->restart_offset > 0) {
     if (lseek(fd, session->restart_offset, SEEK_SET) < 0) {
       pal_file_close(fd);
@@ -732,65 +585,12 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
     return ftp_session_send_reply(session, FTP_REPLY_425_CANT_OPEN_DATA, NULL);
   }
 
-  /*=========================================================================*
-   *  Receive/write strategy: single-buffer on PS4/PS5, double-buffer elsewhere
-   *
-   *  WHY DOUBLE-BUFFER FAILS ON PS4/PS5 (root-cause analysis)
-   *  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-   *  The double-buffer design requires that the TCP kernel receive buffer
-   *  (SO_RCVBUF) is large enough to absorb all incoming data during the
-   *  interval when both application buffers are full and recv() is not
-   *  being called (= the writer thread's PFS write latency per chunk).
-   *
-   *  On OrbisOS (PS4/PS5), setsockopt(SO_RCVBUF) on an already-accepted
-   *  socket is silently capped to the system default (~256–512 KB on the
-   *  firmware versions tested), regardless of the requested value.
-   *  Setting it on the LISTENING socket before bind()/listen() should
-   *  propagate 4 MB via the 3-way handshake, but this is unreliable across
-   *  firmware versions — empirically the accepted socket often retains the
-   *  kernel default of ~256 KB.
-   *
-   *  Result: with SO_RCVBUF ≈ 256 KB and two 256 KB app buffers:
-   *
-   *    stall point = app_bufs + kernel_rcvbuf ≈ 512 KB + 256 KB ≈ 768 KB
-   *
-   *  This matches the observed ~800 KB abort point precisely across all
-   *  tested firmware versions (1.0 MB → 800 KB → 818 KB — always sub-1 MB).
-   *
-   *  After ~768 KB are received (in ~44 ms at 18 MB/s LAN), the TCP window
-   *  drops to zero.  FileZilla sees no ACKs while the producer waits on
-   *  pthread_cond_wait.  After 20 s of zero-window, FileZilla fires the
-   *  data-inactivity timeout and aborts the connection.
-   *
-   *  WHY SINGLE-BUFFER WORKS (same path as cmd_APPE)
-   *  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-   *  In single-buffer mode, recv() is called immediately after every
-   *  write() returns.  The TCP window reopens within one write cycle (~14 ms
-   *  at 18 MB/s). FileZilla's inactivity timer never accumulates.
-   *
-   *  cmd_APPE uses single-buffer and consistently achieves 17+ MB/s on the
-   *  same PFS-encrypted /data/ partition, confirming that write latency is
-   *  not a bottleneck once the file is open — the constraint is entirely
-   *  the TCP zero-window imposed by the insufficient kernel recv buffer.
-   *
-   *  PLATFORM DECISION
-   *  ~~~~~~~~~~~~~~~~~
-   *  PS4/PS5 : acquire only one buffer → fall through to single-buffer path.
-   *            SO_RCVBUF is unreliable; double-buffer causes zero-window
-   *            stalls that trigger FileZilla's 20 s data-inactivity timeout.
-   *  Other   : acquire two buffers → double-buffer path.
-   *            SO_RCVBUF is fully controllable and the pipeline genuinely
-   *            improves throughput.
-   *=========================================================================*/
+  /* OrbisOS receive buffers cannot reliably absorb double-buffer writer stalls;
+   * consoles therefore keep recv/write single-buffered. */
 
 #if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
-  /*
-   * Force single-buffer on PS4/PS5: acquire only buf0 and leave buf1 = NULL.
-   * The (buf0 == NULL || buf1 == NULL) branch below is the single-buffer path;
-   * it handles NULL buf1 correctly (ftp_buffer_release(NULL) is a no-op).
-   */
   void *buf0 = ftp_buffer_acquire();
-  void *buf1 = NULL; /* intentionally NULL — forces single-buffer path */
+  void *buf1 = NULL;
 #else
   void *buf0 = ftp_buffer_acquire();
   void *buf1 = ftp_buffer_acquire();
@@ -802,10 +602,6 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
   int saved_errno = 0;
 
   if ((buf0 == NULL) || (buf1 == NULL)) {
-    /*
-     * Fallback: if we can't get two buffers, use single-buffer mode.
-     * This happens when the pool is exhausted under heavy load.
-     */
     void *buffer = (buf0 != NULL) ? buf0 : buf1;
     ftp_buffer_release((buf0 != NULL) ? buf1 : buf0);
 
@@ -817,9 +613,6 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
 
     ftp_buffer_release(buffer);
   } else {
-    /*
-     * Double-buffered path: spawn a writer thread.
-     */
     stor_pipe_t pipe;
     pipe.buf[0] = buf0;
     pipe.buf[1] = buf1;
@@ -838,20 +631,15 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
     int thread_ok =
         (pthread_create(&writer, NULL, stor_writer_thread, &pipe) == 0) ? 1 : 0;
     if (thread_ok == 0) {
-      /* Thread creation failed — fall back to the common single-buffer path. */
       if (upload_receive_single(session, fd, buf0, buf_sz,
                                 &total_received, &fail_stage,
                                 &saved_errno) != 0) {
         ok = 0;
       }
     } else {
-      /*
-       * Producer loop: fill buf[active], then hand off to writer.
-       */
       while (1) {
         pthread_mutex_lock(&pipe.mtx);
 
-        /* Wait for our active buffer to be free */
         while (pipe.len[pipe.active] != 0U) {
           if (pipe.error != 0) {
             pthread_mutex_unlock(&pipe.mtx);
@@ -860,7 +648,6 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
           pthread_cond_wait(&pipe.cv_free, &pipe.mtx);
         }
 
-        /* Check if writer hit an error */
         if (pipe.error != 0) {
           pthread_mutex_unlock(&pipe.mtx);
           break;
@@ -869,7 +656,6 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
         int fill_idx = pipe.active;
         pthread_mutex_unlock(&pipe.mtx);
 
-        /* Receive into the free buffer (slow, don't hold lock) */
         ssize_t n = ftp_session_recv_data(session, pipe.buf[fill_idx], buf_sz);
         if (n < 0) {
           if (errno == EINTR) {
@@ -881,22 +667,20 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
           break;
         }
         if (n == 0) {
-          break; /* EOF */
+          break;
         }
 
         total_received += (uint64_t)n;
         session->last_activity = time(NULL);
 
-        /* Hand the filled buffer to the writer */
         pthread_mutex_lock(&pipe.mtx);
         pipe.len[fill_idx] = (size_t)n;
-        pipe.active = 1 - fill_idx; /* swap to other buffer */
+        pipe.active = 1 - fill_idx;
         pthread_cond_signal(&pipe.cv_ready);
         pthread_mutex_unlock(&pipe.mtx);
       }
 
     recv_done:
-      /* Signal writer that recv is done */
       pthread_mutex_lock(&pipe.mtx);
       pipe.done = 1;
       pthread_cond_signal(&pipe.cv_ready);
@@ -904,13 +688,11 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
 
       (void)pthread_join(writer, NULL);
 
-      /* Collect writer result */
       if (pipe.error != 0) {
         saved_errno = pipe.error;
         fail_stage = 3;
         ok = 0;
       }
-      total_received = pipe.written + (total_received - pipe.written);
     }
 
     pthread_mutex_destroy(&pipe.mtx);
@@ -922,34 +704,14 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
 
   upload_sync_file(fd, ok);
 
-  /*
-   * DELIBERATELY SKIP posix_fadvise(DONTNEED) on the uploaded file.
-   *
-   * On FreeBSD/PS5, POSIX_FADV_DONTNEED on a writable fd triggers a
-   * synchronous flush of all dirty pages through the filesystem's write
-   * path (PFS AES-XTS crypto on PS5) before evicting them from the page
-   * cache.  For a 12 GB upload this adds seconds of post-transfer latency
-   * with no benefit — the kernel already performs async writeback when
-   * memory pressure demands it.
-   *
-   * The page cache exhaustion concern (thousands of small files filling
-   * RAM) is real, but the synchronous flush penalty is worse.  The kernel
-   * reclaims clean pages under pressure automatically; if this becomes
-   * a problem, a future fix should use periodic asynchronous eviction
-   * (e.g. a background thread calling fadvise in idle time).
-   */
+  /* Avoid POSIX_FADV_DONTNEED on writable PFS files: FreeBSD may turn it
+   * into a synchronous crypto-backed flush with severe tail latency. */
   pal_file_close(fd);
   ftp_session_close_data_connection(session);
   session->restart_offset = 0;
 
   if (ok != 0) {
-    /*
-     * Atomic commit: rename temp → final
-     *
-     * rename() is atomic on POSIX: ShadowMount's stat() will
-     * see either the old file or the new complete file, never
-     * a half-written intermediate state.
-     */
+    /* rename() exposes the completed file atomically. */
     if (use_atomic != 0) {
       if (rename(tmp_path, resolved) != 0) {
         (void)unlink(tmp_path);
@@ -964,20 +726,10 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
                                   NULL);
   }
 
-  /* On failure, clean up partial file */
   if (use_atomic != 0) {
     (void)unlink(tmp_path);
   } else if (was_fresh_upload != 0) {
-    /*
-     * Non-atomic path (PS4/PS5): the file was opened with O_CREAT|O_TRUNC
-     * directly on the destination.  If the transfer failed, an empty or
-     * partial file now sits on disk.  Delete it so that a subsequent LIST
-     * does not show a ghost file and cause the client to prompt for
-     * overwrite (or silently skip the upload).
-     *
-     * Resume uploads (was_fresh_upload == 0) are intentionally left alone
-     * so the client can attempt REST+STOR/APPE again.
-     */
+    /* Remove failed fresh uploads; keep resumed partials for REST continuation. */
     (void)unlink(write_path);
   }
 
@@ -985,14 +737,7 @@ ftp_error_t cmd_STOR(ftp_session_t *session, const char *args) {
                               fail_stage, saved_errno);
 }
 
-/**
- * @brief APPE command - Append to file
- *
- *  REST + APPE resume workflow
- *  ~~~~~~~~~~~~~~~~~~~~~~~~~~~
- *  If restart_offset > 0, the file is opened for writing (not append)
- *  and seeked to the offset. Otherwise it opens with O_APPEND.
- */
+/* APPE seeks to REST offset when set; otherwise it uses O_APPEND. */
 ftp_error_t cmd_APPE(ftp_session_t *session, const char *args) {
   if (session == NULL || args == NULL) return FTP_ERR_INVALID_PARAM;
 
@@ -1050,15 +795,11 @@ ftp_error_t cmd_APPE(ftp_session_t *session, const char *args) {
                               fail_stage, saved_errno);
 }
 
-/**
- * @brief REST command - Set restart offset
- */
 ftp_error_t cmd_REST(ftp_session_t *session, const char *args) {
   if ((session == NULL) || (args == NULL)) {
     return FTP_ERR_INVALID_PARAM;
   }
 
-  /* Parse offset */
   char *endptr;
   long long offset = strtoll(args, &endptr, 10);
 
