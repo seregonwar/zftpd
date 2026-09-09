@@ -18,7 +18,7 @@ int main(void) {
         return 1;
     }
     
-    http_server_t *http = http_server_create(g_loop, 8888);
+    http_server_t *http = http_server_create(g_loop, "[::]:8888", "/");
     if (!http) {
         fprintf(stderr, "Failed to create HTTP server\n");
         event_loop_destroy(g_loop);

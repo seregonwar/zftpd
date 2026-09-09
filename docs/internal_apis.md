@@ -10,7 +10,7 @@ This document summarizes the main internal facilities you can rely on when addin
 - Prefer platform abstraction layers (`pal_*`) instead of direct syscalls.
 
 ## Error Types
-- `ftp_error_t` in `include/ftp_types.h` covers FTP-domain errors.
+- `ftp_error_t` in `include/ftp/ftp_types.h` covers FTP-domain errors.
 - Use `FTP_OK` for success; return specific error enums for callers to translate into FTP replies/logs.
 
 ## Memory Management
@@ -169,7 +169,7 @@ ftp_crypto_derive_key(key, nonce, out_key);
 - Token-bucket per session in `ftp_commands.c` (`ftp_rate_limit_wait`); reuse pattern for new data paths.
 
 ## HTTP/ZHTTP Modules
-- When `ENABLE_ZHTTPD=1`, HTTP server modules live in `src/http_*.c`; add endpoints in `http_api.c`.
+- When `ENABLE_ZHTTPD=1`, HTTP server modules live in `src/http/http_*.c`; add endpoints in `http_api.c`.
 ```c
 // http_api.c
 if (strncmp(req->uri, "/api/custom", 11) == 0) {
@@ -214,8 +214,8 @@ ftp_error_t send_file(int data_fd, const char *path) {
 ```
 
 ## Where to Look
-- Headers: `include/pal_*.h`, `include/ftp_*.h`
-- Implementations: `src/pal_*`, `src/ftp_commands.c`, `src/http_*.c`, `src/ftp_crypto.c`
+- Headers: `include/platform/pal_*.h`, `include/ftp/ftp_*.h`
+- Implementations: `src/platform/pal_*`, `src/ftp/ftp_commands.c`, `src/http/http_*.c`, `src/ftp/ftp_crypto.c`
 - The PAL layers are usable to build standalone apps (e.g., custom services like a lightweight game server or tools unrelated to FTP). Reuse `pal_*` for portability, `ftp_buffer_pool` for I/O buffers, and add your own protocol handlers atop the same evented model.
 
 Keep modules small, defensive, and consistent with existing patterns.

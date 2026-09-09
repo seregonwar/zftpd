@@ -24,6 +24,13 @@ Runs anywhere POSIX runs. Saturates Gigabit. Ships a console payload too.
 
 ---
 
+## Repository architecture
+
+The C code is split into responsibility-based modules (`ftp`, `http`, `transfer`,
+`archive`, `runtime`, `platform`, and `app`) rather than a flat `src/`/`include/`
+namespace. Generated assets live under `build/`, not in the source tree. See
+[`docs/architecture.md`](docs/architecture.md) for the dependency rules and layout.
+
 ## Overview
 
 `zftpd` is a high-performance FTP server written in C11. It was designed around a single idea: **the data path should be as fast as the hardware allows**, with no unnecessary work anywhere between file and socket.
@@ -362,7 +369,7 @@ On startup: `FTP: <ip>:<port>` notification.
 
 ## ⚙️ Configuration
 
-All configuration is compile-time, in [`include/ftp_config.h`](include/ftp_config.h).
+All configuration is compile-time, in [`include/ftp/ftp_config.h`](include/ftp/ftp_config.h).
 
 | Macro | Default | Notes |
 |---|---|---|

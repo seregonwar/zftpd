@@ -142,8 +142,6 @@ jobs:
       - name: Build release variant
         run: |
           set -euo pipefail
-          make resources
-
           if [ "${{ matrix.platform }}" = "ps4" ]; then
             make \
               PS4_PAYLOAD_SDK="${PS4_PAYLOAD_SDK}" \
@@ -196,7 +194,7 @@ jobs:
               exit 1
             fi
             # Extract version from ftp_config.h (same method as Makefile)
-            VERSION=$(grep -E 'define[[:space:]]+RELEASE_VERSION' include/ftp_config.h | head -1 | cut -d'"' -f2)
+            VERSION=$(grep -E 'define[[:space:]]+RELEASE_VERSION' include/ftp/ftp_config.h | head -1 | cut -d'"' -f2)
             app_dir="dist/${elf##*/}.app"
             mkdir -p "${app_dir}/Contents/MacOS"
             cp "$elf" "${app_dir}/Contents/MacOS/zftpd"

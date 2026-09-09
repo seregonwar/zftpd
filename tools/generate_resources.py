@@ -7,7 +7,7 @@ containing an http_resource_t[] table with every static asset embedded
 directly in the binary.  No filesystem serving is needed.
 
 Usage:
-  python3 tools/generate_resources.py > src/http_resources.c
+  python3 tools/generate_resources.py > build/<target>/<variant>/generated/http/http_resources.c
 """
 
 import os

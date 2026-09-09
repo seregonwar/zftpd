@@ -24,11 +24,12 @@ SOFTWARE.
 
 #include "pal_ffi.h"
 
-#include "../../include/event_loop.h"
-#include "../../include/ftp_server.h"
-#include "../../include/http_server.h"
-#include "../../include/pal_alloc.h"
+#include "event_loop.h"
+#include "ftp_server.h"
+#include "http_server.h"
+#include "pal_alloc.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -140,9 +141,13 @@ void pal_ffi_ftp_server_destroy(void *server) {
 
 #if defined(ENABLE_ZHTTPD) && (ENABLE_ZHTTPD == 1)
 void *pal_ffi_http_server_create(void *loop, uint16_t port) {
-  if (loop == NULL)
+  if (loop == NULL || port == 0U)
     return NULL;
-  return (void *)http_server_create((event_loop_t *)loop, port);
+  char bind_addr[64];
+  int n = snprintf(bind_addr, sizeof(bind_addr), "[::]:%u", (unsigned)port);
+  if (n <= 0 || (size_t)n >= sizeof(bind_addr))
+    return NULL;
+  return (void *)http_server_create((event_loop_t *)loop, bind_addr, "/");
 }
 
 void pal_ffi_http_server_destroy(void *server) {

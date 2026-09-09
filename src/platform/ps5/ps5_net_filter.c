@@ -513,10 +513,10 @@ static uint8_t g_hook_page_mirror[HOOK_PAGE_SIZE];
  *
  *   $(CC) -DPS5_HOOK_BUILD -O2 -fno-stack-protector -mno-red-zone -fPIC \
  *         -mcmodel=large -fno-plt -fno-common \
- *         -c src/ps5_net_filter_hook.c -o build/ps5_net_filter_hook.o
+ *         -c src/platform/ps5/ps5_net_filter_hook.c -o build/ps5_net_filter_hook.o
  *   $(OBJCOPY) -O binary --only-section=.text.hook \
  *         build/ps5_net_filter_hook.o build/ps5_net_filter_hook.bin
- *   xxd -i build/ps5_net_filter_hook.bin > src/ps5_net_filter_hook_blob.h
+ *   xxd -i build/ps5_net_filter_hook.bin > build/<target>/<variant>/generated/ps5/ps5_net_filter_hook_blob.h
  *
  * The generated ps5_net_filter_hook_blob.h is then included below.
  *
@@ -575,7 +575,7 @@ static const uint8_t g_hook_connect_code[] = {
      *      ; mov eax, ENETUNREACH (51)
      *      ; ret
      *
-     * Full source: src/ps5_net_filter_hook.c
+     * Full source: src/platform/ps5/ps5_net_filter_hook.c
      * -----------------------------------------------------------------------
      */
 

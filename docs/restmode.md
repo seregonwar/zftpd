@@ -30,7 +30,7 @@ re-inject zftpd. Clients then see a new `instance_id`.
 
 ## Server (FTP)
 
-`pal_resilient_accept()` (`src/pal_resilient_server.c`):
+`pal_resilient_accept()` (`src/platform/pal_resilient_server.c`):
 
 1. Detects listener loss on `accept()` (`EBADF`, `ENOTSOCK`, `EINVAL`)
 2. Periodically probes the listen FD (`getsockopt(SO_TYPE)` / `SO_ACCEPTCONN`)

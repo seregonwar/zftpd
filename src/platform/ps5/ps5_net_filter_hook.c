@@ -46,7 +46,7 @@
  *       -fno-exceptions \
  *       -nostdinc \
  *       -I include/ \
- *       -c src/ps5_net_filter_hook.c \
+ *       -c src/platform/ps5/ps5_net_filter_hook.c \
  *       -o build/ps5/ps5_net_filter_hook.o
  *
  *   # Extract .text.hook section as raw binary
@@ -58,7 +58,7 @@
  *
  *   # Generate C byte array for inclusion
  *   xxd -i build/ps5/ps5_net_filter_hook.bin \
- *       > src/ps5_net_filter_hook_blob.h
+ *       > build/<target>/<variant>/generated/ps5/ps5_net_filter_hook_blob.h
  *
  * The generated blob is then used in ps5_net_filter.c to replace the
  * placeholder arrays (g_hook_connect_code[], g_hook_sendto_code[]).

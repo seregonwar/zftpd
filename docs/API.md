@@ -85,7 +85,7 @@ rest_command:
 
 ## Adding Custom Endpoints
 
-Edit `zhttpd/src/http_api.c`:
+Edit `src/http/http_api.c`:
 
 ```c
 http_response_t* http_api_handle(const http_request_t *request) {

@@ -4,7 +4,7 @@
 
 # Project information
 PROJECT := zftpd
-VERSION := $(shell grep -E 'define[[:space:]]+RELEASE_VERSION' include/ftp_config.h | head -n 1 | cut -d'"' -f2)
+VERSION := $(shell grep -E 'define[[:space:]]+RELEASE_VERSION' include/ftp/ftp_config.h | head -n 1 | cut -d'"' -f2)
 ifeq ($(strip $(VERSION)),)
 VERSION := 0.0.0
 endif
@@ -113,9 +113,9 @@ PLATFORM_LIBS ?= -lpthread
 
 # Event loop implementation — kqueue for BSD/macOS/PS4/PS5, epoll for Linux
 ifeq ($(TARGET),linux)
-    EVENT_LOOP_SRC := src/event_loop_epoll.c
+    EVENT_LOOP_SRC := src/runtime/event_loop_epoll.c
 else
-    EVENT_LOOP_SRC := src/event_loop_kqueue.c
+    EVENT_LOOP_SRC := src/runtime/event_loop_kqueue.c
 endif
 
 #============================================================================
@@ -189,6 +189,8 @@ endif
 
 # Include directories
 CFLAGS += -I./include
+CFLAGS += -I./include/ftp -I./include/http -I./include/platform
+CFLAGS += -I./include/platform/ps5 -I./include/archive -I./include/runtime
 
 #============================================================================
 # LINKER FLAGS
@@ -205,28 +207,28 @@ LIBS := $(PLATFORM_LIBS)
 #============================================================================
 
 # Source files
-SOURCES := src/pal_network.c
-SOURCES += src/pal_fileio.c
-SOURCES += src/pal_alloc.c
-SOURCES += src/pal_scratch.c
-SOURCES += src/pal_notification.c
-SOURCES += src/pal_filesystem.c
-SOURCES += src/pal_filesystem_psx.c
-SOURCES += src/ftp_path.c
-SOURCES += src/ftp_server.c
-SOURCES += src/ftp_session.c
-SOURCES += src/ftp_protocol.c
-SOURCES += src/ftp_commands.c
-SOURCES += src/ftp_buffer_pool.c
-SOURCES += src/ftp_log.c
-SOURCES += src/ftp_crypto.c
-SOURCES += src/main.c
-SOURCES += src/pal_resilient_server.c
-SOURCES += src/ftp_instance.c
+SOURCES := src/platform/pal_network.c
+SOURCES += src/platform/pal_fileio.c
+SOURCES += src/platform/pal_alloc.c
+SOURCES += src/platform/pal_scratch.c
+SOURCES += src/platform/pal_notification.c
+SOURCES += src/platform/pal_filesystem.c
+SOURCES += src/platform/pal_filesystem_psx.c
+SOURCES += src/ftp/ftp_path.c
+SOURCES += src/ftp/ftp_server.c
+SOURCES += src/ftp/ftp_session.c
+SOURCES += src/ftp/ftp_protocol.c
+SOURCES += src/ftp/ftp_commands.c
+SOURCES += src/ftp/ftp_buffer_pool.c
+SOURCES += src/ftp/ftp_log.c
+SOURCES += src/ftp/ftp_crypto.c
+SOURCES += src/app/main.c
+SOURCES += src/platform/pal_resilient_server.c
+SOURCES += src/ftp/ftp_instance.c
 
 # PS5-specific modules
 ifeq ($(TARGET),ps5)
-SOURCES += src/ps5_net_filter.c
+SOURCES += src/platform/ps5/ps5_net_filter.c
 endif
 
 #============================================================================
@@ -270,15 +272,17 @@ ifeq ($(ENABLE_ZHTTPD),1)
     CFLAGS += -DENABLE_PKG_INSTALL=$(ENABLE_PKG_INSTALL)
     ENABLE_LIBCURL ?= 1
     SOURCES += $(EVENT_LOOP_SRC)
-    SOURCES += src/http_server.c
-    SOURCES += src/http_parser.c
-    SOURCES += src/http_response.c
-    SOURCES += src/http_api.c
-    SOURCES += src/http_csrf.c
-    SOURCES += src/http_resources.c
-    SOURCES += src/exfat_unpacker.c
-    SOURCES += src/pkg_unpacker.c
-    SOURCES += src/builtin_unzip.c
+    SOURCES += src/http/http_server.c
+    SOURCES += src/http/http_parser.c
+    SOURCES += src/http/http_response.c
+    SOURCES += src/http/http_api.c
+    SOURCES += src/http/http_csrf.c
+    WEB_RESOURCE_FILES := $(shell find web -type f -print | sort)
+    HTTP_RESOURCES_C := $(BUILD_DIR)/generated/http/http_resources.c
+    SOURCES += $(HTTP_RESOURCES_C)
+    SOURCES += src/archive/exfat_unpacker.c
+    SOURCES += src/archive/pkg_unpacker.c
+    SOURCES += src/archive/builtin_unzip.c
     SOURCES += src/transfer/transfer_manager.c
 endif
 
@@ -470,13 +474,14 @@ endif
 # Object files (handle both src/ and mcp/src/ paths)
 OBJECTS := $(patsubst src/%.c,$(OBJ_DIR)/%.o,$(filter src/%.c,$(SOURCES)))
 OBJECTS += $(patsubst mcp/src/%.c,$(OBJ_DIR)/mcp/%.o,$(filter mcp/src/%.c,$(SOURCES)))
+OBJECTS += $(patsubst $(BUILD_DIR)/generated/%.c,$(OBJ_DIR)/generated/%.o,$(filter $(BUILD_DIR)/generated/%.c,$(SOURCES)))
 
 # FFI Object files
 FFI_SOURCES := ffi/c_core/pal_ffi.c
 FFI_OBJECTS := $(patsubst ffi/%.c,$(OBJ_DIR)/ffi/%.o,$(FFI_SOURCES))
 
 # Object files without main (for unit tests and ffi library)
-LIB_OBJECTS := $(filter-out $(OBJ_DIR)/main.o,$(OBJECTS))
+LIB_OBJECTS := $(filter-out $(OBJ_DIR)/app/main.o,$(OBJECTS))
 
 # Dependency files
 DEPENDS := $(patsubst $(OBJ_DIR)/%.o,$(DEP_DIR)/%.d,$(filter-out $(OBJ_DIR)/mcp/%.o,$(OBJECTS)))
@@ -493,7 +498,7 @@ DEPENDS += $(patsubst $(OBJ_DIR)/mcp/%.o,$(DEP_DIR)/mcp/%.d,$(filter $(OBJ_DIR)/
 # ============================================================================
 # PS5 NET FILTER HOOK — Kernel-safe compilation pipeline
 #
-# The hook functions (src/ps5_net_filter_hook.c) run in ring-0 (kernel mode)
+# The hook functions (src/platform/ps5/ps5_net_filter_hook.c) run in ring-0 (kernel mode)
 # and require special compiler flags that differ from the normal build.
 #
 # Pipeline:
@@ -512,7 +517,7 @@ ifeq ($(TARGET),ps5)
 
 HOOK_OBJ      := $(OBJ_DIR)/ps5_net_filter_hook.o
 HOOK_BIN      := $(OBJ_DIR)/ps5_net_filter_hook.bin
-HOOK_BLOB_H   := src/ps5_net_filter_hook_blob.h
+HOOK_BLOB_H   := $(BUILD_DIR)/generated/ps5/ps5_net_filter_hook_blob.h
 
 # Kernel-safe compiler flags (MUST differ from normal CFLAGS)
 HOOK_CFLAGS   := \
@@ -529,13 +534,14 @@ HOOK_CFLAGS   := \
     -fno-builtin \
     -fno-exceptions \
     -fomit-frame-pointer \
-    -I include/
+    -I include/platform/ps5/
 
 ps5-hook-blob: $(HOOK_BLOB_H)
 	@echo "  [BLOB] $< generated ($(shell wc -c < $(HOOK_BIN) 2>/dev/null || echo '?') bytes)"
 
 $(HOOK_BLOB_H): $(HOOK_BIN)
 	@echo "  [XXD]  $@"
+	@mkdir -p $(dir $@)
 	@xxd -i $< > $@
 
 $(HOOK_BIN): $(HOOK_OBJ)
@@ -545,15 +551,18 @@ $(HOOK_BIN): $(HOOK_OBJ)
 	    --only-section=.text.hook_sendto \
 	    $< $@
 
-$(HOOK_OBJ): src/ps5_net_filter_hook.c | $(OBJ_DIR)
+$(HOOK_OBJ): src/platform/ps5/ps5_net_filter_hook.c | $(OBJ_DIR)
 	@echo "  [HOOK-CC] $<"
 	@$(CC) $(HOOK_CFLAGS) -c $< -o $@
 
 endif # TARGET=ps5
 
-resources:
-	@echo "  [GEN] src/http_resources.c"
-	@python3 tools/generate_resources.py > src/http_resources.c
+resources: $(HTTP_RESOURCES_C)
+
+$(HTTP_RESOURCES_C): tools/generate_resources.py $(WEB_RESOURCE_FILES)
+	@echo "  [GEN] $@"
+	@mkdir -p $(dir $@)
+	@python3 tools/generate_resources.py > $@
 
 .DEFAULT_GOAL := all
 
@@ -722,6 +731,12 @@ $(OBJ_DIR)/%.o: src/%.c | $(OBJ_DIR) $(DEP_DIR)
 	@mkdir -p $(dir $@) $(dir $(DEP_DIR)/$*.d)
 	@$(CC) $(CFLAGS) -MMD -MP -MF $(DEP_DIR)/$*.d -MT $@ -c $< -o $@
 
+# Compile generated C sources without writing into the source tree.
+$(OBJ_DIR)/generated/%.o: $(BUILD_DIR)/generated/%.c | $(OBJ_DIR) $(DEP_DIR)
+	@echo "  [CC]  $<"
+	@mkdir -p $(dir $@) $(dir $(DEP_DIR)/generated/$*.d)
+	@$(CC) $(CFLAGS) -MMD -MP -MF $(DEP_DIR)/generated/$*.d -MT $@ -c $< -o $@
+
 # Compile FFI C source files (with -fPIC for shared library)
 $(OBJ_DIR)/ffi/%.o: ffi/%.c | $(OBJ_DIR)/ffi/c_core
 	@echo "  [CC]  $< (FFI)"
@@ -881,7 +896,7 @@ help:
 	@echo "  analyze     - Run static analysis (requires clang)"
 	@echo "  test        - Run test suite"
 	@echo "  help        - Display this help message"
-	@echo "  resources   - Generate embedded web resources (src/http_resources.c)"
+	@echo "  resources   - Generate embedded web resources under build/.../generated"
 	@echo ""
 	@echo "Variables:"
 	@echo "  TARGET            - Target platform (linux, macos, ps3, ps4, ps5)"
@@ -929,5 +944,5 @@ compile_commands.json:
 
 web-deploy:
 	@echo "  [WEB]  web-deploy is deprecated — web UI is now embedded in the binary"
-	@echo "  [WEB]  Run 'make resources' to regenerate src/http_resources.c"
+	@echo "  [WEB]  Resources are generated automatically under build/.../generated"
 	@echo "  [WEB]  Done — $(shell find web/css web/js -name '*.css' -o -name '*.js' | wc -l | tr -d ' ') files deployed"
