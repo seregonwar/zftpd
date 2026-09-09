@@ -78,6 +78,7 @@ typedef enum {
   FTP_ERR_PROTOCOL = -22,      /**< Protocol violation */
   FTP_ERR_DIR_EXISTS = -23,    /**< Directory already exists */
   FTP_ERR_CROSS_DEVICE = -24,  /**< Cross-device link (EXDEV) */
+  FTP_ERR_CANCELLED = -25,     /**< Operation cancelled by caller */
   FTP_ERR_UNKNOWN = -99,       /**< Unknown error */
 } ftp_error_t;
 

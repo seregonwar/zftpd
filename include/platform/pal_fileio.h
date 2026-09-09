@@ -24,15 +24,7 @@ SOFTWARE.
 
 /**
  * @file pal_fileio.h
- * @brief Platform-agnostic file I/O with zero-copy support
- *
- * @author SeregonWar
- * @version 1.0.0
- * @date 2026-02-13
- *
- * OPTIMIZATION: Zero-copy file transfer via sendfile() where supported
- * FALLBACK: Buffered read/write for platforms without sendfile()
- *
+ * @brief Platform-agnostic file I/O and zero-copy transfer primitives.
  */
 
 #ifndef PAL_FILEIO_H
@@ -61,6 +53,9 @@ SOFTWARE.
 #if defined(__linux__)
 #define HAS_SENDFILE 1
 #include <sys/sendfile.h>
+#elif defined(__APPLE__) && defined(__MACH__)
+#define HAS_SENDFILE 1
+#include <sys/socket.h>
 #elif defined(__FreeBSD__) || defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
 #define HAS_SENDFILE 1
 #include <sys/uio.h>
@@ -68,45 +63,12 @@ SOFTWARE.
 #define HAS_SENDFILE 0
 #endif
 
-/*===========================================================================*
- * ZERO-COPY FILE TRANSFER
- *===========================================================================*/
-
 /**
- * @brief Send file data via socket (zero-copy where supported)
- *
- * OPTIMIZATION: Uses sendfile() syscall when available for zero-copy
- *               kernel-to-socket transfer without userspace buffering.
- *
- * PERFORMANCE:
- *   - Zero-copy: ~950 MB/s on PS4, ~118 MB/s on PS5 (network-limited)
- *   - Buffered:  ~300-400 MB/s (userspace copy overhead)
- *
- * @param sock_fd Socket file descriptor (destination)
- * @param file_fd File descriptor (source)
- * @param offset  Starting offset in file (updated on return)
- * @param count   Number of bytes to send
- *
- * @return Number of bytes sent on success, negative error code on failure
- * @retval >0  Number of bytes successfully sent
- * @retval 0   End of file reached
- * @retval -1  I/O error (check errno)
- *
- * @pre sock_fd >= 0 (valid socket)
- * @pre file_fd >= 0 (valid file)
- * @pre offset != NULL
- * @pre *offset >= 0
- * @pre count > 0
- *
- * @post *offset updated by number of bytes sent
- *
- * @note Thread-safety: Safe if file descriptors not shared
- * @note WCET: Unbounded (depends on network/disk I/O)
- *
- * @warning Non-blocking sockets may return partial writes (EAGAIN)
- * @warning Caller must handle partial transfers in loop
+ * Send up to count bytes starting at *offset and advance the offset by bytes sent.
+ * Callers must handle partial transfers and EAGAIN.
  */
 ssize_t pal_sendfile(int sock_fd, int file_fd, off_t *offset, size_t count);
+int pal_file_error_is_fatal(int error);
 
 /*===========================================================================*
  * FILE OPERATIONS
@@ -287,17 +249,7 @@ ftp_error_t pal_file_rename(const char *old_path, const char *new_path);
 ftp_error_t pal_file_copy_recursive(const char *src, const char *dst,
                                     int keep_src);
 
-/*===========================================================================*
- * COPY PROGRESS CALLBACK
- *
- *   Invoked after each read/write chunk during file copy.
- *
- *   bytes_copied : cumulative bytes written so far (across all files)
- *   user_data    : opaque pointer passed by the caller
- *
- *   Return:  0  = continue
- *           -1  = cancel (copy will abort and return FTP_ERR_CANCELLED)
- *===========================================================================*/
+/* Progress callbacks receive cumulative bytes; a negative return cancels the copy. */
 
 typedef int (*pal_copy_progress_cb_t)(uint64_t bytes_copied, void *user_data);
 

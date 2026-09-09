@@ -49,17 +49,6 @@ SOFTWARE.
 extern int _fstatfs(int, struct statfs *);
 #endif
 
-/* Fallback: pal_fileio.h may be suppressed by a transitive include guard */
-#ifndef PAL_FILE_WRITE_CHUNK_MAX
-#  if defined(PLATFORM_PS5) || defined(PS5)
-#    define PAL_FILE_WRITE_CHUNK_MAX 131072U  /* 128 KB */
-#  elif defined(PLATFORM_PS4) || defined(PS4)
-#    define PAL_FILE_WRITE_CHUNK_MAX  65536U  /*  64 KB */
-#  else
-#    define PAL_FILE_WRITE_CHUNK_MAX 262144U  /* 256 KB */
-#  endif
-#endif
-
 /* PFS serializes inode creation on PS4/PS5. Serialize only O_CREAT opens
  * in userspace to avoid multi-session journal contention and client timeouts. */
 #if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
@@ -367,8 +356,7 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
     }
 
     /* Retrying a bad vnode can panic PS4/PS5, so storage faults are terminal. */
-    if ((sent < 0) && ((errno == EIO) || (errno == ESTALE) ||
-                       (errno == EBADF) || (errno == EFAULT))) {
+    if ((sent < 0) && pal_file_error_is_fatal(errno)) {
       remaining = 1U;
       break;
     }
@@ -403,8 +391,7 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
         if ((r_sent < 0) && (errno == EINTR)) {
           r--; /* don't count EINTR as a retry */
         }
-        if ((r_sent < 0) && ((errno == EIO) || (errno == ESTALE) ||
-                             (errno == EBADF) || (errno == EFAULT))) {
+        if ((r_sent < 0) && pal_file_error_is_fatal(errno)) {
           break;
         }
       }

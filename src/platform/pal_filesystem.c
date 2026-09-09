@@ -109,9 +109,6 @@ ftp_error_t vfs_open(vfs_node_t *node, const char *path)
      * available for platform-internal use (e.g. module loading) but must not
      * be on the data-transfer path.
      *
- * @note VFS_CAP_SENDFILE is now always set on PS4/PS5 — pal_sendfile()
- *       handles unsupported filesystems with a transparent
- *       pread()+send_all() fallback when the kernel returns EINVAL.
      */
 
     int fd = pal_file_open(path, O_RDONLY, 0);
@@ -130,46 +127,8 @@ ftp_error_t vfs_open(vfs_node_t *node, const char *path)
     node->size = (uint64_t)st.st_size;
     node->offset = 0U;
 
-    /*
-     * SENDFILE SAFETY CHECK (PS4/PS5)
-     *
-     * DESIGN RATIONALE:
-     *   FreeBSD's sendfile(2) uses the kernel VM pager to DMA file pages
-     *   directly into the socket buffer (zero userspace copy). This requires
-     *   the source vnode's pager to implement the vm_pager_ops interface.
-     *
-     *   On PS5's modified FreeBSD kernel, the exFAT (exfatfs) and FAT32
-     *   (msdosfs) drivers used for USB storage do NOT implement this
-     *   interface correctly. Calling sendfile() on a vnode backed by these
-     *   filesystems dereferences a null/invalid pager function pointer,
-     *   causing an immediate kernel panic (KP).
-     *
-     *   nullfs mirrors the underlying vnode — if the origin is exFAT, the
-     *   nullfs vnode inherits the same broken pager ops.
-     *
-     *   Detection: fstatfs() on the open fd returns the filesystem type
-     *   name without any additional syscall cost. For USB-backed filesystems
-     *   we clear VFS_CAP_SENDFILE, forcing the buffered read/write path.
-     *
-     * @see pal_sendfile() in pal_fileio.c — callers must check this cap
-     * @see https://github.com/seregonwar/zftpd — KP report from USB download
-     */
-#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
-    /*
-     * SENDFILE — enabled on all PS4/PS5 filesystems.
-     *
-     * The previous blacklist (exfatfs, msdosfs, nullfs, pfsmnt, pfs)
-     * disabled VFS_CAP_SENDFILE for most actual filesystems
-     * on PS5, forcing the read()+send() path for FTP RETR.
-     *
-     * Zero-copy sendfile is the only transfer path.  If the kernel
-     * cannot DMA from a particular filesystem, the transfer fails
-     * with 426 — there is no silent userspace fallback.
-     */
+    /* Transfer backends operate on raw file bytes; capability is handled by pal_sendfile(). */
     node->caps = VFS_CAP_SENDFILE;
-#else
-    node->caps = VFS_CAP_SENDFILE;
-#endif
 
     return FTP_OK;
 }

@@ -208,7 +208,11 @@ LIBS := $(PLATFORM_LIBS)
 
 # Source files
 SOURCES := src/platform/pal_network.c
-SOURCES += src/platform/pal_fileio.c
+SOURCES += src/platform/fileio/basic.c
+SOURCES += src/platform/fileio/sendfile.c
+SOURCES += src/platform/fileio/copy.c
+SOURCES += src/platform/fileio/tree.c
+SOURCES += src/platform/fileio/directory.c
 SOURCES += src/platform/pal_alloc.c
 SOURCES += src/platform/pal_scratch.c
 SOURCES += src/platform/pal_notification.c
@@ -815,6 +819,8 @@ TEST_BINS += $(BUILD_DIR)/tests/test_instance
 TEST_BINS += $(BUILD_DIR)/tests/test_chmod
 TEST_BINS += $(BUILD_DIR)/tests/test_copy_atomic
 TEST_BINS += $(BUILD_DIR)/tests/test_ftp_commands
+TEST_BINS += $(BUILD_DIR)/tests/test_fileio_tree
+TEST_BINS += $(BUILD_DIR)/tests/test_fileio_basic
 ifeq ($(ENABLE_ZHTTPD),1)
 TEST_BINS += $(BUILD_DIR)/tests/test_transfer
 TEST_BINS += $(BUILD_DIR)/tests/test_http_api_common
