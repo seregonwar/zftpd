@@ -277,6 +277,9 @@ ifeq ($(ENABLE_ZHTTPD),1)
     SOURCES += src/http/http_response.c
     SOURCES += src/http/http_api.c
     SOURCES += src/http/http_api_common.c
+    SOURCES += src/http/http_api_transfer.c
+    SOURCES += src/http/http_static.c
+    SOURCES += src/http/http_api_archive.c
     SOURCES += src/http/http_csrf.c
     WEB_RESOURCE_FILES := $(shell find web -type f -print | sort)
     HTTP_RESOURCES_C := $(BUILD_DIR)/generated/http/http_resources.c
@@ -810,7 +813,7 @@ ifeq ($(filter $(TARGET),linux macos),)
 test: $(OUTPUT_BIN)
 	@echo "Tests skipped for TARGET=$(TARGET)"
 else
-test: $(OUTPUT_ELF) $(OUTPUT_BIN) $(TEST_BINS)
+test: $(OUTPUT_ELF) $(TEST_BINS)
 	@echo "Running tests..."
 	@for t in $(TEST_BINS); do ./$$t; done
 endif
