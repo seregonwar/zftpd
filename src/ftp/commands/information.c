@@ -54,6 +54,11 @@ ftp_error_t cmd_SIZE(ftp_session_t *session, const char *args) {
                                   "File not found.");
   }
 
+  if (!S_ISREG(st.mode)) {
+    return ftp_session_send_reply(session, FTP_REPLY_550_FILE_ERROR,
+                                  "Not a regular file.");
+  }
+
   char reply[64];
   snprintf(reply, sizeof(reply), "%llu", (unsigned long long)st.size);
 
