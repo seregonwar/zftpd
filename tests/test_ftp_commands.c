@@ -127,6 +127,22 @@ static int test_feat_reply(ftp_session_t *session, int peer_fd) {
   return -1;
 }
 
+static int test_multiline_numeric_lines(ftp_session_t *session, int peer_fd) {
+  const char *lines[] = {"Help", "214 More help", "123 Other number",
+                         "12", "2", "", " Existing indent", "Plain text", "End"};
+  const char *expected[] = {"214-Help\r\n", " 214 More help\r\n",
+                            " 123 Other number\r\n", "12\r\n", "2\r\n", "\r\n",
+                            " Existing indent\r\n", "Plain text\r\n", "214 End\r\n"};
+  CHECK(ftp_session_send_multiline_reply(session, FTP_REPLY_214_HELP, lines,
+                                        sizeof(lines) / sizeof(lines[0])) == FTP_OK);
+  for (size_t i = 0U; i < sizeof(expected) / sizeof(expected[0]); i++) {
+    char line[1024];
+    CHECK(read_reply_line(peer_fd, line, sizeof(line)) == 0);
+    CHECK(strcmp(line, expected[i]) == 0);
+  }
+  return 0;
+}
+
 static int create_file(const char *path, const char *contents) {
   FILE *fp = fopen(path, "wb");
   if (fp == NULL) return -1;
@@ -247,6 +263,7 @@ int main(void) {
   CHECK(ftp_session_init(&session, server_fd, &client_addr, 99U, root) == FTP_OK);
 
   CHECK(test_feat_reply(&session, peer_fd) == 0);
+  CHECK(test_multiline_numeric_lines(&session, peer_fd) == 0);
   CHECK(test_control_and_files(&session, peer_fd, root) == 0);
   CHECK(test_parameters_and_extensions(&session, peer_fd) == 0);
   CHECK(test_data_channels(&session, peer_fd) == 0);

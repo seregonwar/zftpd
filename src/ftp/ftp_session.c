@@ -376,7 +376,9 @@ ftp_error_t ftp_session_send_multiline_reply(ftp_session_t *session,
   }
 
   for (size_t i = 1U; i < (count - 1U); i++) {
-    n = snprintf(buffer, sizeof(buffer), "%s\r\n", lines[i]);
+    /* RFC 959: pad numeric lines so they cannot resemble a final reply. */
+    const char *padding = strspn(lines[i], "0123456789") >= 3U ? " " : "";
+    n = snprintf(buffer, sizeof(buffer), "%s%s\r\n", padding, lines[i]);
 
     if ((n < 0) || ((size_t)n >= sizeof(buffer))) {
       return FTP_ERR_INVALID_PARAM;
