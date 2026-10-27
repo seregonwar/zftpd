@@ -2,12 +2,15 @@
 #include "ftp_session.h"
 #include <arpa/inet.h>
 #include <errno.h>
+#include <poll.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #define CHECK(x) do { \
@@ -78,6 +81,68 @@ static int expect_reply(int peer_fd, ftp_error_t result, int code) {
   return 0;
 }
 
+static int read_reply_line(int fd, char *buf, size_t size) {
+  struct timespec now;
+  if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return -1;
+  const int64_t deadline = (int64_t)now.tv_sec * 1000 +
+                           now.tv_nsec / 1000000 + 1000;
+  size_t used = 0U;
+  while ((used + 1U) < size) {
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return -1;
+    int64_t remaining = deadline - ((int64_t)now.tv_sec * 1000 +
+                                    now.tv_nsec / 1000000);
+    if (remaining <= 0) return -1;
+    struct pollfd pfd = {.fd = fd, .events = POLLIN};
+    int ready = poll(&pfd, 1, (int)remaining);
+    if (ready < 0 && errno == EINTR) continue;
+    if (ready <= 0) return -1;
+    ssize_t n = recv(fd, buf + used, 1U, 0);
+    if (n < 0 && errno == EINTR) continue;
+    if (n != 1) return -1;
+    used++;
+    if (used >= 2U && buf[used - 2U] == '\r' && buf[used - 1U] == '\n') {
+      buf[used] = '\0';
+      return 0;
+    }
+  }
+  return -1;
+}
+
+static int test_feat_reply(ftp_session_t *session, int peer_fd) {
+  CHECK(cmd_FEAT(session, NULL) == FTP_OK);
+  char line[1024];
+  CHECK(read_reply_line(peer_fd, line, sizeof(line)) == 0);
+  CHECK(strncmp(line, "211-", 4U) == 0);
+  size_t features = 0U;
+  while (features < 64U) {
+    CHECK(read_reply_line(peer_fd, line, sizeof(line)) == 0);
+    if (strcmp(line, "211 End\r\n") == 0) {
+      CHECK(features > 0U);
+      return 0;
+    }
+    /* RFC 2389: exactly one space before each feature label. */
+    CHECK(line[0] == ' ' && line[1] > ' ');
+    features++;
+  }
+  return -1;
+}
+
+static int test_multiline_numeric_lines(ftp_session_t *session, int peer_fd) {
+  const char *lines[] = {"Help", "214 More help", "123 Other number",
+                         "12", "2", "", " Existing indent", "Plain text", "End"};
+  const char *expected[] = {"214-Help\r\n", " 214 More help\r\n",
+                            " 123 Other number\r\n", "12\r\n", "2\r\n", "\r\n",
+                            " Existing indent\r\n", "Plain text\r\n", "214 End\r\n"};
+  CHECK(ftp_session_send_multiline_reply(session, FTP_REPLY_214_HELP, lines,
+                                        sizeof(lines) / sizeof(lines[0])) == FTP_OK);
+  for (size_t i = 0U; i < sizeof(expected) / sizeof(expected[0]); i++) {
+    char line[1024];
+    CHECK(read_reply_line(peer_fd, line, sizeof(line)) == 0);
+    CHECK(strcmp(line, expected[i]) == 0);
+  }
+  return 0;
+}
+
 static int create_file(const char *path, const char *contents) {
   FILE *fp = fopen(path, "wb");
   if (fp == NULL) return -1;
@@ -99,6 +164,13 @@ static int test_control_and_files(ftp_session_t *session, int peer_fd,
   CHECK(snprintf(work, sizeof(work), "%s/work", root) > 0);
   struct stat st;
   CHECK(stat(work, &st) == 0 && S_ISDIR(st.st_mode));
+  CHECK(expect_reply(peer_fd, cmd_SIZE(session, "work"), 550) == 0);
+  CHECK(expect_reply(peer_fd, cmd_SIZE(session, "missing.txt"), 550) == 0);
+  char fifo[FTP_PATH_MAX];
+  CHECK(snprintf(fifo, sizeof(fifo), "%s/fifo", root) > 0);
+  CHECK(mkfifo(fifo, 0600) == 0);
+  CHECK(expect_reply(peer_fd, cmd_SIZE(session, "fifo"), 550) == 0);
+  CHECK(unlink(fifo) == 0);
   CHECK(expect_reply(peer_fd, cmd_CWD(session, "work"), 250) == 0);
   CHECK(expect_reply(peer_fd, cmd_CDUP(session, NULL), 250) == 0);
 
@@ -190,6 +262,8 @@ int main(void) {
   ftp_session_t session;
   CHECK(ftp_session_init(&session, server_fd, &client_addr, 99U, root) == FTP_OK);
 
+  CHECK(test_feat_reply(&session, peer_fd) == 0);
+  CHECK(test_multiline_numeric_lines(&session, peer_fd) == 0);
   CHECK(test_control_and_files(&session, peer_fd, root) == 0);
   CHECK(test_parameters_and_extensions(&session, peer_fd) == 0);
   CHECK(test_data_channels(&session, peer_fd) == 0);

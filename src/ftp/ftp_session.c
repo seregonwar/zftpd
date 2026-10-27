@@ -358,26 +358,14 @@ ftp_error_t ftp_session_send_multiline_reply(ftp_session_t *session,
     return FTP_ERR_SOCKET_SEND;
   }
 
-  char buffer[FTP_REPLY_BUFFER_SIZE];
-
-  /* Send all lines except last with '-' */
-  for (size_t i = 0U; i < (count - 1U); i++) {
-    int n = snprintf(buffer, sizeof(buffer), "%d-%s\r\n", (int)code, lines[i]);
-
-    if ((n < 0) || ((size_t)n >= sizeof(buffer))) {
-      return FTP_ERR_INVALID_PARAM;
-    }
-
-    ssize_t sent = pal_send_all(session->ctrl_fd, buffer, (size_t)n, 0);
-    if (sent != n) {
-      return FTP_ERR_SOCKET_SEND;
-    }
+  if (count == 1U) {
+    return ftp_session_send_reply(session, code, lines[0]);
   }
 
-  /* Send last line with ' ' */
-  int n = snprintf(buffer, sizeof(buffer), "%d %s\r\n", (int)code,
-                   lines[count - 1U]);
+  char buffer[FTP_REPLY_BUFFER_SIZE];
 
+  /* Send the opening line with '-'. */
+  int n = snprintf(buffer, sizeof(buffer), "%d-%s\r\n", (int)code, lines[0]);
   if ((n < 0) || ((size_t)n >= sizeof(buffer))) {
     return FTP_ERR_INVALID_PARAM;
   }
@@ -387,7 +375,22 @@ ftp_error_t ftp_session_send_multiline_reply(ftp_session_t *session,
     return FTP_ERR_SOCKET_SEND;
   }
 
-  return FTP_OK;
+  for (size_t i = 1U; i < (count - 1U); i++) {
+    /* RFC 959: pad numeric lines so they cannot resemble a final reply. */
+    const char *padding = strspn(lines[i], "0123456789") >= 3U ? " " : "";
+    n = snprintf(buffer, sizeof(buffer), "%s%s\r\n", padding, lines[i]);
+
+    if ((n < 0) || ((size_t)n >= sizeof(buffer))) {
+      return FTP_ERR_INVALID_PARAM;
+    }
+
+    sent = pal_send_all(session->ctrl_fd, buffer, (size_t)n, 0);
+    if (sent != n) {
+      return FTP_ERR_SOCKET_SEND;
+    }
+  }
+
+  return ftp_session_send_reply(session, code, lines[count - 1U]);
 }
 
 /*===========================================================================*
