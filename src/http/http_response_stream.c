@@ -6,11 +6,13 @@
 #include "pal_network.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 
 static size_t header_length(const http_response_t *response) {
@@ -49,6 +51,35 @@ static int send_memory_body(int fd, http_response_t *response) {
   return 0;
 }
 
+/* Buffered download used when sendfile() fails: truncating the response would
+ * leave the client with a corrupt file. Returns 0 when the range was sent. */
+static int send_file_buffered(int sock_fd, int file_fd, off_t *offset,
+                              size_t *remaining) {
+  char *buffer = malloc(HTTP_SENDFILE_FALLBACK_SIZE);
+  if (buffer == NULL) return -1;
+
+  while (*remaining > 0U) {
+    size_t chunk = *remaining < (size_t)HTTP_SENDFILE_FALLBACK_SIZE
+                       ? *remaining
+                       : (size_t)HTTP_SENDFILE_FALLBACK_SIZE;
+    ssize_t got = pread(file_fd, buffer, chunk, *offset);
+    if (got < 0) {
+      if (errno == EINTR) continue;
+      break;
+    }
+    if (got == 0) break; /* the file shrank under us */
+
+    ssize_t sent = pal_send_all(sock_fd, buffer, (size_t)got, 0);
+    if (sent <= 0) break;
+
+    *offset += (off_t)sent;
+    *remaining -= (size_t)sent;
+  }
+
+  free(buffer);
+  return (*remaining == 0U) ? 0 : -1;
+}
+
 static int send_file_body(int fd, http_response_t *response) {
   if (response->sendfile_fd < 0) return 0;
   off_t offset = response->sendfile_offset;
@@ -61,12 +92,11 @@ static int send_file_body(int fd, http_response_t *response) {
     ssize_t sent = pal_sendfile_retry(fd, response->sendfile_fd, &offset, chunk,
                                       HTTP_SENDFILE_EAGAIN_RETRIES,
                                       HTTP_SENDFILE_EAGAIN_SLEEP_US);
-    if (sent <= 0) {
-      result = -1;
-      break;
-    }
+    if (sent <= 0) break;
     remaining -= (size_t)sent;
   }
+  if (remaining > 0U)
+    result = send_file_buffered(fd, response->sendfile_fd, &offset, &remaining);
   (void)pal_file_close(response->sendfile_fd);
   response->sendfile_fd = -1;
   return result;
@@ -122,6 +152,9 @@ static int send_directory_body(int fd, http_response_t *response) {
                              S_ISDIR(st.st_mode) ? "directory" : "file") != 0 ||
         http_buf_append_cstr(json, sizeof(json), &pos, "\",\"size\":") != 0 ||
         http_buf_append_u64(json, sizeof(json), &pos, size) != 0 ||
+        http_buf_append_cstr(json, sizeof(json), &pos, ",\"mode\":") != 0 ||
+        http_buf_append_u64(json, sizeof(json), &pos,
+                            (uint64_t)(st.st_mode & 0777U)) != 0 ||
         http_buf_append_cstr(json, sizeof(json), &pos, "}") != 0 ||
         send_chunk(fd, json, pos) != 0) {
       result = -1;

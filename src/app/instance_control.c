@@ -79,9 +79,9 @@ static int read_line(int fd, char *out, size_t capacity) {
   return -1;
 }
 
-/* A payload the loader has not reaped yet stays visible to kill(pid, 0) while
- * its sockets and kernel resources are already gone, so zombies must not count
- * as alive here. */
+/* Zombies still answer kill(pid, 0) but own no sockets, and a pid missing from
+ * the snapshot is dead: counting it as alive is what made a stale identity file
+ * block startup. Only an unusable snapshot falls back to "alive". */
 static int process_alive(pid_t pid) {
   if (pid <= 1) return 0;
   if (kill(pid, 0) != 0 && errno == ESRCH) return 0;
@@ -96,7 +96,7 @@ static int process_alive(pid_t pid) {
     return 1;
   }
 
-  int alive = 1;
+  int alive = 0;
   for (size_t offset = 0U;
        offset + offsetof(struct kinfo_proc, ki_stat) + 1U <= size;) {
     const struct kinfo_proc *info =
@@ -243,8 +243,9 @@ static int wait_for_exit(pid_t pid, unsigned timeout_ms) {
   return process_alive(pid) ? 0 : 1;
 }
 
-/* Older payloads have no control port. Signal only verified zftpd processes,
- * then refuse to start if any remain; a forced kill can panic the console. */
+/* Older payloads have no control port: SIGTERM the verified ones and report
+ * whether any survived (1 = all gone). Never escalates to SIGKILL, which can
+ * panic the console. */
 static int stop_verified_payloads(void) {
   pid_t pids[16];
   size_t count = verified_payload_pids(pids, sizeof(pids) / sizeof(pids[0]));
@@ -267,7 +268,7 @@ static int stop_verified_payloads(void) {
   return 0;
 }
 
-int instance_control_replace_previous(void) {
+instance_replace_result_t instance_control_replace_previous(void) {
   pid_t previous = -1;
   uint64_t token = 0U;
   int have_identity = read_identity(&previous, &token) == 0;
@@ -281,6 +282,8 @@ int instance_control_replace_previous(void) {
     previous = -1;
   }
 
+  /* Only the token proves the pid is a live zftpd: pids are reused after every
+   * reboot, and blocking on an unrelated process would be worse. */
   if (previous > 1 && process_alive(previous)) {
     if (request_previous_stop(token) == 0) {
       authenticated = 1;
@@ -289,15 +292,16 @@ int instance_control_replace_previous(void) {
     }
   }
 
-  if (!stop_verified_payloads() ||
-      (authenticated && process_alive(previous))) {
-    printf("[zftpd] A zftpd payload is still alive; refusing a second instance\n");
-    return -1;
+  int verified_clear = stop_verified_payloads();
+  if (!verified_clear || (authenticated && process_alive(previous))) {
+    /* Keep the identity: its token lets a later payload ask it to stop again. */
+    printf("[zftpd] Previous payload did not stop; starting beside it\n");
+    return INSTANCE_REPLACE_CONFLICT;
   }
   /* Dead, malformed or reused identities cannot block startup. Keep the
    * transfer state: it records resumable downloads, not process ownership. */
   remove_identity();
-  return 0;
+  return INSTANCE_REPLACE_OK;
 }
 
 static void *control_loop(void *unused) {
@@ -390,7 +394,9 @@ void instance_control_stop(void) {
 
 #else
 
-int instance_control_replace_previous(void) { return 0; }
+instance_replace_result_t instance_control_replace_previous(void) {
+  return INSTANCE_REPLACE_OK;
+}
 int instance_control_start(void) { return 0; }
 void instance_control_stop(void) {}
 

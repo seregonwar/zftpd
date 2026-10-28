@@ -1,6 +1,7 @@
 #include "../src/http/http_api_internal.h"
 #include "http_api.h"
 #include "ftp_config.h"
+#include "pal_limits.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -87,7 +88,9 @@ static int test_path_confinement(void) {
   CHECK(http_api_validate_path(nested_new, safe, sizeof(safe)) == 1);
   CHECK(strncmp(safe, http_api_get_root(), strlen(http_api_get_root())) == 0);
 
-  char target[512], leaf_link[512], leaf_expected[512];
+  char target[512], leaf_link[512];
+  /* realpath() needs a PATH_MAX buffer; glibc's fortify check aborts below. */
+  char leaf_expected[PAL_PATH_MAX];
   snprintf(target, sizeof(target), "%s/target", root);
   snprintf(leaf_link, sizeof(leaf_link), "%s/leaf-link", root);
   CHECK(mkdir(target, 0700) == 0);

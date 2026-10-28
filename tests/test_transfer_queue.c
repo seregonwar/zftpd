@@ -263,8 +263,15 @@ static int test_restore_resumes(void) {
 }
 
 int main(void) {
+#if !defined(ENABLE_LIBCURL) || !ENABLE_LIBCURL
+  /* Every case starts an http:// job, which transfer_start() rejects without
+   * libcurl. */
+  puts("test_transfer_queue: skipped (libcurl disabled)");
+  return 0;
+#else
   CHECK(test_queue_order() == 0);
   CHECK(test_restore_resumes() == 0);
   puts("test_transfer_queue: ok");
   return 0;
+#endif
 }

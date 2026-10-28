@@ -35,16 +35,22 @@ List directory contents.
     {
       "name": "file.txt",
       "type": "file",
-      "size": 1024
+      "size": 1024,
+      "mode": 420
     },
     {
       "name": "subdir",
       "type": "directory",
-      "size": 0
+      "size": 0,
+      "mode": 493
     }
   ]
 }
 ```
+
+`mode` carries the permission bits (`st_mode & 0777`, so `420` = `0644` and
+`493` = `0755`); the file manager uses it to pre-fill the *Permissions…* dialog
+without a second request.
 
 **Errors:**
 - `404`: Directory not found
@@ -53,6 +59,36 @@ List directory contents.
 ### GET /api/download
 
 Download file (TODO).
+
+### POST /api/chmod
+
+Changes the Unix permission bits of one file or directory — the HTTP counterpart
+of `SITE CHMOD`, used by the file manager's *Permissions…* dialog.
+
+**Query Parameters:**
+- `path` (required): file or folder, confined to the HTTP root.
+- `mode` (required): octal mask, `000`–`777` (three digits, or four with a
+  leading zero). Values above `777` — setuid/setgid/sticky — are rejected.
+
+```text
+POST /api/chmod?path=/data/homebrew/tool.elf&mode=755
+```
+
+```json
+{"ok":true,"requested":"755","mode":"755","supported":true}
+```
+
+`mode` is read back from the filesystem after the call. FAT/exFAT mounts accept
+`chmod()` and keep their own bits, in which case `supported` is `false` and
+`mode` shows what the mount actually reports. A filesystem that refuses the call
+answers `500`.
+
+**Errors:**
+- `400`: missing/invalid `mode` or missing `path`
+- `403`: path outside the HTTP root
+- `404`: path not found
+- `405`: method is not `POST`
+- `500`: the filesystem does not support permissions
 
 ### GET /api/mounts
 
@@ -106,9 +142,33 @@ Streams a file to the client. By default the raw on-disk bytes are sent
 The web UI exposes this as *Settings → Downloads → Decrypt protected files*,
 which appends the flag to every download and preview link.
 
+When the file is recognised as a SELF container but its payload cannot be
+decrypted (no loadable segments, unsupported layout, unreadable tail), the
+request is refused with `422 Unprocessable Content` and a JSON body naming the
+reason, instead of quietly streaming the encrypted container. Plain files are
+unaffected — they are always sent as they are.
+
 ```text
 GET /api/file/get?path=/mnt/disc/CUSA00001/sce_sys/eboot.bin&decrypt=1
 ```
+
+### GET /api/file/decrypt_check
+
+Answers whether `decrypt=1` would produce the decrypted ELF, so a client can ask
+before starting the transfer (the web UI checks single-file downloads).
+
+**Query Parameters:**
+- `path` (required): file to inspect, confined to the HTTP root.
+
+```json
+{"ok":true,"self":true,"decryptable":false,"size":12582912,
+ "reason":"SELF container has no loadable segments to decrypt"}
+```
+
+`self` is `false` for ordinary files (nothing to decrypt, the original bytes are
+what you want) and `decryptable` is only `true` when the pager accepted the
+container. The per-attempt detail (`magic`, entry count, `errno`) goes to the
+daemon log as a `[self] cannot decrypt …` line.
 
 ### Game dump
 

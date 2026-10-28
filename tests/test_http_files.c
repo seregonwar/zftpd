@@ -153,6 +153,38 @@ int main(void) {
   (void)snprintf(renamed, sizeof(renamed), "%s/renamed.txt", sub);
   CHECK(stat(renamed, &st) == 0);
 
+  /* chmod: the reply reports the mode the mount actually kept. */
+  (void)snprintf(uri, sizeof(uri), "/api/chmod?path=%s&mode=755", renamed);
+  resp = request(HTTP_METHOD_POST, uri, NULL);
+  CHECK(response_is(resp, 200));
+  CHECK(strstr(resp->data, "\"mode\":\"755\"") != NULL);
+  CHECK(strstr(resp->data, "\"supported\":true") != NULL);
+  http_response_destroy(resp);
+  CHECK(stat(renamed, &st) == 0 && (st.st_mode & 0777U) == 0755U);
+
+  (void)snprintf(uri, sizeof(uri), "/api/chmod?path=%s&mode=999", renamed);
+  resp = request(HTTP_METHOD_POST, uri, NULL);
+  CHECK(response_is(resp, 400));
+  http_response_destroy(resp);
+  (void)snprintf(uri, sizeof(uri), "/api/chmod?path=%s&mode=1777", renamed);
+  resp = request(HTTP_METHOD_POST, uri, NULL);
+  CHECK(response_is(resp, 400));
+  http_response_destroy(resp);
+  (void)snprintf(uri, sizeof(uri), "/api/chmod?path=%s&mode=u+x", renamed);
+  resp = request(HTTP_METHOD_POST, uri, NULL);
+  CHECK(response_is(resp, 400));
+  http_response_destroy(resp);
+
+  /* Read-only and missing targets. */
+  (void)snprintf(uri, sizeof(uri), "/api/chmod?path=%s&mode=644", renamed);
+  resp = request(HTTP_METHOD_GET, uri, NULL);
+  CHECK(response_is(resp, 405));
+  http_response_destroy(resp);
+  (void)snprintf(uri, sizeof(uri), "/api/chmod?path=%s/missing&mode=644", root);
+  resp = request(HTTP_METHOD_POST, uri, NULL);
+  CHECK(response_is(resp, 404));
+  http_response_destroy(resp);
+
   (void)snprintf(uri, sizeof(uri), "/api/delete?path=%s", renamed);
   resp = request(HTTP_METHOD_POST, uri, NULL);
   CHECK(response_is(resp, 200));

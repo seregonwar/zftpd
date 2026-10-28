@@ -187,6 +187,8 @@
         name: e.name,
         isDir: isDir,
         size: isDir ? -1 : (typeof e.size === 'number' ? e.size : -1),
+        /* Undefined on daemons that do not send it. */
+        mode: (typeof e.mode === 'number' && isFinite(e.mode)) ? (e.mode & 511) : undefined,
         ft: ZF.fileType(e.name, isDir)
       });
     }
@@ -503,6 +505,7 @@
     }));
     if (write) {
       if (one) bar.appendChild(cmd({ icon: 'pencil', label: 'Rename', collapse: true, title: 'Rename (F2)', onclick: function () { rename(one); } }));
+      if (one) bar.appendChild(cmd({ icon: 'shield', label: 'Permissions', collapse: true, title: 'Permissions', onclick: function () { permissions(one); } }));
       bar.appendChild(cmd({ icon: 'copy', label: 'Copy to\u2026', collapse: true, onclick: function () { transferTo('copy', sel); } }));
       bar.appendChild(cmd({ icon: 'move', label: 'Move to\u2026', collapse: true, onclick: function () { transferTo('move', sel); } }));
       if (one && !one.isDir && ZF.isArchive(one.name)) {
@@ -600,9 +603,40 @@
     });
   }
 
+  /* Ask the daemon before saving a SELF container that may come out encrypted. */
+  function downloadChecked(e) {
+    var path = entryPath(e);
+    api.decryptCheck(path).then(function (res) {
+      if (!res || !res.self) {
+        ZF.triggerDownload(api.fileUrl(path, false), e.name);
+        return;
+      }
+      if (res.decryptable) {
+        ZF.triggerDownload(api.fileUrl(path, true), e.name);
+        return;
+      }
+      ZF.confirm({
+        title: 'Download the original?',
+        message: e.name + ' is a SELF container whose payload cannot be decrypted.',
+        note: res.reason || 'The daemon did not report a reason.',
+        noteKind: 'warning',
+        confirmLabel: 'Download original',
+        cancelLabel: 'Cancel'
+      }).then(function (ok) {
+        if (ok) ZF.triggerDownload(api.fileUrl(path, false), e.name);
+      });
+    }, function () {
+      ZF.triggerDownload(api.fileUrl(path), e.name);
+    });
+  }
+
   function download(entries) {
     var files = entries.filter(function (e) { return !e.isDir; });
     if (!files.length) return;
+    if (ZF.settings.decryptSelf && files.length === 1) {
+      downloadChecked(files[0]);
+      return;
+    }
     for (var i = 0; i < files.length; i++) {
       (function (e, delay) {
         setTimeout(function () { ZF.triggerDownload(api.fileUrl(entryPath(e)), e.name); }, delay);
@@ -652,6 +686,108 @@
         if (S.dirSizes.hasOwnProperty(e.name)) { S.dirSizes[name] = S.dirSizes[e.name]; delete S.dirSizes[e.name]; }
         load(dir, { silent: true, focusName: name, select: true });
         ZF.emit('bookmark-renamed', { from: P.join(dir, e.name), to: P.join(dir, name) });
+      }
+    });
+  }
+
+  /* Permission editor: pre-filled from e.mode, 644/755 when the daemon is old. */
+  function permissions(e) {
+    var path = entryPath(e);
+    var dir = S.path;
+    var known = typeof e.mode === 'number';
+    var initial = known ? (e.mode & 511) : (e.isDir ? 493 : 420);
+    var boxes = [];
+    var octal = el('span', { class: 'perm-octal mono', text: '' });
+    var symbolic = el('span', { class: 'mono muted', text: '' });
+
+    /* Boxes are owner-rwx, group-rwx, others-rwx: bit 0400 down to 0001. */
+    function bits() {
+      var m = 0;
+      for (var i = 0; i < boxes.length; i++) if (boxes[i].checked) m |= 1 << (8 - i);
+      return m;
+    }
+
+    function pad3(s) { return s.length >= 3 ? s.slice(-3) : ('000' + s).slice(-3); }
+
+    function rwx(m) {
+      var out = '';
+      for (var i = 8; i >= 0; i--) out += (m & (1 << i)) ? 'rwx'.charAt((8 - i) % 3) : '-';
+      return out;
+    }
+
+    function update() {
+      var m = bits();
+      octal.textContent = pad3(m.toString(8));
+      symbolic.textContent = rwx(m);
+    }
+
+    var groups = [
+      { label: 'Owner', values: [256, 128, 64] },
+      { label: 'Group', values: [32, 16, 8] },
+      { label: 'Others', values: [4, 2, 1] }
+    ];
+    var names = ['Read', 'Write', 'Execute'];
+    var grid = el('div', { class: 'perm-grid' });
+
+    for (var g = 0; g < groups.length; g++) {
+      (function (grp) {
+        var row = el('div', { class: 'perm-row' }, el('div', { class: 'perm-group', text: grp.label }));
+        for (var b = 0; b < 3; b++) {
+          (function (bit, letter, name) {
+            var input = el('input', {
+              type: 'checkbox', class: 'check', checked: (initial & bit) !== 0, onchange: update,
+              'aria-label': grp.label + ' ' + name.toLowerCase()
+            });
+            row.appendChild(el('label', { class: 'perm-box' }, [
+              input,
+              el('span', { text: name + ' (' + letter + ')' })
+            ]));
+            boxes.push(input);
+          })(grp.values[b], 'rwx'.charAt(b), names[b]);
+        }
+        grid.appendChild(row);
+      })(groups[g]);
+    }
+
+    var content = el('div', null, [
+      el('div', { class: 'perm-target' }, [
+        el('div', { class: 'perm-name', text: e.name }),
+        el('div', { class: 'perm-path mono muted', text: path })
+      ]),
+      el('div', { class: 'perm-readout' }, [octal, symbolic]),
+      grid,
+      known ? null : el('div', { class: 'note' }, [ZF.icon('info'), el('span', {
+        text: 'This daemon did not report the current permissions: the boxes show the default for a ' +
+          (e.isDir ? 'folder (755).' : 'file (644).')
+      })]),
+      e.isDir ? el('div', { class: 'field-hint', text: 'This changes the folder itself. Items inside it keep their own permissions.' }) : null
+    ]);
+    update();
+
+    ZF.dialog({
+      title: 'Permissions',
+      content: content,
+      actions: [
+        { id: 'cancel', label: 'Cancel' },
+        { id: 'apply', label: 'Apply', kind: 'primary', submit: true }
+      ],
+      onOpen: function () { boxes[0].focus(); },
+      onAction: function (id) {
+        if (id !== 'apply') return true;
+        var mode = pad3(bits().toString(8));
+        return api.chmod(path, mode).then(function (res) {
+          var effective = (res && res.mode) ? String(res.mode) : mode;
+          if (res && res.supported === false) {
+            ZF.toast('This filesystem ignored the permission change. Effective mode: ' + effective, { type: 'warning' });
+          } else {
+            ZF.toast('Permissions changed to ' + effective, { type: 'success' });
+          }
+          if (dir === S.path) load(dir, { silent: true });
+          return true;
+        }, function (err) {
+          ZF.toastError(err, 'Could not change permissions');
+          return false;
+        });
       }
     });
   }
@@ -854,6 +990,7 @@
         items.push({ label: 'Copy to\u2026', icon: 'copy', onclick: function () { transferTo('copy', sel); } });
         items.push({ label: 'Move to\u2026', icon: 'move', onclick: function () { transferTo('move', sel); } });
         if (one) items.push({ label: 'Rename', icon: 'pencil', hint: 'F2', onclick: function () { rename(one); } });
+        if (one) items.push({ label: 'Permissions\u2026', icon: 'shield', onclick: function () { permissions(one); } });
         items.push('-');
       }
     }
@@ -1047,7 +1184,7 @@
       actions: actions,
       onOpen: function (d) { d.buttons.close.focus(); },
       onAction: function (id) {
-        if (id === 'download') ZF.triggerDownload(url, e.name);
+        if (id === 'download') download([e]);
         if (id === 'open') setTimeout(function () { go(path); }, 0);
         return true;
       },

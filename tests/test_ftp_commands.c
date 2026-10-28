@@ -1,4 +1,5 @@
 #include "ftp_commands.h"
+#include "ftp_crypto.h"
 #include "ftp_session.h"
 #include <arpa/inet.h>
 #include <errno.h>
@@ -249,6 +250,91 @@ static int test_copy_validation(ftp_session_t *session, int peer_fd,
   CHECK(unlink(path) == 0);
   return 0;
 }
+/* Reads one whole reply line, CRLF included, so a 227 can be parsed. */
+static int read_full_line(int fd, char *buf, size_t size) {
+  size_t used = 0U;
+  while (used + 1U < size) {
+    char c;
+    ssize_t n = recv(fd, &c, 1U, 0);
+    if (n < 0 && errno == EINTR) continue;
+    if (n != 1) return -1;
+    buf[used++] = c;
+    if (c == '\n') {
+      buf[used] = '\0';
+      return 0;
+    }
+  }
+  return -1;
+}
+
+#if FTP_ENABLE_CRYPTO
+/* An encrypted data channel cannot use sendfile, and must not answer 426. */
+static int test_retr_buffered_encrypted(ftp_session_t *session, int peer_fd,
+                                        const char *root) {
+  static const char payload[] = "encrypted-retr-payload";
+  char path[FTP_PATH_MAX];
+  CHECK(snprintf(path, sizeof(path), "%s/retr.bin", root) > 0);
+  CHECK(create_file(path, payload) == 0);
+
+  CHECK(cmd_PASV(session, NULL) == FTP_OK);
+  char reply[256];
+  CHECK(read_full_line(peer_fd, reply, sizeof(reply)) == 0);
+  CHECK(strncmp(reply, "227", 3U) == 0);
+  const char *open = strchr(reply, '(');
+  CHECK(open != NULL);
+  unsigned a = 0, b = 0, c = 0, d = 0, p1 = 0, p2 = 0;
+  CHECK(sscanf(open + 1, "%u,%u,%u,%u,%u,%u", &a, &b, &c, &d, &p1, &p2) == 6);
+  CHECK(a == 127 && b == 0 && c == 0 && d == 1);
+
+  /* A previous test left REST 123 behind; start this transfer from zero. */
+  CHECK(cmd_REST(session, "0") == FTP_OK);
+  CHECK(read_full_line(peer_fd, reply, sizeof(reply)) == 0);
+  CHECK(strncmp(reply, "350", 3U) == 0);
+
+  int data_fd = socket(AF_INET, SOCK_STREAM, 0);
+  CHECK(data_fd >= 0);
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  addr.sin_port = htons((uint16_t)((p1 << 8) | p2));
+  CHECK(connect(data_fd, (struct sockaddr *)&addr, sizeof(addr)) == 0);
+
+  uint8_t key[32];
+  uint8_t nonce[12];
+  memset(key, 0x5a, sizeof(key));
+  memset(nonce, 0, sizeof(nonce));
+  ftp_crypto_init(&session->crypto, key, nonce);
+  session->crypto.active = 1;
+
+  CHECK(cmd_RETR(session, "retr.bin") == FTP_OK);
+  session->crypto.active = 0;
+
+  char retr_reply[512];
+  CHECK(read_full_line(peer_fd, retr_reply, sizeof(retr_reply)) == 0);
+  CHECK(strncmp(retr_reply, "150", 3U) == 0);
+  char received[sizeof(payload)];
+  size_t used = 0U;
+  while (used < sizeof(payload) - 1U) {
+    ssize_t n = recv(data_fd, received + used, sizeof(payload) - 1U - used, 0);
+    if (n <= 0) break;
+    used += (size_t)n;
+  }
+  CHECK(read_full_line(peer_fd, retr_reply, sizeof(retr_reply)) == 0);
+  CHECK(strncmp(retr_reply, "226", 3U) == 0);
+  CHECK(used == sizeof(payload) - 1U);
+
+  ftp_crypto_ctx_t client;
+  ftp_crypto_init(&client, key, nonce);
+  ftp_crypto_xor(&client, received, used);
+  CHECK(memcmp(received, payload, used) == 0);
+
+  close(data_fd);
+  CHECK(unlink(path) == 0);
+  return 0;
+}
+#endif
+
 int main(void) {
   char root[] = "/tmp/zftpd-ftp-commands-XXXXXX";
   CHECK(mkdtemp(root) != NULL);
@@ -268,6 +354,9 @@ int main(void) {
   CHECK(test_parameters_and_extensions(&session, peer_fd) == 0);
   CHECK(test_data_channels(&session, peer_fd) == 0);
   CHECK(test_copy_validation(&session, peer_fd, root) == 0);
+#if FTP_ENABLE_CRYPTO
+  CHECK(test_retr_buffered_encrypted(&session, peer_fd, root) == 0);
+#endif
 
   ftp_session_cleanup(&session);
   close(peer_fd);

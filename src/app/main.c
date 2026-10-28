@@ -316,7 +316,7 @@ static void terminate_existing_instance(const char *name) {
 }
 #endif
 
-#ifdef PLATFORM_PS4
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
 static ftp_error_t server_init_with_fallback(const char *bind_ip,
                                              uint16_t base_port,
                                              const char *root_path,
@@ -714,14 +714,13 @@ int main(void) {
   /* Apply kernel patches/jailbreak immediately */
   ps5_jailbreak();
 
-  /* A previous payload is asked to shut down on its control port first, and it
-   * answers that request by running its own teardown even when its threads are
-   * blocked. Anything still alive afterwards is verified by thread name and
-   * stopped; if a payload keeps holding the console, this instance exits
-   * instead of binding ports another instance still owns. */
-  if (instance_control_replace_previous() != 0) {
-    pal_notification_send("zftpd: previous instance is stuck; restart console");
-    return EXIT_FAILURE;
+  /* Ask the previous payload to stop, but never let it block startup: if it
+   * survives, the FTP listener falls back to a free port. */
+  const int previous_busy =
+      instance_control_replace_previous() == INSTANCE_REPLACE_CONFLICT;
+  if (previous_busy) {
+    printf("[zftpd - ps5] Previous payload is still running; "
+           "starting beside it\n");
   }
 
   /*
@@ -783,8 +782,8 @@ int main(void) {
   }
 
   uint16_t selected_port = FTP_DEFAULT_PORT;
-  ftp_error_t err = ftp_server_init(&g_server_ctx, bind_ip,
-                                    FTP_DEFAULT_PORT, "/");
+  ftp_error_t err = server_init_with_fallback(bind_ip, FTP_DEFAULT_PORT, "/",
+                                              &selected_port);
 
   if (err != FTP_OK) {
     fprintf(stderr, "[zftpd - ps5] Init failed: %d\n", (int)err);
@@ -809,11 +808,11 @@ int main(void) {
 
   printf("[zftpd - ps5] Server running. Press Ctrl+C to stop.\n");
 
+  /* Losing the control port costs the next payload a clean handover, nothing
+   * more: the server is already serving. */
   if (instance_control_start() != 0) {
-    printf("[zftpd - ps5] Instance control unavailable\n");
-    ftp_server_stop(&g_server_ctx);
-    ftp_server_cleanup(&g_server_ctx);
-    return EXIT_FAILURE;
+    printf("[zftpd - ps5] Instance control unavailable; "
+           "the next payload will stop this one with SIGTERM\n");
   }
 
   {
@@ -825,6 +824,13 @@ int main(void) {
     (void)snprintf(notify_msg, sizeof(notify_msg), "FTP: %s:%u", ip_address,
                    (unsigned)selected_port);
     pal_notification_send(notify_msg);
+
+    if (previous_busy) {
+      (void)snprintf(notify_msg, sizeof(notify_msg),
+                     "Old zftpd still running: use FTP port %u",
+                     (unsigned)selected_port);
+      pal_notification_send(notify_msg);
+    }
   }
 
   /*=========================================================================*
@@ -863,6 +869,20 @@ int main(void) {
       } else {
         printf("[PS5 HTTP] Failed to start HTTP thread (rc=%d)\n", rc);
       }
+    } else {
+      /* The web UI port is fixed: never fail silently. */
+      char msg[160];
+      if (previous_busy) {
+        (void)snprintf(msg, sizeof(msg),
+                       "ZHTTP port %u busy (old zftpd): use FTP port %u",
+                       (unsigned)HTTP_DEFAULT_PORT, (unsigned)selected_port);
+      } else {
+        (void)snprintf(msg, sizeof(msg),
+                       "ZHTTP unavailable: port %u is busy",
+                       (unsigned)HTTP_DEFAULT_PORT);
+      }
+      pal_notification_send(msg);
+      ftp_log_line(FTP_LOG_WARN, "HTTP server unavailable: port busy");
     }
 
     /*=========================================================================*

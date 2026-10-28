@@ -234,11 +234,12 @@
 
   api.list = function (path) { return get('/api/list' + qs({ path: path })); };
   api.dirSize = function (path) { return get('/api/dirsize' + qs({ path: path })); };
-  api.fileUrl = function (path) {
-    /* decryptSelf asks the daemon for the decrypted SELF payload; without it
-     * the raw on-disk container is sent, like every other transfer. */
-    return '/api/file/get' + qs({ path: path, decrypt: ZF.settings.decryptSelf ? 1 : undefined });
+  api.fileUrl = function (path, decrypt) {
+    /* `decrypt` overrides ZF.settings.decryptSelf for one link. */
+    var want = (decrypt === undefined) ? ZF.settings.decryptSelf : decrypt;
+    return '/api/file/get' + qs({ path: path, decrypt: want ? 1 : undefined });
   };
+  api.decryptCheck = function (path) { return get('/api/file/decrypt_check' + qs({ path: path })); };
   /* Bulk download: the selection is posted once and the daemon answers with a
    * short id, because a long path list does not fit in a request URL. */
   /* Decrypted game dump: start it, then either download the prepared archive
@@ -269,6 +270,8 @@
     return post('/api/delete' + qs({ path: path, recursive: recursive ? 1 : null }));
   };
   api.rename = function (path, name) { return post('/api/rename' + qs({ path: path, name: name })); };
+  /* Reply carries the mode read back from disk: check "supported" first. */
+  api.chmod = function (path, mode) { return post('/api/chmod' + qs({ path: path, mode: mode })); };
 
   api.copy = function (src, dstDir, move) {
     return post('/api/copy' + qs({ path: src, dst: dstDir, move: move ? 1 : null }));

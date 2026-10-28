@@ -72,6 +72,8 @@ static const char *status_text(http_status_t status) {
     return "Unsupported Media Type";
   case HTTP_STATUS_416_RANGE_NOT_SATISFIABLE:
     return "Range Not Satisfiable";
+  case HTTP_STATUS_422_UNPROCESSABLE_CONTENT:
+    return "Unprocessable Content";
   /* 5xx */
   case HTTP_STATUS_500_INTERNAL_ERROR:
     return "Internal Server Error";

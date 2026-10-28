@@ -63,6 +63,8 @@ typedef enum {
   HTTP_STATUS_409_CONFLICT = 409,
   HTTP_STATUS_415_UNSUPPORTED_MEDIA_TYPE = 415,
   HTTP_STATUS_416_RANGE_NOT_SATISFIABLE = 416,
+  /* Resource cannot be represented as asked (e.g. an undecryptable SELF). */
+  HTTP_STATUS_422_UNPROCESSABLE_CONTENT = 422,
 
   /*  5xx ── Server Error  */
   HTTP_STATUS_500_INTERNAL_ERROR = 500,

@@ -1,4 +1,5 @@
-/* Exercise the actual PS5 startup path with simulated console processes. */
+/* PS5 startup path with simulated console processes: no case may abort startup
+ * (issue #18). */
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -22,6 +23,7 @@ static char test_dir[] = "/tmp/zftpd-instance-XXXXXX";
 static char test_path[128];
 static int live, verified, zombie, mock_authenticated, exits, sysctl_fails;
 static int signals, connections, answer_offset;
+static pid_t snapshot_pid = 200;
 
 static pid_t mock_getpid(void) { return 100; }
 static pid_t mock_getpgrp(void) { return 99; }
@@ -41,7 +43,7 @@ static int mock_sysctl(const int *name, unsigned int count, void *out,
   unsigned char record[sizeof(struct kinfo_proc)] = {0};
   struct kinfo_proc info = {0};
   info.ki_structsize = (int)sizeof(record);
-  info.ki_pid = 200;
+  info.ki_pid = snapshot_pid;
   info.ki_stat = (unsigned char)(zombie ? 5 : 1);
   memcpy(record, &info, sizeof(info));
   if (verified) memcpy(record + 447, "zftpd.elf", sizeof("zftpd.elf"));
@@ -92,15 +94,26 @@ static void mock_shutdown_request(void) {}
   return 1; \
 } } while (0)
 
-static int run_case(const char *identity, int expected) {
+static void reset_mocks(void) {
   signals = connections = 0;
+  answer_offset = 0;
+  live = verified = zombie = mock_authenticated = exits = 0;
+  sysctl_fails = 0;
+  snapshot_pid = 200;
+}
+
+/* Writes an identity file, runs the real replace path and checks whether the
+ * file survived (a later payload still needs its token). */
+static int run_case(const char *identity, instance_replace_result_t expected,
+                    int expect_identity_kept) {
+  signals = connections = 0;
+  answer_offset = 0;
   FILE *fp = fopen(test_path, "w");
   CHECK(fp != NULL);
   CHECK(fputs(identity, fp) >= 0);
   CHECK(fclose(fp) == 0);
   CHECK(test_replace_previous() == expected);
-  /* Refusal preserves ownership; successful recovery removes stale identity. */
-  CHECK((access(test_path, F_OK) == 0) == (expected != 0));
+  CHECK((access(test_path, F_OK) == 0) == (expect_identity_kept != 0));
   return 0;
 }
 
@@ -110,44 +123,76 @@ int main(void) {
   CHECK(sizeof(struct kinfo_proc) > 467U);
   CHECK(offsetof(struct kinfo_proc, ki_pid) == 72U);
 
-  /* The saved pid now belongs to an unrelated process after a reboot. */
+  /* Live pid, wrong token: a reused pid. */
+  reset_mocks();
   live = 1;
-  CHECK(run_case("200 abc\n", 0) == 0);
+  CHECK(run_case("200 abc\n", INSTANCE_REPLACE_OK, 0) == 0);
   CHECK(signals == 0 && connections == 1 && live == 1);
-  sysctl_fails = 1;
-  CHECK(run_case("200 abc\n", 0) == 0);
+
+  /* No snapshot at all. */
+  reset_mocks();
+  live = 1; sysctl_fails = 1;
+  CHECK(run_case("200 abc\n", INSTANCE_REPLACE_OK, 0) == 0);
   CHECK(signals == 0);
-  sysctl_fails = 0;
 
+  /* Pid gone. */
+  reset_mocks();
   live = 0;
-  CHECK(run_case("200 abc\n", 0) == 0);
-  CHECK(connections == 0 && signals == 0);
-  live = 1; zombie = verified = 1;
-  CHECK(run_case("200 abc\n", 0) == 0);
-  CHECK(connections == 0 && signals == 0);
-  zombie = verified = 0;
-  CHECK(run_case("broken identity\n", 0) == 0);
-  CHECK(run_case("100 abc\n", 0) == 0);
+  CHECK(run_case("200 abc\n", INSTANCE_REPLACE_OK, 0) == 0);
   CHECK(connections == 0 && signals == 0);
 
-  /* Verified legacy payloads still block startup if SIGTERM cannot stop them. */
-  verified = 1;
-  CHECK(run_case("200 abc\n", -1) == 0);
+  /* Unreaped zombie. */
+  reset_mocks();
+  live = 1; zombie = verified = 1;
+  CHECK(run_case("200 abc\n", INSTANCE_REPLACE_OK, 0) == 0);
+  CHECK(connections == 0 && signals == 0);
+
+  /* Pid missing from the snapshot (the issue #18 false positive). */
+  reset_mocks();
+  live = 1; snapshot_pid = 999;
+  CHECK(run_case("200 abc\n", INSTANCE_REPLACE_OK, 0) == 0);
+  CHECK(connections == 0 && signals == 0);
+
+  /* Malformed and self-referencing identities. */
+  reset_mocks();
+  live = 1;
+  CHECK(run_case("broken identity\n", INSTANCE_REPLACE_OK, 0) == 0);
+  CHECK(run_case("100 abc\n", INSTANCE_REPLACE_OK, 0) == 0);
+  CHECK(connections == 0 && signals == 0);
+
+  /* Verified payload that ignores SIGTERM: conflict, identity kept. */
+  reset_mocks();
+  live = 1; verified = 1;
+  CHECK(run_case("200 abc\n", INSTANCE_REPLACE_CONFLICT, 1) == 0);
   CHECK(signals == 1);
-  CHECK(run_case("broken identity\n", -1) == 0);
+
+  reset_mocks();
+  live = 1; verified = 1;
+  CHECK(run_case("broken identity\n", INSTANCE_REPLACE_CONFLICT, 1) == 0);
   CHECK(signals == 1);
-  exits = 1;
-  CHECK(run_case("200 abc\n", 0) == 0);
+
+  /* Verified payload that dies on SIGTERM: clean takeover. */
+  reset_mocks();
+  live = verified = exits = 1;
+  CHECK(run_case("200 abc\n", INSTANCE_REPLACE_OK, 0) == 0);
   CHECK(signals == 1 && live == 0);
 
-  /* A matching control token authenticates even an unnamed payload. */
-  live = mock_authenticated = 1; verified = exits = 0;
-  CHECK(run_case("200 abc\n", -1) == 0);
+  /* Authenticated but wedged: conflict, identity kept. */
+  reset_mocks();
+  live = mock_authenticated = 1;
+  CHECK(run_case("200 abc\n", INSTANCE_REPLACE_CONFLICT, 1) == 0);
   CHECK(signals == 0 && connections == 1);
-  exits = 1;
-  CHECK(run_case("200 abc\n", 0) == 0);
+
+  /* Authenticated and exits: clean takeover. */
+  reset_mocks();
+  live = mock_authenticated = exits = 1;
+  CHECK(run_case("200 abc\n", INSTANCE_REPLACE_OK, 0) == 0);
   CHECK(signals == 0 && live == 0);
-  CHECK(test_replace_previous() == 0); /* missing file */
+
+  /* No identity file. */
+  reset_mocks();
+  (void)unlink(test_path);
+  CHECK(test_replace_previous() == INSTANCE_REPLACE_OK);
   CHECK(rmdir(test_dir) == 0);
   puts("test_instance_control: ok");
   return 0;

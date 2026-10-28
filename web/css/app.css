@@ -860,6 +860,22 @@ body { display: flex; flex-direction: column; }
 .note-warning { background: var(--warning-soft); color: var(--warning); }
 .note-danger { background: var(--danger-soft); color: var(--danger); }
 
+/* Permission editor: checkbox groups plus the octal readout. */
+.perm-target { margin-bottom: 12px; min-width: 0; }
+.perm-name { font-weight: 600; overflow-wrap: break-word; overflow-wrap: anywhere; }
+.perm-path { margin-top: 2px; font-size: 12.5px; overflow-wrap: break-word; overflow-wrap: anywhere; }
+.perm-readout { display: flex; flex-wrap: wrap; align-items: baseline; margin-bottom: 12px; }
+.perm-octal { margin-right: 10px; font-size: 17px; font-weight: 600; letter-spacing: .06em; }
+.perm-grid { display: flex; flex-direction: column; }
+.perm-row {
+  display: flex; flex-wrap: wrap; align-items: center; padding: 6px 10px;
+  background: var(--surface-2); border-radius: var(--radius);
+}
+.perm-row + .perm-row { margin-top: 8px; }
+.perm-group { flex: none; width: 58px; margin-right: 6px; font-size: 13px; font-weight: 600; }
+.perm-box { display: inline-flex; align-items: center; margin: 2px 14px 2px 0; font-size: 13px; white-space: nowrap; cursor: pointer; }
+.perm-box .check { margin-right: 6px; }
+
 .picker { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
 .picker .crumbs { height: 36px; background: var(--surface-2); border-bottom: 1px solid var(--border); padding: 0 6px; }
 .picker-list { height: 280px; overflow-y: auto; }
@@ -1035,6 +1051,12 @@ body { display: flex; flex-direction: column; }
   .toasts { bottom: 12px; }
   .overlay { padding: 16px 12px; align-items: flex-end; }
   .dialog { max-height: 90vh; }
+}
+
+/* Narrow phones: label above its boxes, so the grid never overflows. */
+@media (max-width: 420px) {
+  .perm-group { flex-basis: 100%; width: auto; margin: 0 0 2px; }
+  .perm-box { margin-right: 10px; }
 }
 
 @media (hover: none) {

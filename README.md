@@ -90,7 +90,8 @@ This is the physical ceiling of a 1 GbE connection. It is achieved out of the bo
 - PS4/PS5 FTP and HTTP downloads use buffered reads on exFAT/FAT, PFS and
   nullfs mounts, and when mount detection fails, to avoid incompatible vnode
   pagers. Other filesystems retain the zero-copy path.
-- Fallback to buffered I/O when encrypted
+- Fallback to buffered I/O when encrypted, rate-limited, or when `sendfile`
+  fails mid-transfer — a download never dies because the zero-copy path gave up
 - Backpressure-aware send loop, EINTR-safe
 - Upload resume: `REST` + `STOR`
 - Append mode: `APPE`
@@ -216,7 +217,7 @@ To make these persistent, add them to `/etc/sysctl.conf`.
 - Launch after the system is fully booted and the loader is ready. The on-screen notification will display the IP and port.
 - For maximum throughput: direct cable from console to PC, static IPs, no router in between.
 - Avoid initiating transfers while background downloads or system updates are active — the network stack is shared.
-- If you see **"payload already loaded"**: a previous instance is still active. The new payload asks it to shut down on its control port (`127.0.0.1:28888`) and the previous instance runs its own teardown even when its threads are blocked, so it always releases the FTP, HTTP and MCP ports. Instances that predate the control port — or one wedged after accepting it — are identified by thread name and stopped, never signalling the loader's process group. If a payload still holds the console, the new instance stops instead of binding ports another instance owns.
+- If you see **"payload already loaded"**: a previous instance is still active. The new payload asks it to shut down on its control port (`127.0.0.1:28888`) and the previous instance runs its own teardown even when its threads are blocked, so it always releases the FTP, HTTP and MCP ports. Instances that predate the control port — or one wedged after accepting it — are identified by thread name and stopped, never signalling the loader's process group. If the old payload survives that, the new instance does **not** abort: it starts anyway and takes the first free FTP port in `2120–2129`, shown in the on-screen notification (`Old zftpd still running: use FTP port 2121`). The web UI has a fixed port, so when it stays with the old instance a second toast says so (`ZHTTP port 8888 busy (old zftpd)`). A stale `/data/zftpd/instance.pid` left by a reboot or a crash no longer blocks startup either — deleting it is only useful to silence the takeover attempt.
 
 </details>
 
@@ -375,11 +376,15 @@ and its record, or use Start over to delete it and start the same link from
 zero. Removing a completed record leaves the completed file untouched.
 
 On PS5, `/data/zftpd/instance.pid` is a saved control identity, not a lock.
-After a reboot its PID may belong to another process: startup only refuses
-replacement for a verified zftpd payload or an instance that authenticated the
-shutdown request. Stale or malformed identities are removed after that check.
-`transfers.state` is retained for download recovery and never acts as an
-instance lock.
+After a reboot its PID may belong to another process, so startup verifies a
+candidate by thread name and by the random token stored next to the PID before
+it sends anything. A PID that is not alive, not a zftpd payload, or that fails
+the `STOP <token>` handshake is treated as stale and the identity is removed.
+Even a genuine previous payload that survives `SIGTERM` — the case that used to
+end with `zftpd: previous instance is stuck; restart console` — no longer stops
+startup: the new instance runs beside it and falls back to the next free FTP
+port instead of dead-ending. `transfers.state` is retained for download
+recovery and never acts as an instance lock.
 
 ### Artifacts
 
@@ -455,6 +460,10 @@ Custom console toasts are available via `GET /api/notify?text=Hello` (useful for
 The System view also drives the hardware: fan threshold, network-listener restart and **Blu-ray eject** (`POST /api/system/eject`, hidden on Digital Edition consoles). The eject path comes from [BD-EJ](https://github.com/seregonwar/BD-EJ).
 
 Downloads and previews send the raw file bytes. Console **SELF containers** can be requested decrypted instead, exactly like the FTP path does: enable *Settings → Downloads → Decrypt protected files* (or pass `?decrypt=1` to `/api/file/get`). The kernel pager is swapped in for that transfer only, so every other file — and every other client — keeps getting the on-disk bytes untouched.
+
+Some containers cannot be decrypted by the kernel pager (no loadable segments, unsupported layout). These used to be sent as the encrypted container with no hint at all; now the request stops with `422` and a JSON body naming the reason, and `GET /api/file/decrypt_check?path=…` reports `{"self":…,"decryptable":…,"reason":…}` so the browser can warn before the download starts. Disabling the option still gives you the untouched container.
+
+Right-click an item (or use the selection bar) and choose **Permissions…** to read and set its Unix `rwx` bits — the same operation as `SITE CHMOD`, now available without an FTP client (`POST /api/chmod?path=…&mode=755`). The dialog shows the mode the filesystem actually kept, because FAT/exFAT mounts accept `chmod()` and ignore it.
 
 Selecting many items (folders included) offers **Download as ZIP**: the archive is built *while* it streams (`/api/archive/zip`), so nothing is written to the console and even multi-gigabyte selections need no free space.
 

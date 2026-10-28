@@ -78,8 +78,9 @@ ssize_t vfs_read(vfs_node_t *node, void *buffer, size_t length);
  * The node then streams the DECRYPTED ELF payload (MAP_SELF) instead of the
  * raw container bytes; vfs_read()/vfs_close() handle it like any other node.
  *
- * @return 1 when the file is a SELF and the node was set up, 0 when it is not
- *         a SELF, -1 on error.
+ * @return 1 when the node now streams the decrypted ELF, 0 when the file is not
+ *         a SELF container, -1 when it is one but cannot be decrypted (errno
+ *         then says why: ENOTSUP, EINVAL, EIO, ...).
  *
  * @note Only used when the caller explicitly asks for decrypted content: the
  *       default transfer path must move the on-disk bytes untouched.

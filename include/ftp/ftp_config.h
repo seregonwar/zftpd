@@ -355,6 +355,11 @@ SOFTWARE.
 #define FTP_RETR_SENDFILE_CHUNK (2U * 1024U * 1024U)
 #endif
 
+/** Buffered RETR chunk used when sendfile() is unavailable or fails. */
+#ifndef FTP_RETR_BUFFER_SIZE
+#define FTP_RETR_BUFFER_SIZE (64U * 1024U)
+#endif
+
 /**
  * TCP receive buffer size in bytes
  *

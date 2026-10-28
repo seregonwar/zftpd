@@ -149,10 +149,17 @@ void pal_socket_set_nosigpipe(socket_t fd) {
     (void)PAL_SETSOCKOPT(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
   }
 #else
-  /* Linux has no such option: install_signal_handlers() ignores SIGPIPE for
-   * the whole process instead. */
+  /* Linux has no such option: see PAL_SEND_NOSIGPIPE below. */
 #endif
 }
+
+/* Per-call MSG_NOSIGNAL, so the library never relies on the process-wide
+ * SIGPIPE disposition (the FFI library and tests install none). */
+#if defined(MSG_NOSIGNAL)
+#define PAL_SEND_NOSIGPIPE(flags) ((flags) | MSG_NOSIGNAL)
+#else
+#define PAL_SEND_NOSIGPIPE(flags) (flags)
+#endif
 
 /**
  * @brief Configure socket for optimal performance
@@ -472,7 +479,7 @@ ssize_t pal_send_all(socket_t fd, const void *buffer, size_t length,
 
   while (total < length) {
     size_t chunk = length - total;
-    ssize_t n = PAL_SEND(fd, p + total, chunk, flags);
+    ssize_t n = PAL_SEND(fd, p + total, chunk, PAL_SEND_NOSIGPIPE(flags));
     if (n > 0) {
       total += (size_t)n;
       continue;

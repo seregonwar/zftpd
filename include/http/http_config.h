@@ -76,6 +76,11 @@ SOFTWARE.
 #define HTTP_SENDFILE_EAGAIN_SLEEP_US 1000U
 #endif
 
+/* Buffered download chunk used when sendfile() fails mid-transfer. */
+#ifndef HTTP_SENDFILE_FALLBACK_SIZE
+#define HTTP_SENDFILE_FALLBACK_SIZE (64U * 1024U)
+#endif
+
 /* Thread stack size (bytes) */
 #ifndef HTTP_THREAD_STACK_SIZE
 #define HTTP_THREAD_STACK_SIZE (512U * 1024U)

@@ -217,6 +217,53 @@ static ftp_error_t upload_failure_reply(ftp_session_t *session,
 }
 
 
+/* Buffered RETR: vfs_read through the session data path, so encryption and the
+ * rate limiter still apply. Returns 1 when the whole range was sent. */
+static int retr_send_buffered(ftp_session_t *session, vfs_node_t *node,
+                              off_t offset, size_t remaining,
+                              uint64_t *bytes_sent) {
+  if ((session == NULL) || (node == NULL) || (bytes_sent == NULL)) {
+    return 0;
+  }
+
+  char *buffer = malloc(FTP_RETR_BUFFER_SIZE);
+  if (buffer == NULL) {
+    return 0;
+  }
+
+  off_t position = offset;
+  vfs_set_offset(node, (uint64_t)position);
+
+  while (remaining > 0U) {
+    size_t chunk = remaining < (size_t)FTP_RETR_BUFFER_SIZE
+                       ? remaining
+                       : (size_t)FTP_RETR_BUFFER_SIZE;
+    ssize_t got = vfs_read(node, buffer, chunk);
+    if (got < 0) {
+      if (errno == EINTR) continue;
+      break;
+    }
+    if (got == 0) break; /* the file shrank under us */
+
+    ssize_t sent = ftp_session_send_data(session, buffer, (size_t)got);
+    if (sent <= 0) break;
+
+    position += (off_t)sent;
+    *bytes_sent += (uint64_t)sent;
+    remaining -= (size_t)sent;
+    session->last_activity = time(NULL);
+
+    if ((size_t)sent < (size_t)got) {
+      /* Rewind so the unsent tail is retried at the right offset. */
+      vfs_set_offset(node, (uint64_t)position);
+    }
+  }
+
+  free(buffer);
+  return remaining == 0U;
+}
+
+
 ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
   if ((session == NULL) || (args == NULL)) {
     return FTP_ERR_INVALID_PARAM;
@@ -276,7 +323,11 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
   /* Encryption and throttling require userspace, so this RETR path cannot use them. */
   int use_sendfile = ((vfs_get_caps(&node) & VFS_CAP_SENDFILE) != 0U) &&
                      (FTP_TRANSFER_RATE_LIMIT_BPS == 0U);
-
+#if FTP_ENABLE_CRYPTO
+  if (session->crypto.active != 0U) {
+    use_sendfile = 0;
+  }
+#endif
   {
     char diag[320];
     /* Limit filename length to fit the fixed-size log buffer.
@@ -307,43 +358,41 @@ ftp_error_t cmd_RETR(ftp_session_t *session, const char *args) {
 #endif
     ftp_log_line(FTP_LOG_INFO, diag);
   }
-#if FTP_ENABLE_CRYPTO
-  if (session->crypto.active != 0U) {
-    use_sendfile = 0;
-  }
-#endif
 
-  if (use_sendfile == 0) {
-    vfs_close(&node);
-    ftp_session_close_data_connection(session);
-    session->restart_offset = 0;
-    return ftp_session_send_reply(session, FTP_REPLY_426_TRANSFER_ABORTED,
-                                  "sendfile unavailable (crypto/rate-limit active).");
-  }
-
-  /* The PAL uses zero-copy where safe and buffered I/O on console filesystems
-   * whose vnode pagers cannot support sendfile. */
-
+  /* The PAL uses zero-copy where it is safe and buffered I/O on console
+   * filesystems whose vnode pagers cannot support sendfile. */
   pal_socket_cork(session->data_fd);
 
-  while (remaining > 0U) {
-    size_t chunk = remaining > (size_t)FTP_RETR_SENDFILE_CHUNK
-                       ? (size_t)FTP_RETR_SENDFILE_CHUNK
-                       : remaining;
-    ssize_t sent = pal_sendfile_retry(
-        session->data_fd, node.fd, &offset, chunk,
-        FTP_SENDFILE_EAGAIN_RETRIES, FTP_SENDFILE_EAGAIN_SLEEP_US);
-    if (sent <= 0) break;
+  if (use_sendfile != 0) {
+    while (remaining > 0U) {
+      size_t chunk = remaining > (size_t)FTP_RETR_SENDFILE_CHUNK
+                         ? (size_t)FTP_RETR_SENDFILE_CHUNK
+                         : remaining;
+      ssize_t sent = pal_sendfile_retry(
+          session->data_fd, node.fd, &offset, chunk,
+          FTP_SENDFILE_EAGAIN_RETRIES, FTP_SENDFILE_EAGAIN_SLEEP_US);
+      if (sent <= 0) break;
 
-    remaining -= (size_t)sent;
-    bytes_sent += (uint64_t)sent;
-    session->last_activity = time(NULL);
-    atomic_fetch_add(&session->stats.bytes_sent, (uint64_t)sent);
+      remaining -= (size_t)sent;
+      bytes_sent += (uint64_t)sent;
+      session->last_activity = time(NULL);
+      atomic_fetch_add(&session->stats.bytes_sent, (uint64_t)sent);
 #if defined(POSIX_FADV_DONTNEED) && !defined(PLATFORM_PS4) && !defined(PS4)
-    off_t evict_start = offset - (off_t)sent;
-    if (node.fd >= 0 && evict_start >= 0)
-      (void)posix_fadvise(node.fd, evict_start, (off_t)sent, POSIX_FADV_DONTNEED);
+      off_t evict_start = offset - (off_t)sent;
+      if (node.fd >= 0 && evict_start >= 0)
+        (void)posix_fadvise(node.fd, evict_start, (off_t)sent, POSIX_FADV_DONTNEED);
 #endif
+    }
+
+    if (remaining > 0U) {
+      ftp_log_line(FTP_LOG_WARN,
+                   "[RETR] sendfile stopped early; continuing buffered");
+    }
+  }
+
+  if (remaining > 0U &&
+      retr_send_buffered(session, &node, offset, remaining, &bytes_sent) != 0) {
+    remaining = 0U;
   }
 
   pal_socket_uncork(session->data_fd);

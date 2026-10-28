@@ -335,6 +335,109 @@ static int parse_file_range(const char *header, uint64_t size,
   return 0;
 }
 
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+/* Human-readable reason for a failed SELF decryption (errno set by
+ * psx_vfs_try_open_self). */
+static void describe_self_failure(int error, char *out, size_t size)
+{
+  const char *text = "SELF decryption failed: unsupported container "
+                     "(see the zftpd log for details)";
+  if (error == ENOTSUP
+#if defined(EOPNOTSUPP) && (EOPNOTSUPP != ENOTSUP)
+      || error == EOPNOTSUPP
+#endif
+  ) {
+    text = "SELF container has no loadable segments to decrypt";
+  } else if (error == EINVAL) {
+    text = "SELF container layout is not supported by this zftpd build";
+  } else if (error == EIO) {
+    text = "SELF container could not be read completely";
+  } else if (error == EACCES) {
+    text = "SELF container is not readable";
+  } else if (error == ENOENT) {
+    text = "File not found";
+  }
+  (void)snprintf(out, size, "%s", text);
+}
+#endif /* PLATFORM_PS4 || PLATFORM_PS5 */
+
+/* GET /api/file/decrypt_check?path=<path> — would ?decrypt=1 yield the ELF? */
+static http_response_t *api_decrypt_check(const http_request_t *request) {
+  const char *query = strchr(request->uri, '?');
+  char path[PAL_PATH_MAX] = "";
+
+  if (query != NULL) {
+    (void)http_api_parse_path_param(query, path, sizeof(path));
+  }
+  if (path[0] == '\0') {
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST,
+                               "Missing path parameter");
+  }
+
+  char safe[FTP_PATH_MAX];
+  if (!http_api_validate_path(path, safe, sizeof(safe))) {
+    return http_api_error_json(HTTP_STATUS_403_FORBIDDEN,
+                               "Path traversal attempt detected");
+  }
+
+  struct stat st;
+  if (stat(safe, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0) {
+    return http_api_error_json(HTTP_STATUS_404_NOT_FOUND, "File not found");
+  }
+
+  int is_self = 0;
+  int decryptable = 0;
+  char reason[192] = "Not a SELF container: the original file is downloaded "
+                     "unchanged";
+
+#if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
+  vfs_node_t node;
+  memset(&node, 0, sizeof(node));
+  node.fd = -1;
+  node.psx.self_fd = -1;
+
+  int rc = psx_vfs_try_open_self(&node, safe);
+  if (rc == 1) {
+    is_self = 1;
+    decryptable = 1;
+    reason[0] = '\0';
+    vfs_close(&node);
+  } else if (rc < 0) {
+    int saved_errno = errno;
+    is_self = 1;
+    describe_self_failure(saved_errno, reason, sizeof(reason));
+  }
+#else
+  (void)snprintf(reason, sizeof(reason),
+                 "SELF decryption is only available on PS4/PS5");
+#endif
+
+  char body[512];
+  int length = snprintf(body, sizeof(body),
+                        "{\"ok\":true,\"self\":%s,\"decryptable\":%s,"
+                        "\"size\":%llu,\"reason\":\"%s\"}",
+                        (is_self != 0) ? "true" : "false",
+                        (decryptable != 0) ? "true" : "false",
+                        (unsigned long long)st.st_size, reason);
+  if ((length <= 0) || ((size_t)length >= sizeof(body))) {
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR,
+                               "Response too large");
+  }
+
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  if (resp == NULL) {
+    return NULL;
+  }
+  http_response_add_header(resp, "Content-Type", "application/json");
+  http_response_add_header(resp, "Access-Control-Allow-Origin", "*");
+  http_response_add_header(resp, "Cache-Control", "no-store");
+  if (http_response_set_body(resp, body, (size_t)length) != 0) {
+    http_response_destroy(resp);
+    return NULL;
+  }
+  return resp;
+}
+
 static http_response_t *api_download(const http_request_t *request) {
   const char *query = strchr(request->uri, '?');
   char path[PAL_PATH_MAX] = "";
@@ -366,7 +469,8 @@ static http_response_t *api_download(const http_request_t *request) {
                                  "Out of memory");
     }
 
-    if (psx_vfs_try_open_self(&self->node, safe) == 1) {
+    int self_rc = psx_vfs_try_open_self(&self->node, safe);
+    if (self_rc == 1) {
       const char *self_name = strrchr(path, '/');
       self_name = (self_name != NULL) ? self_name + 1 : path;
 
@@ -404,7 +508,14 @@ static http_response_t *api_download(const http_request_t *request) {
       return dec;
     }
 
-    /* Not a SELF (parse failed) or unreadable: fall through to raw bytes. */
+    if (self_rc < 0) {
+      int saved_errno = errno;
+      char reason[192];
+      describe_self_failure(saved_errno, reason, sizeof(reason));
+      free(self);
+      return http_api_error_json(HTTP_STATUS_422_UNPROCESSABLE_CONTENT, reason);
+    }
+
     free(self);
   }
 #endif
@@ -712,6 +823,119 @@ static http_response_t *api_delete(const http_request_t *request) {
   http_response_add_header(resp, "Access-Control-Allow-Origin", "*");
   const char *body = "{\"ok\":true}";
   http_response_set_body(resp, body, strlen(body));
+  return resp;
+}
+
+
+/* Octal permission mask ("755", "0755"). Anything above 0777 is refused:
+ * setuid/setgid/sticky bits do not belong in a file browser. */
+static int parse_permission_mode(const char *text, uint32_t *out) {
+  if ((text == NULL) || (out == NULL)) {
+    return 0;
+  }
+  size_t length = strlen(text);
+  if ((length < 3U) || (length > 4U)) {
+    return 0;
+  }
+  uint32_t value = 0U;
+  for (size_t i = 0U; i < length; i++) {
+    if ((text[i] < '0') || (text[i] > '7')) {
+      return 0;
+    }
+    value = (value * 8U) + (uint32_t)(text[i] - '0');
+  }
+  if (value > 0777U) {
+    return 0;
+  }
+  *out = value;
+  return 1;
+}
+
+/* POST /api/chmod?path=<path>&mode=<octal> — SITE CHMOD for the web UI. The
+ * reply carries the mode read back, since FAT/exFAT keep their own bits. */
+static http_response_t *api_chmod(const http_request_t *request) {
+  if (request->method != HTTP_METHOD_POST) {
+    return http_api_error_json(HTTP_STATUS_405_METHOD_NOT_ALLOWED,
+                               "Use POST for this endpoint");
+  }
+
+  const char *query = strchr(request->uri, '?');
+  if (query == NULL) {
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST,
+                               "Missing query string");
+  }
+
+  char path[PAL_PATH_MAX] = "";
+  char mode_text[8] = "";
+  if ((http_api_parse_path_param(query, path, sizeof(path)) != 0) ||
+      (path[0] == '\0')) {
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST,
+                               "Missing path parameter");
+  }
+  if (http_api_parse_query_param(query, "mode", mode_text, sizeof(mode_text)) !=
+      0) {
+    return http_api_error_json(HTTP_STATUS_400_BAD_REQUEST,
+                               "Missing mode parameter");
+  }
+
+  uint32_t requested = 0U;
+  if (parse_permission_mode(mode_text, &requested) == 0) {
+    return http_api_error_json(
+        HTTP_STATUS_400_BAD_REQUEST,
+        "Invalid mode: use octal 000-777 (for example 755)");
+  }
+
+  char safe[FTP_PATH_MAX];
+  if (!http_api_validate_entry_path(path, safe, sizeof(safe))) {
+    return http_api_error_json(HTTP_STATUS_403_FORBIDDEN, "Forbidden path");
+  }
+
+  struct stat before;
+  if (lstat(safe, &before) != 0) {
+    return http_api_error_json(HTTP_STATUS_404_NOT_FOUND, "Path not found");
+  }
+
+  ftp_error_t rc = pal_file_chmod(safe, (mode_t)requested);
+  if (rc == FTP_ERR_NOT_FOUND) {
+    return http_api_error_json(HTTP_STATUS_404_NOT_FOUND, "Path not found");
+  }
+  if (rc != FTP_OK) {
+    return http_api_error_json(
+        HTTP_STATUS_500_INTERNAL_ERROR,
+        "chmod failed: this filesystem does not support permissions");
+  }
+
+  uint32_t effective = 0U;
+  int supported = 0;
+  struct stat after;
+  if (lstat(safe, &after) == 0) {
+    effective = (uint32_t)(after.st_mode & 0777U);
+    supported = (effective == requested);
+  }
+
+  http_response_t *resp = http_response_create(HTTP_STATUS_200_OK);
+  if (resp == NULL) {
+    return NULL;
+  }
+  http_response_add_header(resp, "Content-Type", "application/json");
+  http_response_add_header(resp, "Access-Control-Allow-Origin", "*");
+  http_response_add_header(resp, "Cache-Control", "no-store");
+
+  char body[PAL_PATH_MAX + 128];
+  int len = snprintf(body, sizeof(body),
+                     "{\"ok\":true,\"requested\":\"%03o\",\"mode\":\"%03o\","
+                     "\"supported\":%s}",
+                     (unsigned)requested, (unsigned)effective,
+                     (supported != 0) ? "true" : "false");
+  if ((len <= 0) || ((size_t)len >= sizeof(body))) {
+    http_response_destroy(resp);
+    return http_api_error_json(HTTP_STATUS_500_INTERNAL_ERROR,
+                               "Response too large");
+  }
+  if (http_response_set_body(resp, body, (size_t)len) != 0) {
+    http_response_destroy(resp);
+    return NULL;
+  }
   return resp;
 }
 
@@ -1081,6 +1305,7 @@ http_response_t *http_api_files_handle(const http_request_t *request) {
   if (request == NULL) return NULL;
   if (http_api_route_is(request->uri, "/api/list")) return api_list(request);
   if (http_api_route_is(request->uri, "/api/dirsize")) return api_dirsize(request);
+  if (http_api_route_is(request->uri, "/api/file/decrypt_check")) return api_decrypt_check(request);
   if (http_api_route_is(request->uri, "/api/file/get") || http_api_route_is(request->uri, "/api/download"))
     return api_download(request);
 #if ENABLE_WEB_UPLOAD
@@ -1088,6 +1313,7 @@ http_response_t *http_api_files_handle(const http_request_t *request) {
   if (http_api_route_is(request->uri, "/api/mkdir")) return api_mkdir(request);
   if (http_api_route_is(request->uri, "/api/delete")) return api_delete(request);
   if (http_api_route_is(request->uri, "/api/rename")) return api_rename(request);
+  if (http_api_route_is(request->uri, "/api/chmod")) return api_chmod(request);
   if (http_api_route_is(request->uri, "/api/copy_progress")) return api_copy_progress(request);
   if (http_api_route_is(request->uri, "/api/copy_cancel")) return api_copy_cancel(request);
   if (http_api_route_is(request->uri, "/api/copy_pause")) return api_copy_pause(request);

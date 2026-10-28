@@ -179,7 +179,8 @@ static int test_directory_stream_is_pinned(void) {
   CHECK(snprintf(req.uri, sizeof(req.uri), "/api/list?path=%s", alias) > 0);
   http_response_t *resp = http_api_handle(&req);
   CHECK(resp != NULL && resp->stream_dir != NULL);
-  char inside_real[512];
+  /* realpath() needs a PATH_MAX buffer; a smaller one aborts under fortify. */
+  char inside_real[PAL_PATH_MAX];
   CHECK(realpath(inside, inside_real) != NULL);
   CHECK(strcmp(resp->stream_path, inside_real) == 0);
   CHECK(unlink(alias) == 0 && symlink(outside, alias) == 0);
@@ -188,7 +189,8 @@ static int test_directory_stream_is_pinned(void) {
   CHECK(stream_to_pair(resp, out, sizeof(out)) == 0);
   CHECK(strstr(out, "\\\"name\\\":\\\"same.txt\\\"") == NULL);
   CHECK(strstr(out, "\"name\":\"same.txt\"") != NULL);
-  CHECK(strstr(out, "\"size\":3}") != NULL);
+  CHECK(strstr(out, "\"size\":3,") != NULL);
+  CHECK(strstr(out, "\"mode\":") != NULL);
   CHECK(strstr(out, "\"size\":12}") == NULL);
   CHECK(strstr(out, "q\\\"uote.txt") != NULL);
   http_response_destroy(resp);

@@ -1,11 +1,17 @@
 #ifndef ZFTPD_INSTANCE_CONTROL_H
 #define ZFTPD_INSTANCE_CONTROL_H
 
-/* Replace the previous console payload: ask it to shut down cooperatively,
- * verify that it released the console, and only then let this instance start.
- * Returns -1 when a verified previous instance is still alive; the caller must
- * not bind fallback service ports in that case. */
-int instance_control_replace_previous(void);
+/* Outcome of instance_control_replace_previous(). Only OK guarantees that the
+ * previous payload released the default ports; either way the caller starts. */
+typedef enum {
+  INSTANCE_REPLACE_OK = 0,
+  /* A zftpd payload survived the cooperative stop and SIGTERM. */
+  INSTANCE_REPLACE_CONFLICT = 1
+} instance_replace_result_t;
+
+/* Ask the previous payload to shut down and report whether it is gone.
+ * Never fails: a survivor is a conflict, not an error. */
+instance_replace_result_t instance_control_replace_previous(void);
 
 /* Control listener and identity file for this payload. */
 int instance_control_start(void);

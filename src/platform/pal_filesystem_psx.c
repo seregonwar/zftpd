@@ -206,15 +206,26 @@ static int read_exact(int fd, void *buf, size_t size, off_t off)
     return 0;
 }
 
-static int self_parse_headers(int fd, self_head_t *head, uint64_t *elf_off, Elf64_Ehdr *ehdr)
+/* Parses the SELF container header. Returns 0 when parsed, 1 when the file is
+ * not a SELF at all, -1 on error (errno set). *is_self is only set when the
+ * magic matched, so callers can tell a plain file from a SELF they cannot use. */
+static int self_parse_headers(int fd, self_head_t *head, uint64_t *elf_off,
+                              Elf64_Ehdr *ehdr, int *is_self)
 {
+    if (is_self != NULL) {
+        *is_self = 0;
+    }
+
     if (read_exact(fd, head, sizeof(*head), 0) != 0) {
         return -1;
     }
 
     if ((head->magic != SELF_PS4_MAGIC) && (head->magic != SELF_PS5_MAGIC)) {
-        errno = EINVAL;
-        return -1;
+        return 1;
+    }
+
+    if (is_self != NULL) {
+        *is_self = 1;
     }
 
     uint64_t off = (uint64_t)sizeof(*head) + (uint64_t)head->num_entries * (uint64_t)sizeof(self_entry_t);
@@ -233,6 +244,25 @@ static int self_parse_headers(int fd, self_head_t *head, uint64_t *elf_off, Elf6
     }
 
     return 0;
+}
+
+/* One log line per failed attempt: otherwise the user only sees that the file
+ * came out undecrypted, with nothing to report. */
+static void self_log_failure(const char *path, const self_head_t *head,
+                             int is_self, uint64_t elf_size, int error)
+{
+    const char *name = path != NULL ? strrchr(path, '/') : NULL;
+    name = (name != NULL) ? name + 1 : path;
+    char msg[320];
+    (void)snprintf(msg, sizeof(msg),
+                   "[self] cannot decrypt %.120s: self=%d magic=0x%08x "
+                   "entries=%u size=%llu elf_size=%llu errno=%d",
+                   (name != NULL) ? name : "?", is_self,
+                   (head != NULL) ? (unsigned)head->magic : 0U,
+                   (head != NULL) ? (unsigned)head->num_entries : 0U,
+                   (head != NULL) ? (unsigned long long)head->file_size : 0ULL,
+                   (unsigned long long)elf_size, error);
+    ftp_log_line(FTP_LOG_WARN, msg);
 }
 
 static int self_find_entry(int fd, uint16_t num_entries, uint16_t segment_index, uint64_t entry_table_off,
@@ -437,15 +467,32 @@ int psx_vfs_try_open_self(vfs_node_t *node, const char *path)
     self_head_t head;
     uint64_t elf_off = 0U;
     Elf64_Ehdr ehdr;
+    int is_self = 0;
 
-    if (self_parse_headers(fd, &head, &elf_off, &ehdr) != 0) {
+    int parsed = self_parse_headers(fd, &head, &elf_off, &ehdr, &is_self);
+    if (parsed == 1) {
         pal_file_close(fd);
         return 0;
+    }
+    if (parsed != 0) {
+        int saved_errno = errno;
+        if (is_self == 0) {
+            /* Unreadable magic: nothing says this is a SELF, so send it raw. */
+            pal_file_close(fd);
+            return 0;
+        }
+        self_log_failure(path, &head, is_self, 0U, saved_errno);
+        pal_file_close(fd);
+        errno = saved_errno;
+        return -1;
     }
 
     uint64_t elf_size = self_compute_elf_size(fd, elf_off, &ehdr);
     if (elf_size == 0U) {
+        /* SELF with no loadable segments: the decrypted image would be empty. */
+        self_log_failure(path, &head, 1, 0U, ENOTSUP);
         pal_file_close(fd);
+        errno = ENOTSUP;
         return -1;
     }
 

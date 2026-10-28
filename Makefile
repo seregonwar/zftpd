@@ -146,9 +146,15 @@ CFLAGS += -Wshadow
 CFLAGS += -Wundef
 CFLAGS += -Wwrite-strings
 
-# Treat warnings as errors in release builds
+# Treat warnings as errors in release builds.  Host compilers newer than the
+# one used for the console toolchains warn about third-party code (miniz) and
+# unrelated translation units; make WERROR=0 keeps a local build usable without
+# touching the warning set the release artifacts are built with.
+WERROR ?= 1
 ifeq ($(BUILD_TYPE),release)
+ifeq ($(WERROR),1)
     CFLAGS += -Werror
+endif
 endif
 
 # Toolchain compatibility (Clang on macOS uses different warning set)

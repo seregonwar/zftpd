@@ -26,7 +26,10 @@ SOFTWARE.
 #include "pal_fileio.h"
 #include "pal_network.h"
 #include <errno.h>
+#include <pthread.h>
+#include <signal.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
 #include <sys/mount.h>
@@ -71,6 +74,40 @@ static int console_sendfile_safe(int file_fd) {
 }
 #endif
 
+#if defined(__linux__)
+/* sendfile() has no MSG_NOSIGNAL variant and raises SIGPIPE on a reset peer.
+ * Block it around the call and drain it before restoring the mask: embedders
+ * (FFI library, test harnesses) do not ignore SIGPIPE process-wide. */
+static ssize_t sendfile_nosigpipe(int sock_fd, int file_fd, off_t *offset,
+                                  size_t count) {
+  sigset_t pipe_set;
+  sigset_t old_set;
+  int blocked = 0;
+
+  (void)sigemptyset(&pipe_set);
+  (void)sigaddset(&pipe_set, SIGPIPE);
+  if (pthread_sigmask(SIG_BLOCK, &pipe_set, &old_set) == 0) {
+    blocked = 1;
+  }
+
+  ssize_t sent = sendfile(sock_fd, file_fd, offset, count);
+
+  if (blocked != 0) {
+    if ((sent < 0) && (errno == EPIPE)) {
+      /* Pending: unblocking would deliver it and kill the process. */
+      struct timespec zero;
+      zero.tv_sec = 0;
+      zero.tv_nsec = 0;
+      while ((sigtimedwait(&pipe_set, NULL, &zero) == -1) && (errno == EINTR)) {
+      }
+    }
+    (void)pthread_sigmask(SIG_SETMASK, &old_set, NULL);
+  }
+
+  return sent;
+}
+#endif
+
 ssize_t pal_sendfile(int sock_fd, int file_fd, off_t *offset, size_t count) {
   /* Validate parameters */
   if ((sock_fd < 0) || (file_fd < 0)) {
@@ -97,7 +134,7 @@ ssize_t pal_sendfile(int sock_fd, int file_fd, off_t *offset, size_t count) {
 #endif
 
 #if defined(__linux__)
-  return sendfile(sock_fd, file_fd, offset, count);
+  return sendfile_nosigpipe(sock_fd, file_fd, offset, count);
 
 #elif defined(__APPLE__) && defined(__MACH__)
   off_t sent = (off_t)count;
