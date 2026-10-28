@@ -32,7 +32,7 @@ the FTP protocol fixes from upstream PRs #15, #16 and #19.
   is a control identity, not a lock: the saved token authenticates the
   cooperative stop, stale/reused/malformed identities are ignored, and a payload
   that survives SIGTERM is left running instead of demanding a console reboot.
-  The new instance starts beside it on the first free FTP port in 2120–2129 and
+  The new instance starts beside it on the first free FTP port in 2120-2129 and
   the toast names the port that works; a busy HTTP port is reported instead of
   failing silently.
 - **Downloads degrade to buffered I/O** (#13) instead of aborting. When
@@ -48,15 +48,15 @@ the FTP protocol fixes from upstream PRs #15, #16 and #19.
 
 ### Fixed
 
-- #18 — *previous instance is stuck, restart console*: a stale `instance.pid`
+- #18, *previous instance is stuck, restart console*: a stale `instance.pid`
   naming a reused or vanished pid no longer blocks startup.
-- #13 — *PS5 hangs on FTP download from an exFAT image mount*: buffered fallback
+- #13, *PS5 hangs on FTP download from an exFAT image mount*: buffered fallback
   in both the FTP and the HTTP download path.
-- #17 — *Decrypt protected files does not decrypt `/decid_update.elf`*: an
+- #17, *Decrypt protected files does not decrypt `/decid_update.elf`*: an
   undecryptable SELF now answers `422` with the reason, logs a
   `[self] cannot decrypt` line and is never served as the encrypted container
   without saying so.
-- #14 — *Allow permission editing*: `rwx` bits are editable from the web UI.
+- #14, *Allow permission editing*: `rwx` bits are editable from the web UI.
 - A browser that cancels a download no longer kills the process: socket writes use
   `MSG_NOSIGNAL` and `sendfile()` blocks and drains `SIGPIPE` on Linux, so the
   guarantee also holds for the FFI library and test harnesses that install no
