@@ -29,7 +29,8 @@ Runs anywhere POSIX runs. Saturates Gigabit. Ships a console payload too.
 The C code is split into responsibility-based modules (`ftp`, `http`, `transfer`,
 `archive`, `runtime`, `platform`, and `app`) rather than a flat `src/`/`include/`
 namespace. Generated assets live under `build/`, not in the source tree. See
-[`docs/architecture.md`](docs/architecture.md) for the dependency rules and layout.
+[`docs/architecture.md`](docs/architecture.md) for the dependency rules and layout,
+and [`CHANGELOG.md`](CHANGELOG.md) for the release history.
 
 ## Overview
 
