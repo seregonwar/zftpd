@@ -90,32 +90,20 @@ int pal_file_open(const char *path, int flags, mode_t mode) {
   return fd;
 }
 
-/* FreeBSD/OrbisOS leaves an fd open after close(EINTR); Linux does not. */
+/*
+ * close() is never retried. FreeBSD/OrbisOS (kern_close) and Linux both
+ * release the descriptor slot before anything that can report EINTR, so a
+ * retry would close whatever descriptor another thread was handed in the
+ * meantime: another session's upload, a socket, a listener.
+ */
 ftp_error_t pal_file_close(int fd) {
   if (fd < 0) {
     return FTP_ERR_INVALID_PARAM;
   }
 
-#if defined(__FreeBSD__) || defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
-  {
-    unsigned retries = 0U;
-    const unsigned MAX_CLOSE_RETRIES = 8U;
-    while (close(fd) < 0) {
-      if (errno != EINTR) {
-        return FTP_ERR_FILE_WRITE;
-      }
-      if (++retries >= MAX_CLOSE_RETRIES) {
-        return FTP_ERR_FILE_WRITE;
-      }
-    }
+  if (close(fd) < 0 && errno != EINTR) {
+    return FTP_ERR_FILE_WRITE;
   }
-#else
-  if (close(fd) < 0) {
-    if (errno != EINTR) {
-      return FTP_ERR_FILE_WRITE;
-    }
-  }
-#endif
 
   return FTP_OK;
 }

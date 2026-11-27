@@ -171,9 +171,54 @@ static int start_http_thread(pthread_t *thread, event_loop_t *loop) {
 
 #if defined(PLATFORM_PS4) || defined(PLATFORM_PS5)
 #include "pal_scratch.h"
+#include <dirent.h>
 #include <stdint.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/sysctl.h>
+#include <time.h>
+
+/*
+ * PKGs uploaded through the web interface are staged in a directory the user
+ * never browses. An install that failed, a helper that disappeared or a
+ * payload restarted mid-install leaves them there, and the console reports
+ * that space as "Other" with no way to find it. Anything old enough that no
+ * installer can still be reading it is removed at startup.
+ */
+#define PKG_STAGING_DIR "/data/zftpd/pkg"
+#define PKG_STAGING_MAX_AGE_S (6 * 60 * 60)
+
+static void sweep_stale_pkg_staging(void) {
+  DIR *dir = opendir(PKG_STAGING_DIR);
+  if (dir == NULL) return;
+
+  const time_t now = time(NULL);
+  unsigned removed = 0U;
+  unsigned long long freed = 0ULL;
+  struct dirent *ent;
+  while ((ent = readdir(dir)) != NULL) {
+    if (ent->d_name[0] == '.' &&
+        (ent->d_name[1] == '\0' ||
+         (ent->d_name[1] == '.' && ent->d_name[2] == '\0')))
+      continue;
+    char path[512];
+    int n = snprintf(path, sizeof(path), "%s/%s", PKG_STAGING_DIR, ent->d_name);
+    if (n <= 0 || (size_t)n >= sizeof(path)) continue;
+    struct stat st;
+    if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+    if (now - st.st_mtime < (time_t)PKG_STAGING_MAX_AGE_S) continue;
+    if (unlink(path) == 0) {
+      removed++;
+      freed += (unsigned long long)st.st_size;
+    }
+  }
+  (void)closedir(dir);
+
+  if (removed != 0U) {
+    printf("[zftpd] Removed %u stale staged PKG(s), %llu bytes freed\n",
+           removed, freed);
+  }
+}
 #endif
 
 /*===========================================================================*
@@ -393,6 +438,8 @@ int main(void) {
   }
 
   const char *root_path = "/";
+
+  sweep_stale_pkg_staging();
 
   /* Initialize server */
   uint16_t selected_port = FTP_DEFAULT_PORT;
@@ -721,6 +768,9 @@ int main(void) {
   if (previous_busy) {
     printf("[zftpd - ps5] Previous payload is still running; "
            "starting beside it\n");
+  } else {
+    /* Only once the previous payload is gone: it may still be serving one. */
+    sweep_stale_pkg_staging();
   }
 
   /*

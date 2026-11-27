@@ -151,6 +151,15 @@ static int apply_helper_line(const char *line) {
   return 0;
 }
 
+/* Packages the web interface staged under /data/zftpd/pkg are disposable:
+ * once the installer has finished with them (or never got them) they only
+ * eat storage the console shows as "Other". User files are never touched. */
+static void discard_staged_pkg(const char *source_path) {
+  if (source_path != NULL &&
+      strncmp(source_path, "/data/zftpd/pkg/", 16U) == 0)
+    (void)unlink(source_path);
+}
+
 static void *helper_thread(void *arg) {
   char *url = (char *)arg;
   int slot = 0;
@@ -176,6 +185,7 @@ static void *helper_thread(void *arg) {
   int listen_fd = listen_loopback(HELPER_IPC_PORT);
   if (listen_fd < 0) {
     games_install_state_finish_detail(-1, "Cannot open installer helper listener");
+    discard_staged_pkg(source_path);
     free(url);
     return NULL;
   }
@@ -183,6 +193,7 @@ static void *helper_thread(void *arg) {
   int loader_fd = connect_loopback(HELPER_LOADER_PORT);
   if (loader_fd < 0) {
     games_install_state_finish_detail(-1, "Cannot reach the local ELF loader");
+    discard_staged_pkg(source_path);
     (void)close(listen_fd);
     free(url);
     return NULL;
@@ -190,6 +201,7 @@ static void *helper_thread(void *arg) {
 
   if (deliver_helper(loader_fd) != 0) {
     games_install_state_finish_detail(-1, "Could not send installer helper to ELF loader");
+    discard_staged_pkg(source_path);
     (void)close(loader_fd);
     (void)close(listen_fd);
     free(url);
@@ -216,6 +228,7 @@ static void *helper_thread(void *arg) {
   if (helper_fd < 0) {
     games_install_state_finish_detail(-1,
         "Installer helper did not connect within 25 seconds");
+    discard_staged_pkg(source_path);
     free(url);
     return NULL;
   }
@@ -234,6 +247,7 @@ static void *helper_thread(void *arg) {
                  source_path != NULL ? source_path : url, overwrite);
   if (request_len <= 0 || (size_t)request_len >= sizeof(request)) {
     games_install_state_finish_detail(-1, "Package source address is too long");
+    discard_staged_pkg(source_path);
     (void)close(helper_fd);
     free(url);
     return NULL;
@@ -241,6 +255,7 @@ static void *helper_thread(void *arg) {
   if (send(helper_fd, request, strlen(request), 0) != (ssize_t)strlen(request)) {
     games_install_state_finish_detail(-1,
         "Cannot send install request to helper");
+    discard_staged_pkg(source_path);
     (void)close(helper_fd);
     free(url);
     return NULL;
@@ -253,9 +268,10 @@ static void *helper_thread(void *arg) {
   }
   if (terminal == 0) games_install_state_finish_detail(-1,
       "Installer helper disconnected before reporting a result");
-  if (terminal == 1 && source_path != NULL &&
-      strncmp(source_path, "/data/zftpd/pkg/", 16U) == 0)
-    (void)unlink(source_path);
+  /* DONE or ERROR are final: the installer no longer needs the file. When the
+   * helper vanished without a verdict it may still be reading the package, so
+   * that case is left to the stale-staging sweep at startup. */
+  if (terminal != 0) discard_staged_pkg(source_path);
 
   (void)close(helper_fd);
   free(url);

@@ -309,8 +309,19 @@
           });
           currentUpload = upload;
           abortUpload.hidden = false;
+          var staged = api.pkgStagingDir + '/' + source.name;
+          /* The staged copy only exists for the installer: when the install
+           * never starts (replace declined, request refused) drop it, or it
+           * keeps occupying space the console reports as "Other". */
+          var discardStaged = function () { api.remove(staged).catch(function () {}); };
           work = upload.promise.then(function () {
-            return requestInstall(api.pkgStagingDir + '/' + source.name, false);
+            return requestInstall(staged, false).then(function (result) {
+              if (result === false) discardStaged();
+              return result;
+            }, function (error) {
+              discardStaged();
+              throw error;
+            });
           });
         } else if (mode === 'console') {
           if (!consolePath) return false;

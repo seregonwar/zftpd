@@ -6,6 +6,41 @@ All notable changes to zftpd. The format follows
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-11-27
+
+Storage that the console reported as *Other* and never gave back: packages
+staged by the web installer could stay on disk forever, invisible to the user.
+
+### Fixed
+
+- **Staged PKGs are removed when an install fails, not only when it succeeds.**
+  Packages uploaded from the web UI land in `/data/zftpd/pkg/`, a directory
+  nobody browses. On PS5 they were deleted only after a successful install, so
+  an installer `ERROR`, a helper that never connected, an unreachable ELF loader
+  or a refused request left the whole PKG behind. Any final outcome now discards
+  it. A helper that vanishes without a verdict leaves the file alone, since the
+  system installer may still be reading it.
+- **Declining "Already installed, replace it?" no longer leaves the upload
+  behind.** The web UI deletes the staged package whenever the install does not
+  start.
+- **Interrupted web uploads are removed.** *Stop sending*, a dropped connection
+  or a write error used to leave a truncated file at the target path; it is now
+  deleted, as an interrupted FTP `STOR` already was.
+- **Startup sweep of stale staged packages.** Files in `/data/zftpd/pkg/` older
+  than six hours are removed when the payload starts, which also gives back the
+  space lost before this release. On PS5 the sweep only runs once the previous
+  instance has actually stopped.
+- `pal_file_close()` no longer retries `close()` after `EINTR`. FreeBSD/OrbisOS
+  release the descriptor before `EINTR` can be reported, so the retry could
+  close a descriptor another session had just opened (an upload, a socket).
+
+### Notes
+
+- Deleting files over FTP was already correct: `DELE`/`RMD` unlink immediately
+  and no transfer path keeps a descriptor on a deleted file. If space still looks
+  used after an FTP delete, check `/data/zftpd/pkg/` and whether the figure
+  updates after a reboot.
+
 ## [1.7.0] - 2026-10-28
 
 Closes the four issues opened against v1.6.0 (#13, #14, #17, #18) and picks up
@@ -82,5 +117,6 @@ the FTP protocol fixes from upstream PRs #15, #16 and #19.
 - FAT/exFAT mounts accept `chmod()` and keep their own bits: `/api/chmod` reports
   the effective mode with `"supported": false`, and the web UI repeats it.
 
-[Unreleased]: https://github.com/seregonwar/zftpd/compare/v1.7.0...HEAD
+[Unreleased]: https://github.com/seregonwar/zftpd/compare/v1.7.1...HEAD
+[1.7.1]: https://github.com/seregonwar/zftpd/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/seregonwar/zftpd/compare/v1.6.0...v1.7.0

@@ -16,6 +16,9 @@ typedef struct {
   int fd;
   size_t remaining;
   uint8_t *chunk_buffer;
+  /* Target file, so an upload cut short is removed instead of left half
+   * written: a partial file keeps occupying storage the user cannot see. */
+  char path[FTP_PATH_MAX];
 } http_upload_state_t;
 
 typedef struct http_connection {

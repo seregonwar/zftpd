@@ -605,10 +605,13 @@ static http_response_t *api_games_install(const http_request_t *request) {
                    "http://127.0.0.1:%d/api/file/get?path=%s", port, encoded);
   }
 
-  /* Uploads staged by the web interface are disposable, user files are not. */
+  /* Uploads staged by the web interface are disposable, user files are not.
+   * When the installer never takes the package, nothing else will remove it,
+   * so a failed hand-off deletes it here instead of leaving it as "Other". */
+  const int staged_upload = (safe[0] != '\0' &&
+                             strncmp(safe, "/data/zftpd/pkg/", 16) == 0) ? 1 : 0;
 #if defined(PLATFORM_PS4)
-  int delete_source = (safe[0] != '\0' &&
-                       strncmp(safe, "/data/zftpd/pkg/", 16) == 0) ? 1 : 0;
+  int delete_source = staged_upload;
 #endif
 
 #if defined(PLATFORM_PS5)
@@ -618,9 +621,11 @@ static http_response_t *api_games_install(const http_request_t *request) {
                                slot, overwrite, title_id,
                                sizeof(title_id), &task_id,
                                &install_rc) != 0) {
+    if (staged_upload) (void)unlink(safe);
     return http_api_status_json_200(0, "PS5 installer helper unavailable", -1);
   }
 #else
+  if (staged_upload) (void)unlink(safe);
   return http_api_status_json_200(0, "PS5 installer helper not built", -1);
 #endif
 #else
@@ -632,10 +637,12 @@ static http_response_t *api_games_install(const http_request_t *request) {
       games_install_state_begin(task_id, title_id[0] ? title_id : "", safe);
     }
   } else {
+    if (staged_upload) (void)unlink(safe);
     return http_api_status_json_200(0, "PS4 BGFT installer unavailable", -1);
   }
 #endif
   if (install_rc < 0) {
+    if (staged_upload) (void)unlink(safe);
     char msg[96];
     (void)snprintf(msg, sizeof(msg), "Install failed: 0x%08X",
                    (unsigned)install_rc);

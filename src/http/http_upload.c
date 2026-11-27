@@ -29,7 +29,12 @@ static int upload_send_json(http_connection_t *conn, http_status_t status,
 
 void http_upload_reset(http_connection_t *conn) {
   if (conn == NULL) return;
-  if (conn->upload.fd >= 0) (void)pal_file_close(conn->upload.fd);
+  if (conn->upload.fd >= 0) {
+    (void)pal_file_close(conn->upload.fd);
+    /* Still open means the body never arrived in full (client aborted,
+     * connection dropped, write error): drop the truncated file. */
+    if (conn->upload.path[0] != '\0') (void)unlink(conn->upload.path);
+  }
   free(conn->upload.chunk_buffer);
   memset(&conn->upload, 0, sizeof(conn->upload));
   conn->upload.fd = -1;
@@ -127,6 +132,7 @@ int http_upload_start(http_connection_t *conn, const http_request_head_t *head) 
   }
 
   conn->upload.fd = fd;
+  memcpy(conn->upload.path, safe, strlen(safe) + 1U);
   conn->upload.active = 1;
   conn->upload.remaining = head->content_length;
   conn->upload.chunk_buffer = (uint8_t *)malloc(HTTP_UPLOAD_CHUNK_SIZE);
